@@ -34,21 +34,110 @@ docker-compose run client
 curl -H "Authorization: Bearer $CHAT_TOKEN" http://localhost:8080/api/products
 
 
+CHAT_TOKEN=$(curl -s -X POST 'http://localhost:8180/auth/realms/kychat/protocol/openid-connect/token' \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  -d 'client_id=kaysir-service' \
+  -d 'client_secret=wewgIfGNUq43uB4xeIHZgaC2WQaOnHau' \
+  -d 'grant_type=password' \
+  -d 'username=testadmin' \
+  -d 'password=testadmin'| jq -r '.access_token')
+
 
 ## How to Use
+# Secure API Gateway
 
-1. Clone this repository
-2. Run `go mod tidy` to download dependencies
-3. Build and run using either:
-   - `make` commands for local development
-   - `docker-compose up` for containerized deployment
+A production-grade API Gateway with enterprise-level security features, built in Go.
 
-The project is set up with:
-- Multi-stage Docker build for minimal final image size (using scratch)
-- Proper separation of server and client components
-- CLI flags for configuration
-- All necessary ignore files
-- Basic documentation
+## Features
 
-You can easily extend this starter project by adding more endpoints, configuration options, or additional services.
+### Core Security Features
 
+- **TLS & mTLS Support**: Secure communications with TLS and client certificate authentication
+- **Rate Limiting**: Prevents abuse with configurable global and per-route rate limiting
+- **JWT Authentication**: Secure API endpoints with JSON Web Token authentication
+- **IP Whitelisting**: Restrict access to specific IP addresses or networks
+- **Request Validation**: Validate request payloads against schemas
+- **CSRF Protection**: Prevent cross-site request forgery attacks
+- **Security Headers**: Automatically add security headers to responses including:
+  - X-Content-Type-Options
+  - X-Frame-Options
+  - X-XSS-Protection
+  - Strict-Transport-Security (HSTS)
+- **Request Size Limiting**: Prevent excessive request payloads
+- **Timeout Management**: Configure timeouts for routes to prevent resource exhaustion
+
+### Operational Features
+
+- **Metrics & Monitoring**: Prometheus integration for metrics collection
+- **Structured Logging**: Comprehensive logging for troubleshooting and audit
+- **Health Checks**: Built-in health check endpoint
+- **Plugin System**: Extensible architecture with plugin support
+- **Graceful Shutdown**: Proper handling of shutdowns for zero downtime deployments
+- **Circuit Breaking**: Prevent cascading failures with circuit breaker pattern
+- **Tracing**: Request tracing with unique IDs for distributed systems
+
+## Configuration
+
+The gateway is configured via a YAML file. See the sample configuration file for details.
+
+## Getting Started
+
+### Prerequisites
+
+- Go 1.18 or later
+- TLS certificates (for production use)
+
+### Installation
+
+```bash
+# Build the gateway
+go build -o secure-gateway
+
+# Run with a configuration file
+./secure-gateway -config config.yaml
+```
+
+### Docker
+
+```bash
+# Build Docker image
+docker build -t secure-gateway .
+
+# Run with a configuration file
+docker run -v $(pwd)/config.yaml:/app/config.yaml -p 8080:8080 secure-gateway
+```
+
+## Plugin Development
+
+The gateway supports plugins that implement the `GatewayPlugin` interface:
+
+```go
+type GatewayPlugin interface {
+	Name() string
+	Initialize(config map[string]interface{}) error
+	Middleware() func(http.Handler) http.Handler
+	Shutdown() error
+}
+```
+
+See the provided plugin example for details on implementing your own plugins.
+
+## Security Best Practices
+
+1. **Store Secrets Securely**: Never commit secrets to version control. Use environment variables or a secret management service.
+2. **Use Strong TLS Settings**: Configure strong cipher suites and TLS 1.2+ only.
+3. **Regular Updates**: Keep dependencies updated to fix security vulnerabilities.
+4. **Proper Logging**: Log security events but avoid logging sensitive information.
+5. **Defense in Depth**: Implement multiple layers of security.
+
+## Production Deployment Considerations
+
+- Deploy behind a load balancer for high availability
+- Use proper secret management for credentials and certificates
+- Implement proper monitoring and alerting
+- Consider using a service mesh for advanced service-to-service communication
+- Perform regular security audits
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details.

@@ -23,53 +23,9 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"golang.org/x/time/rate"
 	"gopkg.in/yaml.v3"
+	"golang.org/x/time/rate"
 )
-
-// Define Prometheus metrics
-var (
-	httpRequestsTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "http_requests_total",
-			Help: "Total number of HTTP requests",
-		},
-		[]string{"code", "method", "path"},
-	)
-
-	httpRequestDuration = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name:    "http_request_duration_seconds",
-			Help:    "HTTP request duration in seconds",
-			Buckets: prometheus.DefBuckets,
-		},
-		[]string{"code", "method", "path"},
-	)
-
-	httpResponseSize = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name:    "http_response_size_bytes",
-			Help:    "Size of HTTP responses in bytes",
-			Buckets: []float64{100, 1000, 10000, 100000, 1000000},
-		},
-		[]string{"code", "method", "path"},
-	)
-
-	activeConnections = prometheus.NewGauge(
-		prometheus.GaugeOpts{
-			Name: "http_active_connections",
-			Help: "Number of active HTTP connections",
-		},
-	)
-)
-
-func init() {
-	// Register the metrics with Prometheus
-	prometheus.MustRegister(httpRequestsTotal)
-	prometheus.MustRegister(httpRequestDuration)
-	prometheus.MustRegister(httpResponseSize)
-	prometheus.MustRegister(activeConnections)
-}
 
 // Config represents the gateway configuration
 type Config struct {
@@ -87,23 +43,21 @@ type Config struct {
 	} `yaml:"server"`
 
 	Security struct {
-		EnableMTLS              bool              `yaml:"enableMTLS"`
-		EnableCSRF              bool              `yaml:"enableCSRF"`
-		CSRFTokenExpiry         time.Duration     `yaml:"csrfTokenExpiry"`
-		RateLimitRequests       int               `yaml:"rateLimitRequests"`
-		RateLimitInterval       time.Duration     `yaml:"rateLimitInterval"`
-		EnableXSS               bool              `yaml:"enableXSS"`
-		EnableHSTS              bool              `yaml:"enableHSTS"`
-		HSTSMaxAge              int               `yaml:"hstsMaxAge"`
-		EnableSecureCookies     bool              `yaml:"enableSecureCookies"`
-		JWTSecret               string            `yaml:"jwtSecret"`
-		JWTIssuer               string            `yaml:"jwtIssuer"`
-		EnableIPWhitelisting    bool              `yaml:"enableIPWhitelisting"`
-		WhitelistedIPs          []string          `yaml:"whitelistedIPs"`
-		EnableRequestValidation bool              `yaml:"enableRequestValidation"`
-		MaxRequestBodySize      int64             `yaml:"maxRequestBodySize"`
-		EnableBasicAuth         bool              `yaml:"enableBasicAuth"`
-		BasicAuthUsers          map[string]string `yaml:"basicAuthUsers"`
+		EnableMTLS             bool          `yaml:"enableMTLS"`
+		EnableCSRF             bool          `yaml:"enableCSRF"`
+		CSRFTokenExpiry        time.Duration `yaml:"csrfTokenExpiry"`
+		RateLimitRequests      int           `yaml:"rateLimitRequests"`
+		RateLimitInterval      time.Duration `yaml:"rateLimitInterval"`
+		EnableXSS              bool          `yaml:"enableXSS"`
+		EnableHSTS             bool          `yaml:"enableHSTS"`
+		HSTSMaxAge             int           `yaml:"hstsMaxAge"`
+		EnableSecureCookies    bool          `yaml:"enableSecureCookies"`
+		JWTSecret              string        `yaml:"jwtSecret"`
+		JWTIssuer              string        `yaml:"jwtIssuer"`
+		EnableIPWhitelisting   bool          `yaml:"enableIPWhitelisting"`
+		WhitelistedIPs         []string      `yaml:"whitelistedIPs"`
+		EnableRequestValidation bool         `yaml:"enableRequestValidation"`
+		MaxRequestBodySize     int64         `yaml:"maxRequestBodySize"`
 	} `yaml:"security"`
 
 	Routes []struct {
@@ -144,118 +98,8 @@ type Gateway struct {
 	rateLimiter *RateLimiter
 	metrics     *Metrics
 	logger      *Logger
-	storage     *StorageManager
 }
 
-// Persistent Storage
-type StoragePlugin interface {
-	GatewayPlugin
-
-	// Storage methods
-	Get(key string) ([]byte, error)
-	Set(key string, value []byte, ttl time.Duration) error
-	Delete(key string) error
-	Exists(key string) (bool, error)
-	List(prefix string) ([]string, error)
-	Close() error
-
-	// Configuration specific methods
-	SaveConfig(config *Config) error
-	LoadConfig() (*Config, error)
-
-	// Basic Auth specific methods
-	SaveBasicAuth(users map[string]string) error
-	LoadBasicAuth() (map[string]string, error)
-}
-
-// Add this to your gateway.go file
-type StorageManager struct {
-	storage StoragePlugin
-	logger  *Logger
-}
-
-func NewStorageManager(logger *Logger) *StorageManager {
-	return &StorageManager{
-		logger: logger,
-	}
-}
-
-func (sm *StorageManager) SetStorage(plugin StoragePlugin) {
-	sm.storage = plugin
-}
-
-func (sm *StorageManager) Get(key string) ([]byte, error) {
-	if sm.storage == nil {
-		return nil, fmt.Errorf("no storage plugin configured")
-	}
-	return sm.storage.Get(key)
-}
-
-func (sm *StorageManager) Set(key string, value []byte, ttl time.Duration) error {
-	if sm.storage == nil {
-		return fmt.Errorf("no storage plugin configured")
-	}
-	return sm.storage.Set(key, value, ttl)
-}
-
-func (sm *StorageManager) Delete(key string) error {
-	if sm.storage == nil {
-		return fmt.Errorf("no storage plugin configured")
-	}
-	return sm.storage.Delete(key)
-}
-
-func (sm *StorageManager) Exists(key string) (bool, error) {
-	if sm.storage == nil {
-		return false, fmt.Errorf("no storage plugin configured")
-	}
-	return sm.storage.Exists(key)
-}
-
-func (sm *StorageManager) List(prefix string) ([]string, error) {
-	if sm.storage == nil {
-		return nil, fmt.Errorf("no storage plugin configured")
-	}
-	return sm.storage.List(prefix)
-}
-
-func (sm *StorageManager) Close() error {
-	if sm.storage == nil {
-		return nil
-	}
-	return sm.storage.Close()
-}
-
-// Add these methods to StorageManager
-func (sm *StorageManager) SaveConfig(config *Config) error {
-	if sm.storage == nil {
-		return fmt.Errorf("no storage plugin configured")
-	}
-	return sm.storage.SaveConfig(config)
-}
-
-func (sm *StorageManager) LoadConfig() (*Config, error) {
-	if sm.storage == nil {
-		return nil, fmt.Errorf("no storage plugin configured")
-	}
-	return sm.storage.LoadConfig()
-}
-
-func (sm *StorageManager) SaveBasicAuth(users map[string]string) error {
-	if sm.storage == nil {
-		return fmt.Errorf("no storage plugin configured")
-	}
-	return sm.storage.SaveBasicAuth(users)
-}
-
-func (sm *StorageManager) LoadBasicAuth() (map[string]string, error) {
-	if sm.storage == nil {
-		return nil, fmt.Errorf("no storage plugin configured")
-	}
-	return sm.storage.LoadBasicAuth()
-}
-
-// / ---------------
 // Logger provides structured logging for the gateway
 type Logger struct {
 	enableLogging bool
@@ -341,9 +185,9 @@ func NewMetrics() *Metrics {
 
 // RateLimiter manages rate limiting for the gateway
 type RateLimiter struct {
-	limiters       map[string]*rate.Limiter
-	mu             sync.RWMutex
-	perRouteLimit  map[string]*rate.Limiter
+	limiters   map[string]*rate.Limiter
+	mu         sync.RWMutex
+	perRouteLimit map[string]*rate.Limiter
 	globalRequests int
 	globalInterval time.Duration
 }
@@ -374,37 +218,6 @@ func (rl *RateLimiter) GetLimiter(ip string) *rate.Limiter {
 	return limiter
 }
 
-// basicAuthMiddleware implements HTTP Basic Authentication
-func (g *Gateway) basicAuthMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Skip if basic auth is disabled
-		if !g.config.Security.EnableBasicAuth {
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		// Get the Basic Auth credentials
-		username, password, ok := r.BasicAuth()
-		if !ok {
-			w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
-			w.WriteHeader(http.StatusUnauthorized)
-			w.Write([]byte(`{"error":"Unauthorized","message":"Basic authentication required"}`))
-			return
-		}
-
-		// Check if credentials are valid
-		expectedPassword, userExists := g.config.Security.BasicAuthUsers[username]
-		if !userExists || expectedPassword != password {
-			w.WriteHeader(http.StatusUnauthorized)
-			w.Write([]byte(`{"error":"Unauthorized","message":"Invalid username or password"}`))
-			return
-		}
-
-		// If credentials are valid, continue to the next handler
-		next.ServeHTTP(w, r)
-	})
-}
-
 // RegisterRouteLimit sets a specific rate limit for a route
 func (rl *RateLimiter) RegisterRouteLimit(route string, limit int) {
 	rl.mu.Lock()
@@ -415,7 +228,7 @@ func (rl *RateLimiter) RegisterRouteLimit(route string, limit int) {
 // GetRouteLimiter returns a rate limiter for a specific route and IP
 func (rl *RateLimiter) GetRouteLimiter(route string, ip string) *rate.Limiter {
 	routeKey := route + ":" + ip
-
+	
 	rl.mu.RLock()
 	limiter, exists := rl.limiters[routeKey]
 	routeLimiter, routeExists := rl.perRouteLimit[route]
@@ -431,7 +244,7 @@ func (rl *RateLimiter) GetRouteLimiter(route string, ip string) *rate.Limiter {
 			// Fall back to the global rate limit
 			limiter = rate.NewLimiter(rate.Every(rl.globalInterval/time.Duration(rl.globalRequests)), rl.globalRequests)
 		}
-
+		
 		rl.mu.Lock()
 		rl.limiters[routeKey] = limiter
 		rl.mu.Unlock()
@@ -442,14 +255,14 @@ func (rl *RateLimiter) GetRouteLimiter(route string, ip string) *rate.Limiter {
 
 // IPWhitelist manages whitelisted IP addresses
 type IPWhitelist struct {
-	enabled        bool
+	enabled     bool
 	whitelistedIPs []string
 }
 
 // NewIPWhitelist creates a new IP whitelist
 func NewIPWhitelist(enabled bool, ips []string) *IPWhitelist {
 	return &IPWhitelist{
-		enabled:        enabled,
+		enabled:     enabled,
 		whitelistedIPs: ips,
 	}
 }
@@ -471,82 +284,6 @@ func (ip *IPWhitelist) IsAllowed(addr string) bool {
 
 // NewGateway creates a new API gateway instance
 func NewGateway(configPath string) (*Gateway, error) {
-	logger := NewLogger(false) // Start with logging disabled until we load config
-
-	// First try to load config from storage
-	storage := NewStorageManager(logger)
-	storedConfig, err := storage.LoadConfig()
-	if err != nil {
-		logger.Error("Failed to load config from storage: %v", err)
-	}
-
-	var config *Config
-	if storedConfig != nil {
-		config = storedConfig
-		logger.Info("Loaded configuration from storage")
-	} else {
-		// Fall back to file-based config
-		config, err = loadConfig(configPath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load config: %w", err)
-		}
-		logger.Info("Loaded configuration from file")
-	}
-
-	// Apply the loaded config to the logger
-	logger.enableLogging = config.Server.EnableLogging
-
-	// Load basic auth from storage if available
-	if config.Security.EnableBasicAuth {
-		storedUsers, err := storage.LoadBasicAuth()
-		if err != nil {
-			logger.Error("Failed to load basic auth from storage: %v", err)
-		}
-		if storedUsers != nil {
-			config.Security.BasicAuthUsers = storedUsers
-			logger.Info("Loaded basic auth users from storage")
-		}
-	}
-
-	metrics := NewMetrics()
-	rateLimiter := NewRateLimiter(
-		config.Security.RateLimitRequests,
-		config.Security.RateLimitInterval*time.Second,
-	)
-
-	gateway := &Gateway{
-		config:      config,
-		router:      mux.NewRouter(),
-		plugins:     make([]GatewayPlugin, 0),
-		middlewares: make([]func(http.Handler) http.Handler, 0),
-		rateLimiter: rateLimiter,
-		metrics:     metrics,
-		logger:      logger,
-		storage:     storage,
-	}
-
-	// Save the initial config to storage
-	if err := gateway.storage.SaveConfig(config); err != nil {
-		logger.Error("Failed to save initial config to storage: %v", err)
-	}
-
-	// Save basic auth if enabled
-	if config.Security.EnableBasicAuth {
-		if err := gateway.storage.SaveBasicAuth(config.Security.BasicAuthUsers); err != nil {
-			logger.Error("Failed to save basic auth to storage: %v", err)
-		}
-	}
-
-	gateway.setupRoutes()
-
-	if err := gateway.loadPlugins(); err != nil {
-		return nil, fmt.Errorf("failed to load plugins: %w", err)
-	}
-
-	return gateway, nil
-}
-
-/* func NewGateway(configPath string) (*Gateway, error) {
 	config, err := loadConfig(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load config: %w", err)
@@ -555,8 +292,8 @@ func NewGateway(configPath string) (*Gateway, error) {
 	logger := NewLogger(config.Server.EnableLogging)
 	metrics := NewMetrics()
 	rateLimiter := NewRateLimiter(
-		config.Security.RateLimitRequests,
-		config.Security.RateLimitInterval*time.Second,
+		config.Security.RateLimitRequests, 
+		config.Security.RateLimitInterval * time.Second,
 	)
 
 	// Set up custom rate limits for routes if configured
@@ -574,7 +311,6 @@ func NewGateway(configPath string) (*Gateway, error) {
 		rateLimiter: rateLimiter,
 		metrics:     metrics,
 		logger:      logger,
-		storage:     NewStorageManager(logger),
 	}
 
 	// Set up the router
@@ -586,7 +322,7 @@ func NewGateway(configPath string) (*Gateway, error) {
 	}
 
 	return gateway, nil
-} */
+}
 
 // loadConfig loads the gateway configuration from a YAML file
 func loadConfig(path string) (*Config, error) {
@@ -614,20 +350,20 @@ func (g *Gateway) setupRoutes() {
 	// Configure routes from the config
 	for _, route := range g.config.Routes {
 		handler := g.proxyHandler(route)
-
+		
 		// Apply route-specific middleware
 		if route.RequireAuth {
-			handler = http.HandlerFunc(g.authMiddleware(handler).ServeHTTP)
+			handler = g.authMiddleware(handler)
 		}
-
+		
 		// Apply route-specific timeout if configured
 		if route.Timeout != nil {
-			handler = http.HandlerFunc(g.timeoutMiddleware(*route.Timeout)(handler).ServeHTTP)
+			handler = g.timeoutMiddleware(*route.Timeout)(handler)
 		}
-
+		
 		// Apply schema validation if configured
 		if route.ValidateSchema != "" {
-			handler = http.HandlerFunc(g.validateRequestMiddleware(route.ValidateSchema)(handler).ServeHTTP)
+			handler = g.validateRequestMiddleware(route.ValidateSchema)(handler)
 		}
 
 		g.router.HandleFunc(route.Path, handler).
@@ -655,7 +391,7 @@ func (g *Gateway) proxyHandler(route struct {
 }) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-
+		
 		// Parse the destination URL
 		target, err := url.Parse(route.Destination)
 		if err != nil {
@@ -667,12 +403,12 @@ func (g *Gateway) proxyHandler(route struct {
 
 		// Create the reverse proxy
 		proxy := httputil.NewSingleHostReverseProxy(target)
-
+		
 		// Customize the director function to modify the request
 		originalDirector := proxy.Director
 		proxy.Director = func(req *http.Request) {
 			originalDirector(req)
-
+			
 			// Strip the path prefix if configured
 			if route.StripPath {
 				req.URL.Path = strings.TrimPrefix(req.URL.Path, route.Path)
@@ -680,16 +416,16 @@ func (g *Gateway) proxyHandler(route struct {
 					req.URL.Path = "/"
 				}
 			}
-
+			
 			// Add custom headers
 			for key, value := range route.Headers {
 				req.Header.Set(key, value)
 			}
-
+			
 			// Add X-Forwarded headers
 			req.Header.Set("X-Forwarded-Host", req.Host)
 			req.Header.Set("X-Forwarded-For", getClientIP(req))
-
+			
 			// Add X-Request-ID for tracking
 			if reqID := r.Header.Get("X-Request-ID"); reqID == "" {
 				req.Header.Set("X-Request-ID", generateRequestID())
@@ -697,26 +433,26 @@ func (g *Gateway) proxyHandler(route struct {
 				req.Header.Set("X-Request-ID", reqID)
 			}
 		}
-
+		
 		// Customize the error handler
 		proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 			g.logger.Error("Proxy error: %v", err)
 			w.WriteHeader(http.StatusBadGateway)
 			w.Write([]byte(`{"error":"Bad Gateway","message":"Unable to reach the upstream service"}`))
 		}
-
+		
 		// Customize the response writer to log and collect metrics
 		lrw := newLoggingResponseWriter(w)
-
+		
 		// Execute the proxy
 		proxy.ServeHTTP(lrw, r)
-
+		
 		// Record metrics
 		duration := time.Since(start).Seconds()
 		g.metrics.requestDuration.WithLabelValues(r.Method, route.Path).Observe(duration)
 		g.metrics.requestCount.WithLabelValues(r.Method, route.Path, fmt.Sprintf("%d", lrw.statusCode)).Inc()
 		g.metrics.responseSize.WithLabelValues(r.Method, route.Path).Observe(float64(lrw.bytesWritten))
-
+		
 		// Log the request
 		g.logger.Info("%s %s %d %s %dB", r.Method, r.URL.Path, lrw.statusCode, time.Since(start), lrw.bytesWritten)
 	}
@@ -736,13 +472,13 @@ func getClientIP(r *http.Request) string {
 		ips := strings.Split(forwardedFor, ",")
 		return strings.TrimSpace(ips[0])
 	}
-
+	
 	// Check for X-Real-IP header
 	realIP := r.Header.Get("X-Real-IP")
 	if realIP != "" {
 		return realIP
 	}
-
+	
 	// Fall back to RemoteAddr
 	return strings.Split(r.RemoteAddr, ":")[0]
 }
@@ -767,19 +503,6 @@ func (g *Gateway) loadPlugins() error {
 		symPlugin, err := plug.Lookup("Plugin")
 		if err != nil {
 			return fmt.Errorf("failed to lookup 'Plugin' symbol in %s: %w", pluginConfig.Name, err)
-		}
-
-		// Check if it's a storage plugin
-		if storagePlugin, ok := symPlugin.(StoragePlugin); ok {
-			// Initialize the storage plugin
-			if err := storagePlugin.Initialize(pluginConfig.Config); err != nil {
-				return fmt.Errorf("failed to initialize storage plugin %s: %w", pluginConfig.Name, err)
-			}
-
-			// Set it as the active storage
-			g.storage.SetStorage(storagePlugin)
-			g.logger.Info("Storage plugin %s loaded and activated", pluginConfig.Name)
-			continue
 		}
 
 		// Cast to the GatewayPlugin interface
@@ -814,15 +537,14 @@ func (g *Gateway) loadPlugins() error {
 func (g *Gateway) Serve() error {
 	// Apply core security middlewares first
 	var handler http.Handler = g.router
-
+	
 	// Apply security middlewares
-	handler = g.basicAuthMiddleware(handler)
 	handler = g.rateLimitMiddleware(handler)
 	handler = g.ipWhitelistMiddleware(handler)
 	handler = g.securityHeadersMiddleware(handler)
 	handler = g.csrfMiddleware(handler)
 	handler = g.requestSizeMiddleware(handler)
-
+	
 	// Apply plugin middlewares in reverse order (last added, first executed)
 	for i := len(g.middlewares) - 1; i >= 0; i-- {
 		handler = g.middlewares[i](handler)
@@ -861,23 +583,23 @@ func (g *Gateway) Serve() error {
 			},
 			PreferServerCipherSuites: true,
 		}
-
+		
 		// Configure mTLS if enabled and client CA cert is provided
 		if g.config.Security.EnableMTLS && g.config.Server.ClientCACertFile != "" {
 			caCert, err := os.ReadFile(g.config.Server.ClientCACertFile)
 			if err != nil {
 				return fmt.Errorf("failed to read client CA cert file: %w", err)
 			}
-
+			
 			caCertPool := x509.NewCertPool()
 			if !caCertPool.AppendCertsFromPEM(caCert) {
 				return fmt.Errorf("failed to parse client CA cert file")
 			}
-
+			
 			tlsConfig.ClientCAs = caCertPool
 			tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
 		}
-
+		
 		server.TLSConfig = tlsConfig
 	}
 
@@ -887,7 +609,7 @@ func (g *Gateway) Serve() error {
 			Addr:    fmt.Sprintf(":%d", g.config.Server.MetricsPort),
 			Handler: promhttp.Handler(),
 		}
-
+		
 		go func() {
 			g.logger.Info("Starting metrics server on :%d", g.config.Server.MetricsPort)
 			if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -908,7 +630,7 @@ func (g *Gateway) Serve() error {
 		} else {
 			err = server.ListenAndServe()
 		}
-
+		
 		if err != nil && err != http.ErrServerClosed {
 			g.logger.Error("Failed to start server: %v", err)
 			os.Exit(1)
@@ -933,47 +655,6 @@ func (g *Gateway) Serve() error {
 	return nil
 }
 
-// metricsMiddleware collects metrics for requests
-func (g *Gateway) metricsMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Increment active connections
-		activeConnections.Inc()
-		defer activeConnections.Dec()
-
-		// Create custom response writer to capture status code
-		rw := newLoggingResponseWriter(w)
-
-		// Start timer for request duration
-		start := time.Now()
-
-		// Call next handler
-		next.ServeHTTP(rw, r)
-
-		// Calculate duration
-		duration := time.Since(start).Seconds()
-
-		// Normalize the request path to avoid high cardinality in metrics
-		route := mux.CurrentRoute(r)
-		path := "unknown"
-		if route != nil {
-			// Try to get the route name, fall back to the template
-			path = route.GetName()
-			if path == "" {
-				pathTemplate, err := route.GetPathTemplate()
-				if err == nil {
-					path = pathTemplate
-				}
-			}
-		}
-
-		// Record metrics
-		statusCode := fmt.Sprintf("%d", rw.statusCode)
-		httpRequestsTotal.WithLabelValues(statusCode, r.Method, path).Inc()
-		httpRequestDuration.WithLabelValues(statusCode, r.Method, path).Observe(duration)
-		httpResponseSize.WithLabelValues(statusCode, r.Method, path).Observe(float64(rw.bytesWritten))
-	})
-}
-
 // shutdownPlugins gracefully shuts down all plugins
 func (g *Gateway) shutdownPlugins() {
 	g.pluginsMu.RLock()
@@ -988,191 +669,43 @@ func (g *Gateway) shutdownPlugins() {
 	}
 }
 
-// timeoutMiddleware adds a timeout to the request context
-func (g *Gateway) timeoutMiddleware(timeout time.Duration) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Create a context with timeout
-			ctx, cancel := context.WithTimeout(r.Context(), timeout)
-			defer cancel()
-
-			// Create a channel to signal when the request has completed
-			done := make(chan struct{})
-
-			// Create a response writer that can detect when the response is complete
-			lrw := newLoggingResponseWriter(w)
-
-			// Process the request in a goroutine
-			go func() {
-				next.ServeHTTP(lrw, r.WithContext(ctx))
-				close(done)
-			}()
-
-			// Wait for the request to complete or timeout
-			select {
-			case <-done:
-				// Request completed normally
-				return
-			case <-ctx.Done():
-				// Request timed out
-				if ctx.Err() == context.DeadlineExceeded {
-					w.WriteHeader(http.StatusGatewayTimeout)
-					w.Write([]byte(`{"error":"Gateway Timeout","message":"Request processing timed out"}`))
-				}
-				return
-			}
-		})
-	}
-}
-
-// validateRequestMiddleware validates request bodies against a JSON schema
-func (g *Gateway) validateRequestMiddleware(schemaPath string) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Only validate POST, PUT, and PATCH requests with a Content-Type of application/json
-			if (r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodPatch) &&
-				r.Header.Get("Content-Type") == "application/json" {
-
-				// Read the request body
-				body, err := io.ReadAll(r.Body)
-				if err != nil {
-					w.WriteHeader(http.StatusBadRequest)
-					w.Write([]byte(`{"error":"Bad Request","message":"Unable to read request body"}`))
-					return
-				}
-
-				// Close the original body
-				r.Body.Close()
-
-				// Create a new reader with the same body data
-				r.Body = io.NopCloser(strings.NewReader(string(body)))
-
-				// Check if the body is valid JSON
-				var jsonData interface{}
-				if err := json.Unmarshal(body, &jsonData); err != nil {
-					w.WriteHeader(http.StatusBadRequest)
-					w.Write([]byte(`{"error":"Bad Request","message":"Invalid JSON format"}`))
-					return
-				}
-
-				// TODO: Add actual schema validation using a library like gojsonschema
-				// This is a placeholder for now, as implementing full schema validation
-				// would require adding a dependency
-
-				// For now, let's just check if the schema file exists
-				if _, err := os.Stat(schemaPath); os.IsNotExist(err) {
-					g.logger.Error("Schema file not found: %s", schemaPath)
-					// Continue processing even if schema file is missing
-				}
-			}
-
-			next.ServeHTTP(w, r)
-		})
-	}
-}
-
-// authMiddleware handles authentication for protected routes
-func (g *Gateway) authMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Check for Authorization header
-		authHeader := r.Header.Get("Authorization")
-		if authHeader == "" {
-			w.WriteHeader(http.StatusUnauthorized)
-			w.Write([]byte(`{"error":"Unauthorized","message":"Missing authorization header"}`))
-			return
-		}
-
-		// Simple token validation for now
-		// In a real implementation, this would validate JWT tokens
-		if !strings.HasPrefix(authHeader, "Bearer ") {
-			w.WriteHeader(http.StatusUnauthorized)
-			w.Write([]byte(`{"error":"Unauthorized","message":"Invalid authorization format"}`))
-			return
-		}
-
-		// Extract the token
-		token := strings.TrimPrefix(authHeader, "Bearer ")
-
-		// TODO: Implement JWT token validation using the JWT secret from config
-		// This is a placeholder for now
-		if token == "" {
-			w.WriteHeader(http.StatusUnauthorized)
-			w.Write([]byte(`{"error":"Unauthorized","message":"Invalid token"}`))
-			return
-		}
-
-		// For now, we'll just continue the request
-		next.ServeHTTP(w, r)
-	})
-}
+// Security Middlewares
 
 // rateLimitMiddleware implements rate limiting
 func (g *Gateway) rateLimitMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Skip rate limiting if disabled
-		if g.config.Security.RateLimitRequests <= 0 {
-			next.ServeHTTP(w, r)
-			return
-		}
-
 		// Get client IP
 		clientIP := getClientIP(r)
-
-		// Get current route
-		route := mux.CurrentRoute(r)
-		var routePath string
-		if route != nil {
-			var err error
-			routePath, err = route.GetPathTemplate()
-			if err != nil {
-				routePath = r.URL.Path
-			}
-		} else {
-			routePath = r.URL.Path
-		}
-
-		// Get appropriate limiter
-		var limiter *rate.Limiter
-		if routePath != "" {
-			limiter = g.rateLimiter.GetRouteLimiter(routePath, clientIP)
-		} else {
-			limiter = g.rateLimiter.GetLimiter(clientIP)
-		}
-
-		// Check if request is allowed
+		
+		// Get route-specific limiter if available
+		limiter := g.rateLimiter.GetRouteLimiter(r.URL.Path, clientIP)
+		
+		// Check if the request is allowed
 		if !limiter.Allow() {
-			w.Header().Set("Retry-After", "60")
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusTooManyRequests)
 			w.Write([]byte(`{"error":"Too Many Requests","message":"Rate limit exceeded"}`))
 			return
 		}
-
+		
 		next.ServeHTTP(w, r)
 	})
 }
 
 // ipWhitelistMiddleware implements IP whitelisting
 func (g *Gateway) ipWhitelistMiddleware(next http.Handler) http.Handler {
+	whitelist := NewIPWhitelist(g.config.Security.EnableIPWhitelisting, g.config.Security.WhitelistedIPs)
+	
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Skip IP whitelisting if disabled
-		if !g.config.Security.EnableIPWhitelisting {
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		// Get client IP
 		clientIP := getClientIP(r)
-
-		// Create whitelist checker
-		whitelist := NewIPWhitelist(true, g.config.Security.WhitelistedIPs)
-
-		// Check if IP is allowed
+		
 		if !whitelist.IsAllowed(clientIP) {
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)
 			w.Write([]byte(`{"error":"Forbidden","message":"IP address not allowed"}`))
 			return
 		}
-
+		
 		next.ServeHTTP(w, r)
 	})
 }
@@ -1180,16 +713,16 @@ func (g *Gateway) ipWhitelistMiddleware(next http.Handler) http.Handler {
 // securityHeadersMiddleware adds security headers to responses
 func (g *Gateway) securityHeadersMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Add security headers
+		// Set security headers
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
-
-		// Add XSS protection header if enabled
+		
+		// Set XSS Protection header if enabled
 		if g.config.Security.EnableXSS {
 			w.Header().Set("X-XSS-Protection", "1; mode=block")
 		}
-
-		// Add HSTS header if enabled
+		
+		// Set HSTS header if enabled
 		if g.config.Security.EnableHSTS {
 			maxAge := g.config.Security.HSTSMaxAge
 			if maxAge <= 0 {
@@ -1197,114 +730,70 @@ func (g *Gateway) securityHeadersMiddleware(next http.Handler) http.Handler {
 			}
 			w.Header().Set("Strict-Transport-Security", fmt.Sprintf("max-age=%d; includeSubDomains", maxAge))
 		}
-
-		// Set content security policy
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; object-src 'none'; img-src 'self'; style-src 'self';")
-
+		
 		next.ServeHTTP(w, r)
 	})
 }
 
 // csrfMiddleware implements CSRF protection
 func (g *Gateway) csrfMiddleware(next http.Handler) http.Handler {
+	if !g.config.Security.EnableCSRF {
+		return next
+	}
+	
+	// In a real implementation, this would use a proper CSRF token implementation
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Skip CSRF protection if disabled or for non-mutating methods
-		if !g.config.Security.EnableCSRF || (r.Method != http.MethodPost && r.Method != http.MethodPut && r.Method != http.MethodPatch && r.Method != http.MethodDelete) {
-			next.ServeHTTP(w, r)
-			return
+		// Only check CSRF for state-changing methods
+		if r.Method == http.MethodPost || r.Method == http.MethodPut || 
+		   r.Method == http.MethodDelete || r.Method == http.MethodPatch {
+			// Check CSRF token
+			token := r.Header.Get("X-CSRF-Token")
+			if token == "" {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				w.Write([]byte(`{"error":"Forbidden","message":"CSRF token missing"}`))
+				return
+			}
+			
+			// Validate token (simplified for example purposes)
+			// In a real implementation, this would validate the token against a stored value
+			if len(token) < 32 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				w.Write([]byte(`{"error":"Forbidden","message":"Invalid CSRF token"}`))
+				return
+			}
 		}
-
-		// Check for CSRF token in header
-		csrfToken := r.Header.Get("X-CSRF-Token")
-		if csrfToken == "" {
-			w.WriteHeader(http.StatusForbidden)
-			w.Write([]byte(`{"error":"Forbidden","message":"Missing CSRF token"}`))
-			return
-		}
-
-		// TODO: Implement proper CSRF token validation
-		// This is a placeholder for now
-
+		
 		next.ServeHTTP(w, r)
 	})
 }
 
-// requestSizeMiddleware limits the size of request bodies
+// requestSizeMiddleware limits the size of incoming requests
 func (g *Gateway) requestSizeMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Skip if request size validation is disabled or if there's no request body
-		if !g.config.Security.EnableRequestValidation || r.ContentLength == 0 {
+		// Skip for GET and HEAD requests
+		if r.Method == http.MethodGet || r.Method == http.MethodHead {
 			next.ServeHTTP(w, r)
 			return
 		}
-
-		// Check if request body is too large
-		maxSize := g.config.Security.MaxRequestBodySize
-		if maxSize > 0 && r.ContentLength > maxSize {
+		
+		// Check Content-Length header
+		if r.ContentLength > g.config.Security.MaxRequestBodySize {
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusRequestEntityTooLarge)
-			w.Write([]byte(`{"error":"Request Entity Too Large","message":"Request body exceeds maximum size"}`))
+			w.Write([]byte(`{"error":"Request Entity Too Large","message":"Request body too large"}`))
 			return
 		}
-
+		
+		// Limit the request body
+		r.Body = http.MaxBytesReader(w, r.Body, g.config.Security.MaxRequestBodySize)
+		
 		next.ServeHTTP(w, r)
 	})
 }
 
-// loggingMiddleware logs requests
-func (g *Gateway) loggingMiddleware(next http.Handler) http.Handler {
+// authMiddleware implements JWT authentication
+func (g *Gateway) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-
-		// Create a custom response writer to capture the status code
-		lrw := newLoggingResponseWriter(w)
-
-		// Call the next handler
-		next.ServeHTTP(lrw, r)
-
-		// Log the request
-		g.logger.Info("%s %s %d %s %dB", r.Method, r.URL.Path, lrw.statusCode, time.Since(start), lrw.bytesWritten)
-	})
-}
-
-// loggingResponseWriter is a custom response writer that captures the status code
-type loggingResponseWriter struct {
-	http.ResponseWriter
-	statusCode   int
-	bytesWritten int
-}
-
-// newLoggingResponseWriter creates a new logging response writer
-func newLoggingResponseWriter(w http.ResponseWriter) *loggingResponseWriter {
-	return &loggingResponseWriter{w, http.StatusOK, 0}
-}
-
-// WriteHeader captures the status code
-func (lrw *loggingResponseWriter) WriteHeader(code int) {
-	lrw.statusCode = code
-	lrw.ResponseWriter.WriteHeader(code)
-}
-
-// Write captures the number of bytes written
-func (lrw *loggingResponseWriter) Write(b []byte) (int, error) {
-	n, err := lrw.ResponseWriter.Write(b)
-	lrw.bytesWritten += n
-	return n, err
-}
-
-// main is the entry point for the API gateway
-func main() {
-	// Parse command line flags
-	configPath := flag.String("config", "config.yaml", "Path to the configuration file")
-	flag.Parse()
-
-	// Initialize the gateway
-	gateway, err := NewGateway(*configPath)
-	if err != nil {
-		log.Fatalf("Failed to initialize gateway: %v", err)
-	}
-
-	// Start the gateway server
-	if err := gateway.Serve(); err != nil {
-		log.Fatalf("Gateway server failed: %v", err)
-	}
-}
+		// Extract the token from

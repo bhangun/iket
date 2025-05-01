@@ -6,6 +6,9 @@ server:
   idleTimeout: 120s
   pluginsDir: "./plugins"
   enableLogging: true
+  basicAuthUsers:
+    admin: "$2a$10$N9qo8uLOickgx2ZMRZoMy.Mrq4H3.HoAZZoLsL/4ZDFBH7/4X.1Oa"  # bcrypt hashed password
+    user1: "$2a$10$N9qo8uLOickgx2ZMRZoMy.Mrq4H3.HoAZZoLsL/4ZDFBH7/4X.1Oa"
 
 routes:
   - path: "/api/users/{id}"

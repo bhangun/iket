@@ -87,23 +87,21 @@ type Config struct {
 	} `yaml:"server"`
 
 	Security struct {
-		EnableMTLS              bool              `yaml:"enableMTLS"`
-		EnableCSRF              bool              `yaml:"enableCSRF"`
-		CSRFTokenExpiry         time.Duration     `yaml:"csrfTokenExpiry"`
-		RateLimitRequests       int               `yaml:"rateLimitRequests"`
-		RateLimitInterval       time.Duration     `yaml:"rateLimitInterval"`
-		EnableXSS               bool              `yaml:"enableXSS"`
-		EnableHSTS              bool              `yaml:"enableHSTS"`
-		HSTSMaxAge              int               `yaml:"hstsMaxAge"`
-		EnableSecureCookies     bool              `yaml:"enableSecureCookies"`
-		JWTSecret               string            `yaml:"jwtSecret"`
-		JWTIssuer               string            `yaml:"jwtIssuer"`
-		EnableIPWhitelisting    bool              `yaml:"enableIPWhitelisting"`
-		WhitelistedIPs          []string          `yaml:"whitelistedIPs"`
-		EnableRequestValidation bool              `yaml:"enableRequestValidation"`
-		MaxRequestBodySize      int64             `yaml:"maxRequestBodySize"`
-		EnableBasicAuth         bool              `yaml:"enableBasicAuth"`
-		BasicAuthUsers          map[string]string `yaml:"basicAuthUsers"`
+		EnableMTLS              bool          `yaml:"enableMTLS"`
+		EnableCSRF              bool          `yaml:"enableCSRF"`
+		CSRFTokenExpiry         time.Duration `yaml:"csrfTokenExpiry"`
+		RateLimitRequests       int           `yaml:"rateLimitRequests"`
+		RateLimitInterval       time.Duration `yaml:"rateLimitInterval"`
+		EnableXSS               bool          `yaml:"enableXSS"`
+		EnableHSTS              bool          `yaml:"enableHSTS"`
+		HSTSMaxAge              int           `yaml:"hstsMaxAge"`
+		EnableSecureCookies     bool          `yaml:"enableSecureCookies"`
+		JWTSecret               string        `yaml:"jwtSecret"`
+		JWTIssuer               string        `yaml:"jwtIssuer"`
+		EnableIPWhitelisting    bool          `yaml:"enableIPWhitelisting"`
+		WhitelistedIPs          []string      `yaml:"whitelistedIPs"`
+		EnableRequestValidation bool          `yaml:"enableRequestValidation"`
+		MaxRequestBodySize      int64         `yaml:"maxRequestBodySize"`
 	} `yaml:"security"`
 
 	Routes []struct {
@@ -144,118 +142,8 @@ type Gateway struct {
 	rateLimiter *RateLimiter
 	metrics     *Metrics
 	logger      *Logger
-	storage     *StorageManager
 }
 
-// Persistent Storage
-type StoragePlugin interface {
-	GatewayPlugin
-
-	// Storage methods
-	Get(key string) ([]byte, error)
-	Set(key string, value []byte, ttl time.Duration) error
-	Delete(key string) error
-	Exists(key string) (bool, error)
-	List(prefix string) ([]string, error)
-	Close() error
-
-	// Configuration specific methods
-	SaveConfig(config *Config) error
-	LoadConfig() (*Config, error)
-
-	// Basic Auth specific methods
-	SaveBasicAuth(users map[string]string) error
-	LoadBasicAuth() (map[string]string, error)
-}
-
-// Add this to your gateway.go file
-type StorageManager struct {
-	storage StoragePlugin
-	logger  *Logger
-}
-
-func NewStorageManager(logger *Logger) *StorageManager {
-	return &StorageManager{
-		logger: logger,
-	}
-}
-
-func (sm *StorageManager) SetStorage(plugin StoragePlugin) {
-	sm.storage = plugin
-}
-
-func (sm *StorageManager) Get(key string) ([]byte, error) {
-	if sm.storage == nil {
-		return nil, fmt.Errorf("no storage plugin configured")
-	}
-	return sm.storage.Get(key)
-}
-
-func (sm *StorageManager) Set(key string, value []byte, ttl time.Duration) error {
-	if sm.storage == nil {
-		return fmt.Errorf("no storage plugin configured")
-	}
-	return sm.storage.Set(key, value, ttl)
-}
-
-func (sm *StorageManager) Delete(key string) error {
-	if sm.storage == nil {
-		return fmt.Errorf("no storage plugin configured")
-	}
-	return sm.storage.Delete(key)
-}
-
-func (sm *StorageManager) Exists(key string) (bool, error) {
-	if sm.storage == nil {
-		return false, fmt.Errorf("no storage plugin configured")
-	}
-	return sm.storage.Exists(key)
-}
-
-func (sm *StorageManager) List(prefix string) ([]string, error) {
-	if sm.storage == nil {
-		return nil, fmt.Errorf("no storage plugin configured")
-	}
-	return sm.storage.List(prefix)
-}
-
-func (sm *StorageManager) Close() error {
-	if sm.storage == nil {
-		return nil
-	}
-	return sm.storage.Close()
-}
-
-// Add these methods to StorageManager
-func (sm *StorageManager) SaveConfig(config *Config) error {
-	if sm.storage == nil {
-		return fmt.Errorf("no storage plugin configured")
-	}
-	return sm.storage.SaveConfig(config)
-}
-
-func (sm *StorageManager) LoadConfig() (*Config, error) {
-	if sm.storage == nil {
-		return nil, fmt.Errorf("no storage plugin configured")
-	}
-	return sm.storage.LoadConfig()
-}
-
-func (sm *StorageManager) SaveBasicAuth(users map[string]string) error {
-	if sm.storage == nil {
-		return fmt.Errorf("no storage plugin configured")
-	}
-	return sm.storage.SaveBasicAuth(users)
-}
-
-func (sm *StorageManager) LoadBasicAuth() (map[string]string, error) {
-	if sm.storage == nil {
-		return nil, fmt.Errorf("no storage plugin configured")
-	}
-	return sm.storage.LoadBasicAuth()
-}
-
-// / ---------------
 // Logger provides structured logging for the gateway
 type Logger struct {
 	enableLogging bool
@@ -374,37 +262,6 @@ func (rl *RateLimiter) GetLimiter(ip string) *rate.Limiter {
 	return limiter
 }
 
-// basicAuthMiddleware implements HTTP Basic Authentication
-func (g *Gateway) basicAuthMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Skip if basic auth is disabled
-		if !g.config.Security.EnableBasicAuth {
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		// Get the Basic Auth credentials
-		username, password, ok := r.BasicAuth()
-		if !ok {
-			w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
-			w.WriteHeader(http.StatusUnauthorized)
-			w.Write([]byte(`{"error":"Unauthorized","message":"Basic authentication required"}`))
-			return
-		}
-
-		// Check if credentials are valid
-		expectedPassword, userExists := g.config.Security.BasicAuthUsers[username]
-		if !userExists || expectedPassword != password {
-			w.WriteHeader(http.StatusUnauthorized)
-			w.Write([]byte(`{"error":"Unauthorized","message":"Invalid username or password"}`))
-			return
-		}
-
-		// If credentials are valid, continue to the next handler
-		next.ServeHTTP(w, r)
-	})
-}
-
 // RegisterRouteLimit sets a specific rate limit for a route
 func (rl *RateLimiter) RegisterRouteLimit(route string, limit int) {
 	rl.mu.Lock()
@@ -471,82 +328,6 @@ func (ip *IPWhitelist) IsAllowed(addr string) bool {
 
 // NewGateway creates a new API gateway instance
 func NewGateway(configPath string) (*Gateway, error) {
-	logger := NewLogger(false) // Start with logging disabled until we load config
-
-	// First try to load config from storage
-	storage := NewStorageManager(logger)
-	storedConfig, err := storage.LoadConfig()
-	if err != nil {
-		logger.Error("Failed to load config from storage: %v", err)
-	}
-
-	var config *Config
-	if storedConfig != nil {
-		config = storedConfig
-		logger.Info("Loaded configuration from storage")
-	} else {
-		// Fall back to file-based config
-		config, err = loadConfig(configPath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load config: %w", err)
-		}
-		logger.Info("Loaded configuration from file")
-	}
-
-	// Apply the loaded config to the logger
-	logger.enableLogging = config.Server.EnableLogging
-
-	// Load basic auth from storage if available
-	if config.Security.EnableBasicAuth {
-		storedUsers, err := storage.LoadBasicAuth()
-		if err != nil {
-			logger.Error("Failed to load basic auth from storage: %v", err)
-		}
-		if storedUsers != nil {
-			config.Security.BasicAuthUsers = storedUsers
-			logger.Info("Loaded basic auth users from storage")
-		}
-	}
-
-	metrics := NewMetrics()
-	rateLimiter := NewRateLimiter(
-		config.Security.RateLimitRequests,
-		config.Security.RateLimitInterval*time.Second,
-	)
-
-	gateway := &Gateway{
-		config:      config,
-		router:      mux.NewRouter(),
-		plugins:     make([]GatewayPlugin, 0),
-		middlewares: make([]func(http.Handler) http.Handler, 0),
-		rateLimiter: rateLimiter,
-		metrics:     metrics,
-		logger:      logger,
-		storage:     storage,
-	}
-
-	// Save the initial config to storage
-	if err := gateway.storage.SaveConfig(config); err != nil {
-		logger.Error("Failed to save initial config to storage: %v", err)
-	}
-
-	// Save basic auth if enabled
-	if config.Security.EnableBasicAuth {
-		if err := gateway.storage.SaveBasicAuth(config.Security.BasicAuthUsers); err != nil {
-			logger.Error("Failed to save basic auth to storage: %v", err)
-		}
-	}
-
-	gateway.setupRoutes()
-
-	if err := gateway.loadPlugins(); err != nil {
-		return nil, fmt.Errorf("failed to load plugins: %w", err)
-	}
-
-	return gateway, nil
-}
-
-/* func NewGateway(configPath string) (*Gateway, error) {
 	config, err := loadConfig(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load config: %w", err)
@@ -574,7 +355,6 @@ func NewGateway(configPath string) (*Gateway, error) {
 		rateLimiter: rateLimiter,
 		metrics:     metrics,
 		logger:      logger,
-		storage:     NewStorageManager(logger),
 	}
 
 	// Set up the router
@@ -586,7 +366,7 @@ func NewGateway(configPath string) (*Gateway, error) {
 	}
 
 	return gateway, nil
-} */
+}
 
 // loadConfig loads the gateway configuration from a YAML file
 func loadConfig(path string) (*Config, error) {
@@ -617,17 +397,17 @@ func (g *Gateway) setupRoutes() {
 
 		// Apply route-specific middleware
 		if route.RequireAuth {
-			handler = http.HandlerFunc(g.authMiddleware(handler).ServeHTTP)
+			handler = g.authMiddleware(handler)
 		}
 
 		// Apply route-specific timeout if configured
 		if route.Timeout != nil {
-			handler = http.HandlerFunc(g.timeoutMiddleware(*route.Timeout)(handler).ServeHTTP)
+			handler = g.timeoutMiddleware(*route.Timeout)(handler)
 		}
 
 		// Apply schema validation if configured
 		if route.ValidateSchema != "" {
-			handler = http.HandlerFunc(g.validateRequestMiddleware(route.ValidateSchema)(handler).ServeHTTP)
+			handler = g.validateRequestMiddleware(route.ValidateSchema)(handler)
 		}
 
 		g.router.HandleFunc(route.Path, handler).
@@ -769,19 +549,6 @@ func (g *Gateway) loadPlugins() error {
 			return fmt.Errorf("failed to lookup 'Plugin' symbol in %s: %w", pluginConfig.Name, err)
 		}
 
-		// Check if it's a storage plugin
-		if storagePlugin, ok := symPlugin.(StoragePlugin); ok {
-			// Initialize the storage plugin
-			if err := storagePlugin.Initialize(pluginConfig.Config); err != nil {
-				return fmt.Errorf("failed to initialize storage plugin %s: %w", pluginConfig.Name, err)
-			}
-
-			// Set it as the active storage
-			g.storage.SetStorage(storagePlugin)
-			g.logger.Info("Storage plugin %s loaded and activated", pluginConfig.Name)
-			continue
-		}
-
 		// Cast to the GatewayPlugin interface
 		gatewayPlugin, ok := symPlugin.(GatewayPlugin)
 		if !ok {
@@ -816,7 +583,6 @@ func (g *Gateway) Serve() error {
 	var handler http.Handler = g.router
 
 	// Apply security middlewares
-	handler = g.basicAuthMiddleware(handler)
 	handler = g.rateLimitMiddleware(handler)
 	handler = g.ipWhitelistMiddleware(handler)
 	handler = g.securityHeadersMiddleware(handler)

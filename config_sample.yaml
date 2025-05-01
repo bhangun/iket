@@ -1,0 +1,86 @@
+# Sample API Gateway Configuration
+server:
+  port: 8080
+  readTimeout: 30
+  writeTimeout: 30
+  idleTimeout: 60
+  pluginsDir: "./plugins"
+  enableLogging: true
+  tlsCertFile: "./certs/server.crt"
+  tlsKeyFile: "./certs/server.key"
+  clientCACertFile: "./certs/ca.crt"  # For mTLS
+  metricsPort: 9090
+
+security:
+  enableMTLS: true
+  enableCSRF: true
+  csrfTokenExpiry: 3600  # 1 hour in seconds
+  rateLimitRequests: 100
+  rateLimitInterval: 60  # 100 requests per minute
+  enableXSS: true
+  enableHSTS: true
+  hstsMaxAge: 31536000  # 1 year in seconds
+  enableSecureCookies: true
+  jwtSecret: "your-jwt-secret-here"  # Should be stored securely in production
+  jwtIssuer: "api-gateway"
+  enableIPWhitelisting: false
+  whitelistedIPs:
+    - "127.0.0.1"
+    - "10.0.0.0/8"
+  enableRequestValidation: true
+  maxRequestBodySize: 1048576  # 1MB
+
+routes:
+  - path: "/api/v1/users"
+    destination: "http://user-service:8000"
+    methods: ["GET", "POST"]
+    requireAuth: true
+    rateLimit: 50  # Route-specific rate limit
+    timeout: 10  # 10 seconds
+    headers:
+      X-Service: "user-service"
+    stripPath: true
+    validateSchema: "schemas/user.json"
+
+  - path: "/api/v1/products"
+    destination: "http://product-service:8001"
+    methods: ["GET", "POST", "PUT", "DELETE"]
+    requireAuth: true
+    headers:
+      X-Service: "product-service"
+
+  - path: "/api/v1/public"
+    destination: "http://public-service:8002"
+    methods: ["GET"]
+    requireAuth: false
+    headers:
+      X-Service: "public-service"
+      Cache-Control: "max-age=300"
+
+plugins:
+  - name: "cors"
+    path: "./plugins/cors.so"
+    enabled: true
+    config:
+      allowedOrigins: ["https://example.com"]
+      allowedMethods: ["GET", "POST", "PUT", "DELETE"]
+      allowedHeaders: ["Content-Type", "Authorization"]
+      allowCredentials: true
+      maxAge: 3600
+
+  - name: "circuit-breaker"
+    path: "./plugins/circuit-breaker.so"
+    enabled: true
+    config:
+      threshold: 5
+      timeout: 10
+      resetTimeout: 30
+
+  - name: "audit-log"
+    path: "./plugins/audit-log.so"
+    enabled: true
+    config:
+      logPath: "./logs/audit.log"
+      logLevel: "info"
+      includeRequestBody: false
+      includeResponseBody: false
