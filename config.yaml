@@ -1,0 +1,53 @@
+# config.yaml - Main API Gateway Configuration File
+server:
+  port: 8080
+  readTimeout: 5s
+  writeTimeout: 10s
+  idleTimeout: 120s
+  pluginsDir: "./plugins"
+  enableLogging: true
+
+routes:
+  - path: "/api/users/{id}"
+    destination: "http://user-service:8000/users/{id}"
+    methods: ["GET", "PUT", "DELETE"]
+  
+  - path: "/api/products"
+    destination: "http://product-service:8001/products"
+    methods: ["GET", "POST"]
+    
+  - path: "/api/orders"
+    destination: "http://order-service:8002/orders"
+    methods: ["GET", "POST", "PUT"]
+    
+  - path: "/api/auth"
+    destination: "http://auth-service:8003/auth"
+    methods: ["POST"]
+
+# 'http://localhost:8180/realms/kychat/protocol/openid-connect/token' \
+
+plugins:
+  - name: "keycloak"
+    path: "./plugins/auth/keycloak.so"
+    enabled: true
+    config:
+      serverURL: "http://localhost:8180"
+      realm: "kychat"
+      clientID: "kaysir-service"
+      clientSecret: "wewgIfGNUq43uB4xeIHZgaC2WQaOnHau"
+      cacheEnabled: true
+      publicURLs:
+        - "/api/auth/login"
+        - "/api/public"
+        - "/health"
+  
+  - name: "rate-limiter"
+    path: "./plugins/rate/rate-limiter.so"
+    enabled: true
+    config:
+      windowSizeSeconds: 60
+      maxRequestsPerIP: 100
+      cleanupIntervalMinutes: 5
+      
+#  - name: "prometheus-metrics"
+#    path: "./plugins/metrics/prometheus"

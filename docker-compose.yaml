@@ -1,0 +1,8 @@
+
+services:
+  server:
+    build: .
+    ports:
+      - "8080:8080"
+    command: ["/bin/server", "--port", "8080"]
+    restart: unless-stopped

@@ -1,0 +1,27 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/bin/
+
+# Test binary
+*.test
+
+# Output directory
+/out/
+
+# Dependency directories
+vendor/
+
+# IDE specific
+.idea/
+.vscode/
+*.swp
+
+# Go workspace file
+go.work
+
+# Environment files
+.env
