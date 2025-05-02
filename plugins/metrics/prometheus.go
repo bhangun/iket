@@ -22,9 +22,6 @@ type PrometheusPlugin struct {
 	responseSize    *prometheus.SummaryVec
 }
 
-// Plugin is the exported symbol for the plugin system to load
-var Plugin PrometheusPlugin
-
 // Name returns the plugin name
 func (p PrometheusPlugin) Name() string {
 	return p.name
@@ -150,3 +147,6 @@ func (p *PrometheusPlugin) Shutdown() error {
 	}
 	return nil
 }
+
+// Plugin is the exported symbol for the plugin system to load
+var Plugin PrometheusPlugin

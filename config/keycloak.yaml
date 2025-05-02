@@ -1,0 +1,14 @@
+plugins:
+  - name: "keycloak"
+    path: "./plugins/auth/keycloak.so"
+    enabled: true
+    config:
+      serverURL: "http://localhost:8180"
+      realm: "kychat"
+      clientID: "kaysir-service"
+      clientSecret: "wewgIfGNUq43uB4xeIHZgaC2WQaOnHau"
+      cacheEnabled: true
+      publicURLs:
+        - "/api/auth/login"
+        - "/api/public"
+        - "/health"

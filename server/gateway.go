@@ -5,10 +5,8 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -21,108 +19,9 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/time/rate"
-	"gopkg.in/yaml.v3"
 )
-
-// Define Prometheus metrics
-var (
-	httpRequestsTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "http_requests_total",
-			Help: "Total number of HTTP requests",
-		},
-		[]string{"code", "method", "path"},
-	)
-
-	httpRequestDuration = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name:    "http_request_duration_seconds",
-			Help:    "HTTP request duration in seconds",
-			Buckets: prometheus.DefBuckets,
-		},
-		[]string{"code", "method", "path"},
-	)
-
-	httpResponseSize = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name:    "http_response_size_bytes",
-			Help:    "Size of HTTP responses in bytes",
-			Buckets: []float64{100, 1000, 10000, 100000, 1000000},
-		},
-		[]string{"code", "method", "path"},
-	)
-
-	activeConnections = prometheus.NewGauge(
-		prometheus.GaugeOpts{
-			Name: "http_active_connections",
-			Help: "Number of active HTTP connections",
-		},
-	)
-)
-
-func init() {
-	// Register the metrics with Prometheus
-	prometheus.MustRegister(httpRequestsTotal)
-	prometheus.MustRegister(httpRequestDuration)
-	prometheus.MustRegister(httpResponseSize)
-	prometheus.MustRegister(activeConnections)
-}
-
-// Config represents the gateway configuration
-type Config struct {
-	Server struct {
-		Port             int           `yaml:"port"`
-		ReadTimeout      time.Duration `yaml:"readTimeout"`
-		WriteTimeout     time.Duration `yaml:"writeTimeout"`
-		IdleTimeout      time.Duration `yaml:"idleTimeout"`
-		PluginsDir       string        `yaml:"pluginsDir"`
-		EnableLogging    bool          `yaml:"enableLogging"`
-		TLSCertFile      string        `yaml:"tlsCertFile"`
-		TLSKeyFile       string        `yaml:"tlsKeyFile"`
-		ClientCACertFile string        `yaml:"clientCACertFile"` // For mTLS
-		MetricsPort      int           `yaml:"metricsPort"`
-	} `yaml:"server"`
-
-	Security struct {
-		EnableMTLS              bool          `yaml:"enableMTLS"`
-		EnableCSRF              bool          `yaml:"enableCSRF"`
-		CSRFTokenExpiry         time.Duration `yaml:"csrfTokenExpiry"`
-		RateLimitRequests       int           `yaml:"rateLimitRequests"`
-		RateLimitInterval       time.Duration `yaml:"rateLimitInterval"`
-		EnableXSS               bool          `yaml:"enableXSS"`
-		EnableHSTS              bool          `yaml:"enableHSTS"`
-		HSTSMaxAge              int           `yaml:"hstsMaxAge"`
-		EnableSecureCookies     bool          `yaml:"enableSecureCookies"`
-		JWTSecret               string        `yaml:"jwtSecret"`
-		JWTIssuer               string        `yaml:"jwtIssuer"`
-		EnableIPWhitelisting    bool          `yaml:"enableIPWhitelisting"`
-		WhitelistedIPs          []string      `yaml:"whitelistedIPs"`
-		EnableRequestValidation bool          `yaml:"enableRequestValidation"`
-		MaxRequestBodySize      int64         `yaml:"maxRequestBodySize"`
-	} `yaml:"security"`
-
-	Routes []struct {
-		Path           string            `yaml:"path"`
-		Destination    string            `yaml:"destination"`
-		Methods        []string          `yaml:"methods"`
-		RequireAuth    bool              `yaml:"requireAuth"`
-		RateLimit      *int              `yaml:"rateLimit"`
-		Timeout        *time.Duration    `yaml:"timeout"`
-		Headers        map[string]string `yaml:"headers"`
-		StripPath      bool              `yaml:"stripPath"`
-		ValidateSchema string            `yaml:"validateSchema"`
-	} `yaml:"routes"`
-
-	Plugins []struct {
-		Name    string                 `yaml:"name"`
-		Path    string                 `yaml:"path"`
-		Enabled bool                   `yaml:"enabled"`
-		Config  map[string]interface{} `yaml:"config"`
-	} `yaml:"plugins"`
-}
 
 // GatewayPlugin interface that all plugins must implement
 type GatewayPlugin interface {
@@ -136,251 +35,115 @@ type GatewayPlugin interface {
 type Gateway struct {
 	config      *Config
 	router      *mux.Router
+	adminAPI    *AdminAPI
+	openAPISpec map[string]interface{}
 	plugins     []GatewayPlugin
 	pluginsMu   sync.RWMutex
 	middlewares []func(http.Handler) http.Handler
 	rateLimiter *RateLimiter
 	metrics     *Metrics
 	logger      *Logger
-}
-
-// Logger provides structured logging for the gateway
-type Logger struct {
-	enableLogging bool
-}
-
-// NewLogger creates a new logger instance
-func NewLogger(enableLogging bool) *Logger {
-	return &Logger{
-		enableLogging: enableLogging,
-	}
-}
-
-// Info logs informational messages
-func (l *Logger) Info(format string, v ...interface{}) {
-	if l.enableLogging {
-		log.Printf("[INFO] "+format, v...)
-	}
-}
-
-// Error logs error messages
-func (l *Logger) Error(format string, v ...interface{}) {
-	if l.enableLogging {
-		log.Printf("[ERROR] "+format, v...)
-	}
-}
-
-// Warn logs warning messages
-func (l *Logger) Warn(format string, v ...interface{}) {
-	if l.enableLogging {
-		log.Printf("[WARN] "+format, v...)
-	}
-}
-
-// Metrics collects and exposes gateway metrics
-type Metrics struct {
-	requestCount    *prometheus.CounterVec
-	requestDuration *prometheus.HistogramVec
-	responseSize    *prometheus.HistogramVec
-	activeRequests  *prometheus.GaugeVec
-}
-
-// NewMetrics creates a new metrics instance
-func NewMetrics() *Metrics {
-	m := &Metrics{
-		requestCount: prometheus.NewCounterVec(
-			prometheus.CounterOpts{
-				Name: "gateway_requests_total",
-				Help: "Total number of requests processed by the gateway",
-			},
-			[]string{"method", "path", "status"},
-		),
-		requestDuration: prometheus.NewHistogramVec(
-			prometheus.HistogramOpts{
-				Name: "gateway_request_duration_seconds",
-				Help: "Duration of requests processed by the gateway",
-			},
-			[]string{"method", "path"},
-		),
-		responseSize: prometheus.NewHistogramVec(
-			prometheus.HistogramOpts{
-				Name: "gateway_response_size_bytes",
-				Help: "Size of responses returned by the gateway",
-			},
-			[]string{"method", "path"},
-		),
-		activeRequests: prometheus.NewGaugeVec(
-			prometheus.GaugeOpts{
-				Name: "gateway_active_requests",
-				Help: "Number of active requests being processed by the gateway",
-			},
-			[]string{"method"},
-		),
-	}
-
-	// Register all metrics
-	prometheus.MustRegister(m.requestCount)
-	prometheus.MustRegister(m.requestDuration)
-	prometheus.MustRegister(m.responseSize)
-	prometheus.MustRegister(m.activeRequests)
-
-	return m
-}
-
-// RateLimiter manages rate limiting for the gateway
-type RateLimiter struct {
-	limiters       map[string]*rate.Limiter
-	mu             sync.RWMutex
-	perRouteLimit  map[string]*rate.Limiter
-	globalRequests int
-	globalInterval time.Duration
-}
-
-// NewRateLimiter creates a new rate limiter
-func NewRateLimiter(requests int, interval time.Duration) *RateLimiter {
-	return &RateLimiter{
-		limiters:       make(map[string]*rate.Limiter),
-		perRouteLimit:  make(map[string]*rate.Limiter),
-		globalRequests: requests,
-		globalInterval: interval,
-	}
-}
-
-// GetLimiter returns a rate limiter for a specific IP address
-func (rl *RateLimiter) GetLimiter(ip string) *rate.Limiter {
-	rl.mu.RLock()
-	limiter, exists := rl.limiters[ip]
-	rl.mu.RUnlock()
-
-	if !exists {
-		limiter = rate.NewLimiter(rate.Every(rl.globalInterval/time.Duration(rl.globalRequests)), rl.globalRequests)
-		rl.mu.Lock()
-		rl.limiters[ip] = limiter
-		rl.mu.Unlock()
-	}
-
-	return limiter
-}
-
-// RegisterRouteLimit sets a specific rate limit for a route
-func (rl *RateLimiter) RegisterRouteLimit(route string, limit int) {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	rl.perRouteLimit[route] = rate.NewLimiter(rate.Every(rl.globalInterval/time.Duration(limit)), limit)
-}
-
-// GetRouteLimiter returns a rate limiter for a specific route and IP
-func (rl *RateLimiter) GetRouteLimiter(route string, ip string) *rate.Limiter {
-	routeKey := route + ":" + ip
-
-	rl.mu.RLock()
-	limiter, exists := rl.limiters[routeKey]
-	routeLimiter, routeExists := rl.perRouteLimit[route]
-	rl.mu.RUnlock()
-
-	if !exists {
-		if routeExists {
-			// Create a new limiter based on the route-specific configuration
-			limit := routeLimiter.Limit()
-			burst := routeLimiter.Burst()
-			limiter = rate.NewLimiter(limit, burst)
-		} else {
-			// Fall back to the global rate limit
-			limiter = rate.NewLimiter(rate.Every(rl.globalInterval/time.Duration(rl.globalRequests)), rl.globalRequests)
-		}
-
-		rl.mu.Lock()
-		rl.limiters[routeKey] = limiter
-		rl.mu.Unlock()
-	}
-
-	return limiter
-}
-
-// IPWhitelist manages whitelisted IP addresses
-type IPWhitelist struct {
-	enabled        bool
-	whitelistedIPs []string
-}
-
-// NewIPWhitelist creates a new IP whitelist
-func NewIPWhitelist(enabled bool, ips []string) *IPWhitelist {
-	return &IPWhitelist{
-		enabled:        enabled,
-		whitelistedIPs: ips,
-	}
-}
-
-// IsAllowed checks if an IP is allowed
-func (ip *IPWhitelist) IsAllowed(addr string) bool {
-	if !ip.enabled {
-		return true
-	}
-
-	for _, whitelisted := range ip.whitelistedIPs {
-		if whitelisted == addr || whitelisted == "*" {
-			return true
-		}
-	}
-
-	return false
+	storage     *StorageManager
+	configPath  string
 }
 
 // NewGateway creates a new API gateway instance
-func NewGateway(configPath string) (*Gateway, error) {
-	config, err := loadConfig(configPath)
+func NewGateway(path string) (*Gateway, error) {
+	logger := NewLogger(false) // Start with logging disabled until we load config
+
+	configPath := path
+
+	// First try to load config from storage
+	storage := NewStorageManager(logger)
+	storedConfig, err := storage.LoadConfig()
 	if err != nil {
-		return nil, fmt.Errorf("failed to load config: %w", err)
+		logger.Error("Failed to load config from storage: %v", err)
 	}
 
-	logger := NewLogger(config.Server.EnableLogging)
+	var config *Config
+	if storedConfig != nil {
+		config = storedConfig
+		logger.Info("Loaded configuration from storage")
+	} else {
+		// Fall back to file-based config
+		config, err = loadConfig(configPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load config: %w", err)
+		}
+		logger.Info("Loaded configuration from file")
+	}
+
+	// Apply the loaded config to the logger
+	logger.enableLogging = config.Server.EnableLogging
+
+	// Load basic auth from storage if available
+	if config.Security.EnableBasicAuth {
+		storedUsers, err := storage.LoadBasicAuth()
+		if err != nil {
+			logger.Error("Failed to load basic auth from storage: %v", err)
+		}
+		if storedUsers != nil {
+			config.Security.BasicAuthUsers = storedUsers
+			logger.Info("Loaded basic auth users from storage")
+		}
+	}
+
 	metrics := NewMetrics()
 	rateLimiter := NewRateLimiter(
 		config.Security.RateLimitRequests,
 		config.Security.RateLimitInterval*time.Second,
 	)
 
-	// Set up custom rate limits for routes if configured
-	for _, route := range config.Routes {
-		if route.RateLimit != nil {
-			rateLimiter.RegisterRouteLimit(route.Path, *route.RateLimit)
-		}
-	}
-
 	gateway := &Gateway{
 		config:      config,
 		router:      mux.NewRouter(),
+		openAPISpec: make(map[string]interface{}),
 		plugins:     make([]GatewayPlugin, 0),
 		middlewares: make([]func(http.Handler) http.Handler, 0),
 		rateLimiter: rateLimiter,
 		metrics:     metrics,
 		logger:      logger,
+		storage:     storage,
 	}
 
-	// Set up the router
+	gateway.openAPISpec = gateway.adminAPI.OpenAPISpec()
+
+	// Save the initial config to storage
+	if err := gateway.storage.SaveConfig(config); err != nil {
+		logger.Error("Failed to save initial config to storage: %v", err)
+	}
+
+	// Save basic auth if enabled
+	if config.Security.EnableBasicAuth {
+		if err := gateway.storage.SaveBasicAuth(config.Security.BasicAuthUsers); err != nil {
+			logger.Error("Failed to save basic auth to storage: %v", err)
+		}
+	}
+
+	// Load the OpenAPI plugin
+	openapiPlugin := NewOpenAPIPlugin()
+	if err := openapiPlugin.Initialize(map[string]any{
+		"uiPath":   "/docs",
+		"specPath": "/openapi.json",
+	}); err != nil {
+		return nil, fmt.Errorf("failed to initialize OpenAPI plugin: %w", err)
+	}
+
+	///
+	// Initialize admin API
+	gateway.adminAPI = NewAdminAPI(gateway, openapiPlugin)
+
+	gateway.plugins = append(gateway.plugins, openapiPlugin)
+	gateway.middlewares = append(gateway.middlewares, openapiPlugin.Middleware())
+	//
+
 	gateway.setupRoutes()
 
-	// Load plugins
 	if err := gateway.loadPlugins(); err != nil {
 		return nil, fmt.Errorf("failed to load plugins: %w", err)
 	}
 
 	return gateway, nil
-}
-
-// loadConfig loads the gateway configuration from a YAML file
-func loadConfig(path string) (*Config, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-
-	var config Config
-	if err := yaml.Unmarshal(data, &config); err != nil {
-		return nil, err
-	}
-
-	return &config, nil
 }
 
 // setupRoutes configures the routes from the config
@@ -397,21 +160,22 @@ func (g *Gateway) setupRoutes() {
 
 		// Apply route-specific middleware
 		if route.RequireAuth {
-			handler = g.authMiddleware(handler)
+			handler = http.HandlerFunc(g.authMiddleware(handler).ServeHTTP)
 		}
 
 		// Apply route-specific timeout if configured
 		if route.Timeout != nil {
-			handler = g.timeoutMiddleware(*route.Timeout)(handler)
+			handler = http.HandlerFunc(g.timeoutMiddleware(*route.Timeout)(handler).ServeHTTP)
 		}
 
 		// Apply schema validation if configured
 		if route.ValidateSchema != "" {
-			handler = g.validateRequestMiddleware(route.ValidateSchema)(handler)
+			handler = http.HandlerFunc(g.validateRequestMiddleware(route.ValidateSchema)(handler).ServeHTTP)
 		}
 
 		g.router.HandleFunc(route.Path, handler).
 			Methods(route.Methods...)
+
 	}
 
 	// Add catch-all route for 404s
@@ -422,17 +186,7 @@ func (g *Gateway) setupRoutes() {
 }
 
 // proxyHandler returns a handler function that proxies requests to the destination
-func (g *Gateway) proxyHandler(route struct {
-	Path           string            `yaml:"path"`
-	Destination    string            `yaml:"destination"`
-	Methods        []string          `yaml:"methods"`
-	RequireAuth    bool              `yaml:"requireAuth"`
-	RateLimit      *int              `yaml:"rateLimit"`
-	Timeout        *time.Duration    `yaml:"timeout"`
-	Headers        map[string]string `yaml:"headers"`
-	StripPath      bool              `yaml:"stripPath"`
-	ValidateSchema string            `yaml:"validateSchema"`
-}) http.HandlerFunc {
+func (g *Gateway) proxyHandler(route RouterConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 
@@ -502,31 +256,6 @@ func (g *Gateway) proxyHandler(route struct {
 	}
 }
 
-// generateRequestID generates a unique request ID
-func generateRequestID() string {
-	return fmt.Sprintf("%d", time.Now().UnixNano())
-}
-
-// getClientIP gets the client IP address from the request
-func getClientIP(r *http.Request) string {
-	// Check for X-Forwarded-For header
-	forwardedFor := r.Header.Get("X-Forwarded-For")
-	if forwardedFor != "" {
-		// X-Forwarded-For can contain multiple IPs, take the first one
-		ips := strings.Split(forwardedFor, ",")
-		return strings.TrimSpace(ips[0])
-	}
-
-	// Check for X-Real-IP header
-	realIP := r.Header.Get("X-Real-IP")
-	if realIP != "" {
-		return realIP
-	}
-
-	// Fall back to RemoteAddr
-	return strings.Split(r.RemoteAddr, ":")[0]
-}
-
 // loadPlugins loads and initializes all enabled plugins
 func (g *Gateway) loadPlugins() error {
 	for _, pluginConfig := range g.config.Plugins {
@@ -547,6 +276,19 @@ func (g *Gateway) loadPlugins() error {
 		symPlugin, err := plug.Lookup("Plugin")
 		if err != nil {
 			return fmt.Errorf("failed to lookup 'Plugin' symbol in %s: %w", pluginConfig.Name, err)
+		}
+
+		// Check if it's a storage plugin
+		if storagePlugin, ok := symPlugin.(StoragePlugin); ok {
+			// Initialize the storage plugin
+			if err := storagePlugin.Initialize(pluginConfig.Config); err != nil {
+				return fmt.Errorf("failed to initialize storage plugin %s: %w", pluginConfig.Name, err)
+			}
+
+			// Set it as the active storage
+			g.storage.SetStorage(storagePlugin)
+			g.logger.Info("Storage plugin %s loaded and activated", pluginConfig.Name)
+			continue
 		}
 
 		// Cast to the GatewayPlugin interface
@@ -577,12 +319,44 @@ func (g *Gateway) loadPlugins() error {
 	return nil
 }
 
+// basicAuthMiddleware implements HTTP Basic Authentication
+func (g *Gateway) basicAuthMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Skip if basic auth is disabled
+		if !g.config.Security.EnableBasicAuth {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Get the Basic Auth credentials
+		username, password, ok := r.BasicAuth()
+		if !ok {
+			w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte(`{"error":"Unauthorized","message":"Basic authentication required"}`))
+			return
+		}
+
+		// Check if credentials are valid
+		expectedPassword, userExists := g.config.Security.BasicAuthUsers[username]
+		if !userExists || expectedPassword != password {
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte(`{"error":"Unauthorized","message":"Invalid username or password"}`))
+			return
+		}
+
+		// If credentials are valid, continue to the next handler
+		next.ServeHTTP(w, r)
+	})
+}
+
 // Serve starts the gateway server
 func (g *Gateway) Serve() error {
 	// Apply core security middlewares first
 	var handler http.Handler = g.router
 
 	// Apply security middlewares
+	handler = g.basicAuthMiddleware(handler)
 	handler = g.rateLimitMiddleware(handler)
 	handler = g.ipWhitelistMiddleware(handler)
 	handler = g.securityHeadersMiddleware(handler)
@@ -1030,47 +804,4 @@ func (g *Gateway) loggingMiddleware(next http.Handler) http.Handler {
 		// Log the request
 		g.logger.Info("%s %s %d %s %dB", r.Method, r.URL.Path, lrw.statusCode, time.Since(start), lrw.bytesWritten)
 	})
-}
-
-// loggingResponseWriter is a custom response writer that captures the status code
-type loggingResponseWriter struct {
-	http.ResponseWriter
-	statusCode   int
-	bytesWritten int
-}
-
-// newLoggingResponseWriter creates a new logging response writer
-func newLoggingResponseWriter(w http.ResponseWriter) *loggingResponseWriter {
-	return &loggingResponseWriter{w, http.StatusOK, 0}
-}
-
-// WriteHeader captures the status code
-func (lrw *loggingResponseWriter) WriteHeader(code int) {
-	lrw.statusCode = code
-	lrw.ResponseWriter.WriteHeader(code)
-}
-
-// Write captures the number of bytes written
-func (lrw *loggingResponseWriter) Write(b []byte) (int, error) {
-	n, err := lrw.ResponseWriter.Write(b)
-	lrw.bytesWritten += n
-	return n, err
-}
-
-// main is the entry point for the API gateway
-func main() {
-	// Parse command line flags
-	configPath := flag.String("config", "config.yaml", "Path to the configuration file")
-	flag.Parse()
-
-	// Initialize the gateway
-	gateway, err := NewGateway(*configPath)
-	if err != nil {
-		log.Fatalf("Failed to initialize gateway: %v", err)
-	}
-
-	// Start the gateway server
-	if err := gateway.Serve(); err != nil {
-		log.Fatalf("Gateway server failed: %v", err)
-	}
 }

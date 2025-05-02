@@ -30,19 +30,7 @@ routes:
 # 'http://localhost:8180/realms/kychat/protocol/openid-connect/token' \
 
 plugins:
-  - name: "keycloak"
-    path: "./plugins/auth/keycloak.so"
-    enabled: true
-    config:
-      serverURL: "http://localhost:8180"
-      realm: "kychat"
-      clientID: "kaysir-service"
-      clientSecret: "wewgIfGNUq43uB4xeIHZgaC2WQaOnHau"
-      cacheEnabled: true
-      publicURLs:
-        - "/api/auth/login"
-        - "/api/public"
-        - "/health"
+ 
   
   - name: "rate-limiter"
     path: "./plugins/rate/rate-limiter.so"
