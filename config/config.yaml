@@ -10,22 +10,6 @@ server:
     admin: "$2a$10$N9qo8uLOickgx2ZMRZoMy.Mrq4H3.HoAZZoLsL/4ZDFBH7/4X.1Oa"  # bcrypt hashed password
     user1: "$2a$10$N9qo8uLOickgx2ZMRZoMy.Mrq4H3.HoAZZoLsL/4ZDFBH7/4X.1Oa"
 
-routes:
-  - path: "/api/users/{id}"
-    destination: "http://user-service:8000/users/{id}"
-    methods: ["GET", "PUT", "DELETE"]
-  
-  - path: "/api/products"
-    destination: "http://product-service:8001/products"
-    methods: ["GET", "POST"]
-    
-  - path: "/api/orders"
-    destination: "http://order-service:8002/orders"
-    methods: ["GET", "POST", "PUT"]
-    
-  - path: "/api/auth"
-    destination: "http://auth-service:8003/auth"
-    methods: ["POST"]
 
 # 'http://localhost:8180/realms/kychat/protocol/openid-connect/token' \
 

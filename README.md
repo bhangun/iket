@@ -1,3 +1,4 @@
+[![Logo][iket-logo]][iket-logo]
 # Iket API Gateway
 
 Lighweight API gateway
@@ -137,6 +138,9 @@ See the provided plugin example for details on implementing your own plugins.
 - Implement proper monitoring and alerting
 - Consider using a service mesh for advanced service-to-service communication
 - Perform regular security audits
+
+
+[iket-logo]: https://github.com/bhangun/repo-assets/blob/master/iket-logo.png
 
 ## License
 

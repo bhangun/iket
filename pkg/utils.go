@@ -25,6 +25,20 @@ func loadConfig(path string) (*Config, error) {
 	return &config, nil
 }
 
+func loadRoutes(path string) (*RouterConfig, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var config RouterConfig
+	if err := yaml.Unmarshal(data, &config); err != nil {
+		return nil, err
+	}
+
+	return &config, nil
+}
+
 // generateRequestID generates a unique request ID
 func generateRequestID() string {
 	return fmt.Sprintf("%d", time.Now().UnixNano())

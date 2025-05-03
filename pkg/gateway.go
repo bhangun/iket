@@ -23,35 +23,12 @@ import (
 	"golang.org/x/time/rate"
 )
 
-// GatewayPlugin interface that all plugins must implement
-type GatewayPlugin interface {
-	Name() string
-	Initialize(config map[string]interface{}) error
-	Middleware() func(http.Handler) http.Handler
-	Shutdown() error
-}
-
-// Gateway is the main API gateway struct
-type Gateway struct {
-	config      *Config
-	router      *mux.Router
-	adminAPI    *AdminAPI
-	openAPISpec map[string]interface{}
-	plugins     []GatewayPlugin
-	pluginsMu   sync.RWMutex
-	middlewares []func(http.Handler) http.Handler
-	rateLimiter *RateLimiter
-	metrics     *Metrics
-	logger      *Logger
-	storage     *StorageManager
-	configPath  string
-}
-
 // NewGateway creates a new API gateway instance
-func NewGateway(path string) (*Gateway, error) {
+func NewGateway(path string, routes string) (*Gateway, error) {
 	logger := NewLogger(false) // Start with logging disabled until we load config
 
 	configPath := path
+	routesPath := routes
 
 	// First try to load config from storage
 	storage := NewStorageManager(logger)
@@ -61,12 +38,23 @@ func NewGateway(path string) (*Gateway, error) {
 	}
 
 	var config *Config
+	var routesConfig *Config
+
 	if storedConfig != nil {
 		config = storedConfig
 		logger.Info("Loaded configuration from storage")
 	} else {
 		// Fall back to file-based config
 		config, err = loadConfig(configPath)
+
+		if err != nil {
+			return nil, fmt.Errorf("failed to load config: %w", err)
+		}
+
+		routesConfig, err = loadConfig(routesPath)
+
+		config.Routes = routesConfig.Routes
+
 		if err != nil {
 			return nil, fmt.Errorf("failed to load config: %w", err)
 		}
@@ -146,6 +134,30 @@ func NewGateway(path string) (*Gateway, error) {
 	return gateway, nil
 }
 
+// GatewayPlugin interface that all plugins must implement
+type GatewayPlugin interface {
+	Name() string
+	Initialize(config map[string]interface{}) error
+	Middleware() func(http.Handler) http.Handler
+	Shutdown() error
+}
+
+// Gateway is the main API gateway struct
+type Gateway struct {
+	config      *Config
+	router      *mux.Router
+	adminAPI    *AdminAPI
+	openAPISpec map[string]interface{}
+	plugins     []GatewayPlugin
+	pluginsMu   sync.RWMutex
+	middlewares []func(http.Handler) http.Handler
+	rateLimiter *RateLimiter
+	metrics     *Metrics
+	logger      *Logger
+	storage     *StorageManager
+	configPath  string
+}
+
 // setupRoutes configures the routes from the config
 func (g *Gateway) setupRoutes() {
 	// Add health check endpoint
@@ -156,6 +168,10 @@ func (g *Gateway) setupRoutes() {
 
 	// Configure routes from the config
 	for _, route := range g.config.Routes {
+
+		// Print routes list
+		g.logger.Info(route.Path)
+
 		handler := g.proxyHandler(route)
 
 		// Apply route-specific middleware
@@ -190,8 +206,10 @@ func (g *Gateway) proxyHandler(route RouterConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 
+		g.logger.Info(route.Destination)
 		// Parse the destination URL
 		target, err := url.Parse(route.Destination)
+		g.logger.Info(target.Path)
 		if err != nil {
 			g.logger.Error("Failed to parse destination URL: %v", err)
 			w.WriteHeader(http.StatusInternalServerError)

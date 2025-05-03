@@ -15,3 +15,6 @@ routes:
   - path: "/api/auth"
     destination: "http://auth-service:8003/auth"
     methods: ["POST"]
+  - path: "/index.html"
+    destination: "http://localhost:8082"
+    methods: ["GET", "POST"]
