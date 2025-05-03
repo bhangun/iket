@@ -1,0 +1,84 @@
+type Query {
+  # Get user by ID
+  user(id: ID!): User
+  # Get all products
+  products: [Product!]!
+  # Get product by ID
+  product(id: ID!): Product
+  # Get all orders
+  orders: [Order!]!
+  # Get order by ID
+  order(id: ID!): Order
+}
+
+type Mutation {
+  # Create a new user
+  createUser(input: CreateUserInput!): User!
+  # Create a new product
+  createProduct(input: CreateProductInput!): Product!
+  # Create a new order
+  createOrder(input: CreateOrderInput!): Order!
+}
+
+type User {
+  id: ID!
+  username: String!
+  email: String!
+  createdAt: String!
+  updatedAt: String!
+}
+
+type Product {
+  id: ID!
+  name: String!
+  description: String
+  price: Float!
+  createdAt: String!
+  updatedAt: String!
+}
+
+type Order {
+  id: ID!
+  userId: ID!
+  user: User!
+  products: [OrderProduct!]!
+  totalAmount: Float!
+  status: OrderStatus!
+  createdAt: String!
+  updatedAt: String!
+}
+
+type OrderProduct {
+  product: Product!
+  quantity: Int!
+  price: Float!
+}
+
+input CreateUserInput {
+  username: String!
+  email: String!
+  password: String!
+}
+
+input CreateProductInput {
+  name: String!
+  description: String
+  price: Float!
+}
+
+input CreateOrderInput {
+  userId: ID!
+  products: [OrderProductInput!]!
+}
+
+input OrderProductInput {
+  productId: ID!
+  quantity: Int!
+}
+
+enum OrderStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  CANCELLED
+}

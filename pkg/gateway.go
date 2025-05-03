@@ -20,7 +20,6 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"golang.org/x/time/rate"
 )
 
 // NewGateway creates a new API gateway instance
@@ -77,10 +76,6 @@ func NewGateway(path string, routes string) (*Gateway, error) {
 	}
 
 	metrics := NewMetrics()
-	rateLimiter := NewRateLimiter(
-		config.Security.RateLimitRequests,
-		config.Security.RateLimitInterval*time.Second,
-	)
 
 	gateway := &Gateway{
 		config:      config,
@@ -88,7 +83,6 @@ func NewGateway(path string, routes string) (*Gateway, error) {
 		openAPISpec: make(map[string]interface{}),
 		plugins:     make([]GatewayPlugin, 0),
 		middlewares: make([]func(http.Handler) http.Handler, 0),
-		rateLimiter: rateLimiter,
 		metrics:     metrics,
 		logger:      logger,
 		storage:     storage,
@@ -151,7 +145,6 @@ type Gateway struct {
 	plugins     []GatewayPlugin
 	pluginsMu   sync.RWMutex
 	middlewares []func(http.Handler) http.Handler
-	rateLimiter *RateLimiter
 	metrics     *Metrics
 	logger      *Logger
 	storage     *StorageManager
@@ -673,39 +666,25 @@ func (g *Gateway) rateLimitMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Get client IP
-		clientIP := getClientIP(r)
-
-		// Get current route
-		route := mux.CurrentRoute(r)
-		var routePath string
-		if route != nil {
-			var err error
-			routePath, err = route.GetPathTemplate()
-			if err != nil {
-				routePath = r.URL.Path
+		// Find rate limiter plugin
+		g.pluginsMu.RLock()
+		var rateLimiterPlugin GatewayPlugin
+		for _, plugin := range g.plugins {
+			if plugin.Name() == "rate-limiter" {
+				rateLimiterPlugin = plugin
+				break
 			}
-		} else {
-			routePath = r.URL.Path
 		}
+		g.pluginsMu.RUnlock()
 
-		// Get appropriate limiter
-		var limiter *rate.Limiter
-		if routePath != "" {
-			limiter = g.rateLimiter.GetRouteLimiter(routePath, clientIP)
-		} else {
-			limiter = g.rateLimiter.GetLimiter(clientIP)
-		}
-
-		// Check if request is allowed
-		if !limiter.Allow() {
-			w.Header().Set("Retry-After", "60")
-			w.WriteHeader(http.StatusTooManyRequests)
-			w.Write([]byte(`{"error":"Too Many Requests","message":"Rate limit exceeded"}`))
+		if rateLimiterPlugin == nil {
+			g.logger.Error("Rate limiter plugin not found")
+			next.ServeHTTP(w, r)
 			return
 		}
 
-		next.ServeHTTP(w, r)
+		// Use plugin's middleware
+		rateLimiterPlugin.Middleware()(next).ServeHTTP(w, r)
 	})
 }
 

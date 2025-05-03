@@ -1,25 +1,64 @@
 # Build stage
-FROM golang:1.24-alpine AS builder
+FROM golang:1.23.4-alpine AS builder
+
+# Install build dependencies
+RUN apk add --no-cache git ca-certificates tzdata
 
 WORKDIR /app
 
-# Download dependencies
-COPY go.mod .
+# Download dependencies first (better layer caching)
+COPY go.mod go.sum ./
 RUN go mod download
 
-# Copy source
-COPY config/ config/
-COPY plugins/ plugins/
+# Copy source code
 COPY . .
 
-# Build server
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /bin/server ./server
+# Build the main application
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -ldflags="-w -s" \
+    -o /bin/iket ./cmd/main.go
 
 # Runtime stage
-FROM scratch
+FROM alpine:3.19
 
-# Copy binaries
-COPY --from=builder /bin/server /bin/server
+# Add basic security
+RUN adduser -D -u 10001 appuser
 
-# Set default command
-ENTRYPOINT ["/bin/server"]
+# Install runtime dependencies
+RUN apk add --no-cache ca-certificates tzdata curl
+
+# Create necessary directories
+RUN mkdir -p /app/plugins /app/certs && \
+    chown -R appuser:appuser /app
+
+# Copy binary, configs, and certificates
+COPY --from=builder /bin/iket /app/iket
+COPY --from=builder /app/config /app/config
+COPY certs/server/server.crt /app/certs/server.crt
+COPY certs/server/server.key /app/certs/server.key
+COPY certs/saml/saml.crt /app/certs/saml.crt
+COPY certs/saml/saml.key /app/certs/saml.key
+
+# Set correct permissions for certificates
+RUN chmod 600 /app/certs/*.key && \
+    chmod 644 /app/certs/*.crt && \
+    chown -R appuser:appuser /app/certs
+
+WORKDIR /app
+
+# Use non-root user
+USER appuser
+
+# Set environment variables
+ENV TZ=UTC \
+    CONFIG_PATH=/app/config
+
+# Expose ports if needed (adjust as necessary)
+EXPOSE 8080 8443
+
+# Health check (adjust as necessary)
+HEALTHCHECK --interval=30s --timeout=3s \
+    CMD curl -k --fail https://localhost:8443/health || exit 1
+
+# Run the application
+ENTRYPOINT ["/app/iket"]

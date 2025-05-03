@@ -1,5 +1,5 @@
 // plugins/auth/keycloak.go
-package main
+package auth
 
 import (
 	"context"

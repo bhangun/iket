@@ -7,10 +7,6 @@ plugins:
       - "localhost:2379"
     timeout: 5s
     prefix: "/iket"
-    tls:
-      enabled: true
-      cert_file: "/app/certs/server.crt"
-      key_file: "/app/certs/server.key"
 
   auth:
     type: "saml"
@@ -18,21 +14,8 @@ plugins:
     assertion_url: "http://localhost:8080/saml/acs"
     metadata_url: "http://localhost:8080/saml/metadata"
     session_max_age: 3600
-    key_file: "/app/certs/saml.key"
-    cert_file: "/app/certs/saml.crt"
-    allowed_groups:
-      - "admin"
-      - "user"
-    attribute_mappings:
-      email: "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress"
-      name: "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name"
-      groups: "http://schemas.xmlsoap.org/claims/Group"
-
-  rate_limiter:
-    type: "rate-limiter"
-    windowSizeSeconds: 60
-    maxRequestsPerIP: 100
-    cleanupIntervalMinutes: 5
+    key_file: "/app/certs/server.key"
+    cert_file: "/app/certs/server.crt"
 server:
   port: 8080
   readTimeout: 5s
@@ -92,3 +75,7 @@ logging:
   output: "stdout"
   request_logging: true
   include_trace_id: true
+
+      
+#  - name: "prometheus-metrics"
+#    path: "./plugins/metrics/prometheus"

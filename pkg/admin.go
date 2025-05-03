@@ -455,12 +455,6 @@ func (a *AdminAPI) updateConfig(w http.ResponseWriter, r *http.Request) {
 	// Update the configuration
 	a.gateway.config = &newConfig
 
-	// Reinitialize components with new config
-	a.gateway.rateLimiter = NewRateLimiter(
-		a.gateway.config.Security.RateLimitRequests,
-		a.gateway.config.Security.RateLimitInterval*time.Second,
-	)
-
 	// Rebuild the router
 	a.gateway.setupRoutes()
 
@@ -476,12 +470,6 @@ func (a *AdminAPI) reloadConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.gateway.config = config
-
-	// Reinitialize components with new config
-	a.gateway.rateLimiter = NewRateLimiter(
-		a.gateway.config.Security.RateLimitRequests,
-		a.gateway.config.Security.RateLimitInterval*time.Second,
-	)
 
 	// Rebuild the router
 	a.gateway.setupRoutes()
