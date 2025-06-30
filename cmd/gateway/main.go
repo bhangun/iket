@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -58,6 +59,7 @@ func main() {
 	configPath := flag.String("config", defaultConfigPath, "Path to config.yaml")
 	routesPath := flag.String("routes", defaultRoutesPath, "Path to routes.yaml")
 	portFlag := flag.Int("port", 0, "Port to run the gateway on (overrides config and IKET_PORT env var)")
+	printConfig := flag.Bool("print-config", false, "Print the loaded configuration and exit")
 	flag.Parse()
 
 	if ensureDefaultConfig(*configPath, *routesPath) {
@@ -75,6 +77,16 @@ func main() {
 	cfg, err := config.LoadConfig(*configPath, *routesPath, logger)
 	if err != nil {
 		logger.Fatal("Failed to load configuration", logging.Error(err))
+	}
+
+	if *printConfig {
+		if cfg.Security.Jwt.Secret != "" {
+			cfg.Security.Jwt.Secret = "REDACTED"
+		}
+		cfg.Security.BasicAuthUsers = nil
+		b, _ := json.MarshalIndent(cfg, "", "  ")
+		fmt.Println(string(b))
+		os.Exit(0)
 	}
 
 	// Allow port override: --port > IKET_PORT env > config file

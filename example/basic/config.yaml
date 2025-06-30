@@ -9,16 +9,16 @@ security:
   clients:
     client-id: my-secret
     another-client: another-secret
-  #enableBasicAuth: true
-  #basicAuthUsers:
-  #  alice: password123
-  #  bob: secret456
-  jwt:
-    enabled: true
-    secret: "your_hs256_secret"         # For HS256
+  enableBasicAuth: true
+  basicAuthUsers:
+    alice: password123
+    bob: secret456
+  #jwt:
+  #  enabled: true
+  #  secret: "your_hs256_secret"         # For HS256
     #publicKeyFile: "/app/certs/jwt_public.pem"  # For RS256 (optional)
-    algorithms: ["RS256"] # ["HS256", "RS256"]      # List allowed algorithms
-    required: false 
+  #  algorithms: ["RS256"] # ["HS256", "RS256"]      # List allowed algorithms
+  #  required: false 
 
 plugins:
   openapi:

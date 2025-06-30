@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -91,6 +92,9 @@ func (g *Gateway) setupRoutes() error {
 
 	// Add metrics endpoint
 	g.router.HandleFunc("/metrics", g.metricsHandler).Methods(http.MethodGet)
+
+	// Add config endpoint (protected by admin auth)
+	g.router.Handle("/admin/config", g.adminAuthMiddleware(http.HandlerFunc(g.configHandler))).Methods(http.MethodGet)
 
 	// Setup proxy routes
 	for _, route := range g.config.Routes {
@@ -400,4 +404,48 @@ func (g *Gateway) notFoundHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusNotFound)
 	w.Write([]byte(`{"error":"Not Found","message":"The requested resource does not exist"}`))
+}
+
+// configHandler returns the current configuration as JSON, with secrets redacted
+func (g *Gateway) configHandler(w http.ResponseWriter, r *http.Request) {
+	cfg := *g.GetConfig()
+	// Redact secrets
+	if cfg.Security.Jwt.Secret != "" {
+		cfg.Security.Jwt.Secret = "REDACTED"
+	}
+	cfg.Security.BasicAuthUsers = nil // Hide BasicAuthUsers
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(cfg)
+}
+
+// adminAuthMiddleware enforces Basic Auth for admin endpoints
+func (g *Gateway) adminAuthMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, pass, ok := r.BasicAuth()
+		if !ok || user == "" || pass == "" {
+			g.logger.Warn("401 Unauthorized (admin endpoint)",
+				logging.String("reason", "Missing or invalid admin credentials"),
+				logging.String("method", r.Method),
+				logging.String("path", r.URL.Path),
+				logging.String("remote_addr", r.RemoteAddr),
+			)
+			w.Header().Set("WWW-Authenticate", "Basic realm=\"Iket Admin\"")
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte("Missing or invalid admin credentials"))
+			return
+		}
+		if expected, ok := g.config.Security.BasicAuthUsers[user]; !ok || expected != pass {
+			g.logger.Warn("401 Unauthorized (admin endpoint)",
+				logging.String("reason", "Invalid admin credentials"),
+				logging.String("method", r.Method),
+				logging.String("path", r.URL.Path),
+				logging.String("remote_addr", r.RemoteAddr),
+			)
+			w.Header().Set("WWW-Authenticate", "Basic realm=\"Iket Admin\"")
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte("Invalid admin credentials"))
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
