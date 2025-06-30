@@ -10,6 +10,136 @@ Lighweight API gateway
 - Optimized Docker multi-stage build
 - Docker Compose setup
 - Makefile for common tasks
+- Reverse proxy for HTTP APIs
+- Route-based plugin system
+- Per-route authentication and rate limiting
+- Wildcard and prefix routing
+- Built-in support for Basic Auth and Client Credential authentication
+
+## Authentication Options
+
+### 1. Basic Auth (User/Password)
+
+**config.yaml:**
+```yaml
+security:
+  enableBasicAuth: true
+  basicAuthUsers:
+    alice: password123
+    bob: secret456
+```
+
+**routes.yaml:**
+```yaml
+- path: "/docs/{rest:.*}"
+  destination: "http://localhost:7001"
+  methods: ["GET"]
+  requireAuth: true
+  stripPath: true
+- path: "/openapi"
+  destination: "http://localhost:7001"
+  methods: ["GET", "OPTIONS"]
+  requireAuth: true
+  stripPath: false
+```
+
+**Usage:**
+```sh
+curl -u alice:password123 http://localhost:7110/openapi
+```
+- The browser will prompt for credentials when accessing protected routes.
+
+### 2. Client Credential Auth (Client ID/Secret)
+
+**config.yaml:**
+```yaml
+security:
+  clients:
+    my-client-id: my-secret
+    another-client: another-secret
+```
+
+**routes.yaml:**
+```yaml
+- path: "/buku/{rest:.*}"
+  destination: "http://localhost:7112"
+  methods: ["GET"]
+  requireAuth: true
+  stripPath: true
+- path: "/openapi"
+  destination: "http://localhost:7112"
+  methods: ["GET", "OPTIONS"]
+  requireAuth: true
+  stripPath: false
+```
+
+**Usage:**
+```sh
+curl -u my-client-id:my-secret http://localhost:7110/openapi
+```
+
+### 3. Public Routes
+To allow public access (no authentication), set `requireAuth: false` for the route:
+```yaml
+- path: "/openapi"
+  destination: "http://localhost:7112"
+  methods: ["GET", "OPTIONS"]
+  requireAuth: false
+  stripPath: false
+```
+
+## Route Configuration
+- `requireAuth: true` — Enforces authentication (Basic Auth or Client Credential, depending on config)
+- `stripPath: true` — Strips the route prefix before proxying to the backend
+- Wildcards: Use `{rest:.*}` for catch-all routes
+
+## Example: Full Configuration
+
+**config.yaml:**
+```yaml
+server:
+  port: 8080
+  readTimeout: "10s"
+  writeTimeout: "10s"
+  idleTimeout: "60s"
+  enableLogging: true
+
+security:
+  enableBasicAuth: true
+  basicAuthUsers:
+    alice: password123
+    bob: secret456
+  # OR for client credential auth:
+  # clients:
+  #   my-client-id: my-secret
+
+plugins: {}
+```
+
+**routes.yaml:**
+```yaml
+- path: "/buku/{rest:.*}"
+  destination: "http://localhost:7112"
+  methods: ["GET"]
+  requireAuth: true
+  stripPath: true
+- path: "/openapi"
+  destination: "http://localhost:7112"
+  methods: ["GET", "OPTIONS"]
+  requireAuth: true
+  stripPath: false
+```
+
+## Running the Gateway
+
+```sh
+go run cmd/gateway/main.go --config=example/basic/config.yaml --routes=example/basic/routes.yaml --port=7110
+```
+
+## Notes
+- Restart the gateway after changing config or routes.
+- Only one authentication method (Basic Auth or Client Credential) should be enabled at a time.
+- For Swagger UI, set the `url` to `/openapi` and use the "Authorize" button to enter credentials.
 
 ## Quick Start
 
