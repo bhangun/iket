@@ -31,9 +31,10 @@ RUN apk add --no-cache ca-certificates tzdata curl
 RUN mkdir -p /app/plugins /app/certs && \
     chown -R appuser:appuser /app
 
-# Copy binary, configs, and certificates
+# Copy binary
 COPY --from=builder /bin/iket /app/iket
-COPY --from=builder /app/config /app/config
+# Copy config files
+COPY config /app/config
 
 # Set correct permissions for certificates
 RUN chmod 600 /app/certs/*.key && \
