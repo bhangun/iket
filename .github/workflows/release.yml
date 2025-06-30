@@ -1,0 +1,25 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v0.*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+      - name: Build binary
+        run: |
+          GOOS=linux GOARCH=amd64 go build -o iket-gateway ./cmd/gateway
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v1
+        with:
+          files: iket-gateway
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
