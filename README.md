@@ -26,6 +26,10 @@ make build
 ./bin/client --server http://localhost:8080
 
 
+# Generate Certificate
+openssl req -x509 -newkey rsa:2048 -keyout saml.key -out saml.crt -days 365 -nodes -subj "/CN=localhost"
+
+
 # Docker
 # Build and run with Docker Compose
 docker-compose up --build

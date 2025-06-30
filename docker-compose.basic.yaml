@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  iket:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    container_name: iket-gateway-basic
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+      - "8443:8443"
+    environment:
+      # Basic configuration without external storage
+      - LOG_LEVEL=info
+      - TZ=UTC
+      # Disable storage features
+      - DISABLE_STORAGE=true
+      - USE_FILE_CONFIG=false
+    volumes:
+      # Only mount basic configs if they exist
+      - ./config:/app/config:ro
+      - ./certs:/app/certs:ro
+    networks:
+      - iket-basic-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    command: 
+      - "/app/iket"
+      - "--config"
+      - "/app/config/config.yaml"
+      - "--routes"
+      - "/app/config/routes.yaml"
+
+networks:
+  iket-basic-network:
+    driver: bridge 

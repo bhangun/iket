@@ -1,0 +1,73 @@
+# Build stage
+FROM golang:1.23.4-alpine AS builder
+
+# Install build dependencies
+RUN apk add --no-cache git ca-certificates tzdata
+
+WORKDIR /app
+
+# Download dependencies first (better layer caching)
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build the main application with optimizations
+# Exclude storage plugins for basic build
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -ldflags="-w -s -extldflags=-static" \
+    -tags="basic" \
+    -o /bin/iket ./pkg/main.go
+
+# Runtime stage
+FROM alpine:3.19
+
+# Add basic security
+RUN adduser -D -u 10001 appuser && \
+    addgroup -g 10001 appgroup && \
+    adduser appuser appgroup
+
+# Install runtime dependencies
+RUN apk add --no-cache ca-certificates tzdata curl
+
+# Create necessary directories with proper permissions
+RUN mkdir -p /app/config /app/certs /app/logs && \
+    chown -R appuser:appgroup /app
+
+# Copy binary
+COPY --from=builder /bin/iket /app/iket
+
+# Copy default configs (can be overridden via volumes)
+COPY --from=builder /app/config /app/config
+COPY --from=builder /app/certs /app/certs
+
+# Set correct permissions for certificates and configs
+RUN chmod 600 /app/certs/*.key 2>/dev/null || true && \
+    chmod 644 /app/certs/*.crt 2>/dev/null || true && \
+    chmod 644 /app/config/*.yaml 2>/dev/null || true && \
+    chown -R appuser:appgroup /app
+
+WORKDIR /app
+
+# Use non-root user
+USER appuser
+
+# Set environment variables for basic mode
+ENV TZ=UTC \
+    CONFIG_PATH=/app/config/config.yaml \
+    ROUTES_PATH=/app/config/routes.yaml \
+    LOG_LEVEL=info \
+    DISABLE_STORAGE=true \
+    USE_FILE_CONFIG=true
+
+# Expose ports
+EXPOSE 8080 8443
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
+
+# Run the application with basic configuration
+ENTRYPOINT ["/app/iket"]
+CMD ["--config", "/app/config/config.yaml", "--routes", "/app/config/routes.yaml"] 

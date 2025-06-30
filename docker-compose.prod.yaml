@@ -1,0 +1,146 @@
+version: '3.8'
+
+services:
+  iket:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    container_name: iket-gateway
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+      - "8443:8443"
+    environment:
+      # Config paths - can be customized via environment variables
+      - CONFIG_PATH=${CONFIG_PATH:-/app/config/config.yaml}
+      - ROUTES_PATH=${ROUTES_PATH:-/app/config/routes.yaml}
+      - PLUGINS_DIR=${PLUGINS_DIR:-/app/plugins}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - TZ=${TZ:-UTC}
+    volumes:
+      # Mount custom configs (optional - will use defaults if not provided)
+      - ${CONFIG_VOLUME:-./config}:/app/config:ro
+      - ${CERT_VOLUME:-./certs}:/app/certs:ro
+      - ${PLUGINS_VOLUME:-./plugins}:/app/plugins:ro
+      # Persistent logs
+      - iket-logs:/app/logs
+    networks:
+      - iket-network
+    depends_on:
+      - postgres
+      - redis
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    command: 
+      - "/app/iket"
+      - "--config"
+      - "${CONFIG_PATH:-/app/config/config.yaml}"
+      - "--routes"
+      - "${ROUTES_PATH:-/app/config/routes.yaml}"
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: iket-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-iket_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-iket_password}
+      - POSTGRES_DB=${POSTGRES_DB:-iket_db}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - iket-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-iket_user}"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  redis:
+    image: redis:7-alpine
+    container_name: iket-redis
+    restart: unless-stopped
+    command: redis-server --requirepass ${REDIS_PASSWORD:-redis_password}
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - iket-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  keycloak-db:
+    image: postgres:15-alpine
+    container_name: iket-keycloak-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=${KEYCLOAK_DB:-keycloak}
+      - POSTGRES_USER=${KEYCLOAK_DB_USER:-keycloak}
+      - POSTGRES_PASSWORD=${KEYCLOAK_DB_PASSWORD:-keycloak_password}
+    volumes:
+      - keycloak-db-data:/var/lib/postgresql/data
+    networks:
+      - iket-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${KEYCLOAK_DB_USER:-keycloak}"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:22.0.1
+    container_name: iket-keycloak
+    restart: unless-stopped
+    environment:
+      - KEYCLOAK_ADMIN=${KEYCLOAK_ADMIN:-admin}
+      - KEYCLOAK_ADMIN_PASSWORD=${KEYCLOAK_ADMIN_PASSWORD:-admin_password}
+      - KC_DB=postgres
+      - KC_DB_URL=jdbc:postgresql://keycloak-db:5432/${KEYCLOAK_DB:-keycloak}
+      - KC_DB_USERNAME=${KEYCLOAK_DB_USER:-keycloak}
+      - KC_DB_PASSWORD=${KEYCLOAK_DB_PASSWORD:-keycloak_password}
+      - KC_HOSTNAME=${KEYCLOAK_HOSTNAME:-localhost}
+      - KC_HTTP_RELATIVE_PATH=/auth
+      - KC_PROXY=edge
+    command: start --optimized
+    volumes:
+      - ./keycloak:/opt/keycloak/data/import:ro
+    ports:
+      - "8180:8080"
+    depends_on:
+      keycloak-db:
+        condition: service_healthy
+    networks:
+      - iket-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/auth/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  postgres-data:
+    driver: local
+  redis-data:
+    driver: local
+  keycloak-db-data:
+    driver: local
+  iket-logs:
+    driver: local
+
+networks:
+  iket-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16 

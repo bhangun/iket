@@ -1,0 +1,14 @@
+server:
+  port: 8080
+  readTimeout: "10s"
+  writeTimeout: "10s"
+  idleTimeout: "60s"
+  enableLogging: true
+
+security:
+  enableBasicAuth: true
+  basicAuthUsers:
+    alice: password123
+    bob: secret456
+    
+plugins: {}

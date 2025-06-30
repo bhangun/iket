@@ -1,0 +1,16 @@
+
+routes:
+  - path: "/hello"
+    destination: "http://localhost:9000"
+    methods: ["GET"]
+    requireAuth: false
+  - path: "/buku/{rest:.*}"
+    destination: "http://localhost:7112"
+    methods: ["GET"]
+    requireAuth: true
+    stripPath: true
+  - path: "/openapi"
+    destination: "http://localhost:7112"
+    methods: ["GET", "OPTIONS"]
+    requireAuth: true
+    stripPath: false

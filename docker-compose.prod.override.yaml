@@ -1,0 +1,57 @@
+# Development/Testing Override for Production Docker Compose
+# This file can be used to override production settings for development
+# Usage: docker-compose -f docker-compose.prod.yaml -f docker-compose.prod.override.yaml up
+
+version: '3.8'
+
+services:
+  iket:
+    # Override for development - enable debug logging
+    environment:
+      - LOG_LEVEL=debug
+    # Expose additional ports for debugging
+    ports:
+      - "8080:8080"
+      - "8443:8443"
+      - "9090:9090"  # For metrics if needed
+    # Mount source code for development
+    volumes:
+      - .:/app/src:ro
+      - ${CONFIG_VOLUME:-./config}:/app/config:ro
+      - ${CERT_VOLUME:-./certs}:/app/certs:ro
+      - ${PLUGINS_VOLUME:-./plugins}:/app/plugins:ro
+      - iket-logs:/app/logs
+
+  postgres:
+    # Expose port for external access in development
+    ports:
+      - "5432:5432"
+    # Add development-friendly settings
+    environment:
+      - POSTGRES_USER=iket_user
+      - POSTGRES_PASSWORD=dev_password
+      - POSTGRES_DB=iket_db
+
+  redis:
+    # Expose port for external access in development
+    ports:
+      - "6379:6379"
+    # Remove password for development
+    command: redis-server
+
+  keycloak:
+    # Expose port for external access in development
+    ports:
+      - "8180:8080"
+    # Use development-friendly settings
+    environment:
+      - KEYCLOAK_ADMIN=admin
+      - KEYCLOAK_ADMIN_PASSWORD=admin
+      - KC_DB=postgres
+      - KC_DB_URL=jdbc:postgresql://keycloak-db:5432/keycloak
+      - KC_DB_USERNAME=keycloak
+      - KC_DB_PASSWORD=keycloak
+      - KC_HOSTNAME=localhost
+      - KC_HTTP_RELATIVE_PATH=/auth
+    # Use development mode
+    command: start-dev --import-realm 
