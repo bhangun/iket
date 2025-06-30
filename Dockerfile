@@ -36,10 +36,9 @@ COPY --from=builder /bin/iket /app/iket
 # Copy config files
 COPY config /app/config
 
-# Set correct permissions for certificates
-RUN chmod 600 /app/certs/*.key && \
-    chmod 644 /app/certs/*.crt && \
-    chown -R appuser:appuser /app/certs
+# Set correct permissions for config files
+RUN chmod 644 /app/config/*.yaml 2>/dev/null || true && \
+    chown -R appuser:appuser /app/config
 
 WORKDIR /app
 
