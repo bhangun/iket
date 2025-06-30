@@ -35,6 +35,8 @@ type Gateway struct {
 	// State management
 	mu       sync.RWMutex
 	shutdown chan struct{}
+
+	version string // Add version field
 }
 
 // Dependencies contains all the dependencies required to create a Gateway
@@ -45,7 +47,7 @@ type Dependencies struct {
 }
 
 // NewGateway creates a new Gateway instance with the provided dependencies
-func NewGateway(deps Dependencies) (*Gateway, error) {
+func NewGateway(deps Dependencies, version string) (*Gateway, error) {
 	if deps.Config == nil {
 		return nil, errors.NewConfigError("config is required", nil)
 	}
@@ -65,6 +67,7 @@ func NewGateway(deps Dependencies) (*Gateway, error) {
 		metrics:  deps.Metrics,
 		logger:   deps.Logger,
 		shutdown: make(chan struct{}),
+		version:  version,
 	}
 
 	// Setup routes and middleware
@@ -95,6 +98,9 @@ func (g *Gateway) setupRoutes() error {
 
 	// Add config endpoint (protected by admin auth)
 	g.router.Handle("/admin/config", g.adminAuthMiddleware(http.HandlerFunc(g.configHandler))).Methods(http.MethodGet)
+
+	// Add version endpoint (protected by admin auth)
+	g.router.Handle("/admin/version", g.adminAuthMiddleware(http.HandlerFunc(g.versionHandler))).Methods(http.MethodGet)
 
 	// Setup proxy routes
 	for _, route := range g.config.Routes {
@@ -448,4 +454,10 @@ func (g *Gateway) adminAuthMiddleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// versionHandler returns the current version as JSON
+func (g *Gateway) versionHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"version": g.version})
 }

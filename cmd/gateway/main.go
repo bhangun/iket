@@ -16,9 +16,10 @@ import (
 	"iket/internal/metrics"
 )
 
-const (
+var (
 	defaultConfigPath = "config/config.yaml"
 	defaultRoutesPath = "config/routes.yaml"
+	version           = "dev" // can be set at build time with -ldflags
 )
 
 var defaultConfig = `server:
@@ -62,6 +63,8 @@ func main() {
 	printConfig := flag.Bool("print-config", false, "Print the loaded configuration and exit")
 	flag.Parse()
 
+	fmt.Printf("Iket Gateway version: %s\n", version)
+
 	if ensureDefaultConfig(*configPath, *routesPath) {
 		fmt.Printf("\nDefault config created at %s and/or %s. Please review and run again.\n", *configPath, *routesPath)
 		os.Exit(0)
@@ -71,6 +74,7 @@ func main() {
 	logger := logging.NewLoggerFromEnv()
 	defer logger.Sync()
 
+	logger.Info("Iket Gateway version", logging.String("version", version))
 	logger.Info("Starting Iket Gateway")
 
 	// Load configuration
@@ -112,7 +116,7 @@ func main() {
 		Config:  cfg,
 		Logger:  logger,
 		Metrics: metricsCollector,
-	})
+	}, version)
 	if err != nil {
 		logger.Fatal("Failed to create gateway", logging.Error(err))
 	}
