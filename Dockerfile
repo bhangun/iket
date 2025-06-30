@@ -34,10 +34,6 @@ RUN mkdir -p /app/plugins /app/certs && \
 # Copy binary, configs, and certificates
 COPY --from=builder /bin/iket /app/iket
 COPY --from=builder /app/config /app/config
-COPY certs/server/server.crt /app/certs/server.crt
-COPY certs/server/server.key /app/certs/server.key
-COPY certs/saml/saml.crt /app/certs/saml.crt
-COPY certs/saml/saml.key /app/certs/saml.key
 
 # Set correct permissions for certificates
 RUN chmod 600 /app/certs/*.key && \

@@ -38,7 +38,6 @@ COPY --from=builder /bin/iket /app/iket
 
 # Copy default configs (can be overridden via volumes)
 COPY --from=builder /app/config /app/config
-COPY --from=builder /app/certs /app/certs
 
 # Set correct permissions for certificates and configs
 RUN chmod 600 /app/certs/*.key 2>/dev/null || true && \
