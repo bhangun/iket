@@ -1,2 +1,2 @@
 #!/bin/bash
-GOOS=linux GOARCH=amd64 go build -o iket-gateway ./cmd/gateway
+GOOS=linux GOARCH=amd64 go build -o iket ./cmd/gateway

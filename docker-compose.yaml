@@ -3,7 +3,7 @@ version: '3.8'
 services:
   iket:
     build: .
-    container_name: iket-gateway
+    container_name: iket
     restart: unless-stopped
     ports:
       - "8080:8080"

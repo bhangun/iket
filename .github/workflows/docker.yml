@@ -24,4 +24,4 @@ jobs:
         with:
           context: .
           push: true
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/iket-gateway:latest,${{ secrets.DOCKERHUB_USERNAME }}/iket-gateway:${{ github.ref_name }} 
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/iket:latest,${{ secrets.DOCKERHUB_USERNAME }}/iket:${{ github.ref_name }} 

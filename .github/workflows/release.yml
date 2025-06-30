@@ -1,6 +1,6 @@
 permissions:
   contents: write
-  
+
 name: Release
 
 on:
@@ -19,10 +19,10 @@ jobs:
           go-version: '1.21'
       - name: Build binary
         run: |
-          GOOS=linux GOARCH=amd64 go build -o iket-gateway ./cmd/gateway
+          GOOS=linux GOARCH=amd64 go build -o iket ./cmd/gateway
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v1
         with:
-          files: iket-gateway
+          files: iket
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 

@@ -5,7 +5,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.prod
-    container_name: iket-gateway
+    container_name: iket
     restart: unless-stopped
     ports:
       - "8080:8080"
