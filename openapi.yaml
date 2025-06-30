@@ -1,0 +1,385 @@
+---
+openapi: 3.1.0
+paths:
+  /api/books:
+    get:
+      summary: Get all books with pagination and sorting
+      tags:
+      - Books
+      parameters:
+      - name: page
+        in: query
+        schema:
+          type: integer
+          format: int32
+          default: 0
+      - name: size
+        in: query
+        schema:
+          type: integer
+          format: int32
+          default: 20
+      - name: sortBy
+        in: query
+        schema:
+          type: string
+          default: createdAt
+      - name: sortDir
+        in: query
+        schema:
+          type: string
+          default: desc
+      responses:
+        "200":
+          description: List of books
+    post:
+      summary: Create a new book
+      tags:
+      - Books
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BookRequest"
+        required: true
+      responses:
+        "201":
+          description: Book created successfully
+        "400":
+          description: Invalid request data
+  /api/books/author/{author}:
+    get:
+      summary: Get books by author
+      tags:
+      - Books
+      parameters:
+      - name: author
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: page
+        in: query
+        schema:
+          type: integer
+          format: int32
+          default: 0
+      - name: size
+        in: query
+        schema:
+          type: integer
+          format: int32
+          default: 20
+      responses:
+        "200":
+          description: List of books by author
+  /api/books/available:
+    get:
+      summary: Get all available books with pagination and sorting
+      tags:
+      - Books
+      parameters:
+      - name: page
+        in: query
+        schema:
+          type: integer
+          format: int32
+          default: 0
+      - name: size
+        in: query
+        schema:
+          type: integer
+          format: int32
+          default: 20
+      - name: sortBy
+        in: query
+        schema:
+          type: string
+          default: createdAt
+      - name: sortDir
+        in: query
+        schema:
+          type: string
+          default: desc
+      responses:
+        "200":
+          description: List of available books
+  /api/books/bulk:
+    post:
+      summary: Create multiple books in bulk
+      tags:
+      - Books
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BulkBookRequest"
+        required: true
+      responses:
+        "201":
+          description: Bulk operation completed
+        "400":
+          description: Invalid request data
+  /api/books/category/{category}:
+    get:
+      summary: Get books by category
+      tags:
+      - Books
+      parameters:
+      - name: category
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: page
+        in: query
+        schema:
+          type: integer
+          format: int32
+          default: 0
+      - name: size
+        in: query
+        schema:
+          type: integer
+          format: int32
+          default: 20
+      responses:
+        "200":
+          description: List of books by category
+  /api/books/clear-cache:
+    post:
+      summary: Clear books cache
+      tags:
+      - Books
+      responses:
+        "200":
+          description: Cache cleared successfully
+  /api/books/isbn/{isbn}:
+    get:
+      summary: Get a book by ISBN
+      tags:
+      - Books
+      parameters:
+      - name: isbn
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          description: Book found
+        "404":
+          description: Book not found
+  /api/books/search:
+    get:
+      summary: "Search books by title, subtitle, or description"
+      tags:
+      - Books
+      parameters:
+      - name: page
+        in: query
+        schema:
+          type: integer
+          format: int32
+          default: 0
+      - name: query
+        in: query
+        schema:
+          type: string
+          pattern: \S
+        required: true
+      - name: size
+        in: query
+        schema:
+          type: integer
+          format: int32
+          default: 20
+      responses:
+        "200":
+          description: Search results
+  /api/books/stats:
+    get:
+      summary: Get book statistics
+      tags:
+      - Books
+      responses:
+        "200":
+          description: Book statistics
+  /api/books/type/{type}:
+    get:
+      summary: Get books by type
+      tags:
+      - Books
+      parameters:
+      - name: type
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: page
+        in: query
+        schema:
+          type: integer
+          format: int32
+          default: 0
+      - name: size
+        in: query
+        schema:
+          type: integer
+          format: int32
+          default: 20
+      responses:
+        "200":
+          description: List of books by type
+  /api/books/{id}:
+    put:
+      summary: Update a book
+      tags:
+      - Books
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BookRequest"
+        required: true
+      responses:
+        "200":
+          description: Book updated successfully
+        "404":
+          description: Book not found
+        "400":
+          description: Invalid request data
+    get:
+      summary: Get a book by ID
+      tags:
+      - Books
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        "200":
+          description: Book found
+        "404":
+          description: Book not found
+    delete:
+      summary: Delete a book
+      tags:
+      - Books
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        "204":
+          description: Book deleted successfully
+        "404":
+          description: Book not found
+  /api/books/{id}/toggle-availability:
+    patch:
+      summary: Toggle book availability
+      tags:
+      - Books
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        "200":
+          description: Availability toggled successfully
+        "404":
+          description: Book not found
+  /hello:
+    get:
+      responses:
+        "200":
+          description: OK
+          content:
+            text/plain:
+              schema:
+                type: string
+      summary: Hello
+      tags:
+      - Greeting Resource
+tags:
+- name: Books
+  description: Manage books and publications
+components:
+  schemas:
+    BookRequest:
+      type: object
+      properties:
+        bookId:
+          type: string
+        title:
+          type: string
+        subtitle:
+          type: string
+        authors:
+          type: array
+          items:
+            type: string
+        publisher:
+          type: string
+        publishedDate:
+          $ref: "#/components/schemas/LocalDateTime"
+        description:
+          type: string
+        categories:
+          type: array
+          items:
+            type: string
+        type:
+          type: string
+        thumbnailUrl:
+          type: string
+        sourceUrl:
+          type: string
+        isbn:
+          type: string
+        pageCount:
+          type: integer
+          format: int32
+        language:
+          type: string
+        averageRating:
+          type: number
+          format: double
+        ratingsCount:
+          type: integer
+          format: int32
+        isAvailable:
+          type: boolean
+        metadata:
+          type: string
+    BulkBookRequest:
+      type: object
+      properties:
+        books:
+          type: array
+          items:
+            $ref: "#/components/schemas/BookRequest"
+    LocalDateTime:
+      type: string
+      format: date-time
+      examples:
+      - 2022-03-10T12:15:50
+info:
+  title: Miku Turats Service API
+  version: 1.0.0

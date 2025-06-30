@@ -61,7 +61,7 @@ security:
 
 **routes.yaml:**
 ```yaml
-- path: "/buku/{rest:.*}"
+- path: "/docs/{rest:.*}"
   destination: "http://localhost:7112"
   methods: ["GET"]
   requireAuth: true
@@ -118,7 +118,7 @@ plugins: {}
 
 **routes.yaml:**
 ```yaml
-- path: "/buku/{rest:.*}"
+- path: "/docs/{rest:.*}"
   destination: "http://localhost:7112"
   methods: ["GET"]
   requireAuth: true
@@ -279,3 +279,36 @@ See the provided plugin example for details on implementing your own plugins.
 ## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
+
+## OpenAPI Plugin & Swagger UI
+
+### Features
+- Serve your OpenAPI spec at any path (default: `/openapi`)
+- Output as YAML or JSON
+- Enable/disable plugin via config
+- Serve interactive Swagger UI at `/swagger-ui/`
+- Serve static Swagger UI assets from embedded directory (add files to `internal/core/plugin/swaggerui/`)
+
+### Example plugin config
+```yaml
+plugins:
+  openapi:
+    enabled: true
+    spec_path: "./openapi.yaml"
+    path: "/openapi"         # Optional, default: /openapi
+    format: "json"           # Optional, "yaml" or "json" (default: yaml)
+    swagger_ui: true          # Optional, serve Swagger UI at /swagger-ui/
+```
+
+- Visit `/openapi` (or your custom path) for the raw spec.
+- Visit `/swagger-ui/` for the interactive docs.
+
+### Static Asset Setup
+- Download the contents of [swagger-ui-dist](https://github.com/swagger-api/swagger-ui/tree/master/dist)
+- Place them in `internal/core/plugin/swaggerui/`
+- The gateway will serve these files at `/swagger-ui/*`
+
+### Notes
+- If you change the OpenAPI plugin config, restart the gateway.
+- You can disable the plugin with `enabled: false`.
+- The plugin supports both YAML and JSON output, and can be used with or without Swagger UI.

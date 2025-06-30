@@ -10,5 +10,11 @@ security:
   basicAuthUsers:
     alice: password123
     bob: secret456
-    
-plugins: {}
+
+plugins:
+  openapi:
+    enabled: false
+    spec_path: "./openapi.yaml"
+    path: "/openapi"         # Optional, default: /openapi
+    format: "json"           # Optional, "yaml" or "json" (default: yaml)
+    swagger_ui: false          # Optional, serve Swagger UI at /swagger-ui/

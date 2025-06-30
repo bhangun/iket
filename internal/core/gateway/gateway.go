@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -14,6 +16,8 @@ import (
 	"iket/internal/metrics"
 
 	_ "iket/internal/core/plugin" // ensure built-in plugins are registered
+
+	pluginlib "plugin"
 
 	"github.com/gorilla/mux"
 )
@@ -95,6 +99,25 @@ func (g *Gateway) setupRoutes() error {
 		}
 	}
 
+	// Register dummy handlers for plugin endpoints so middleware is invoked
+	for pluginName, pluginConfig := range g.config.Plugins {
+		if pluginName == "openapi" {
+			servePath := "/openapi"
+			swaggerUI := false
+			if v, ok := pluginConfig["path"].(string); ok && v != "" {
+				servePath = v
+			}
+			if v, ok := pluginConfig["swagger_ui"].(bool); ok {
+				swaggerUI = v
+			}
+			g.router.HandleFunc(servePath, func(w http.ResponseWriter, r *http.Request) {}).Methods("GET")
+			if swaggerUI {
+				g.router.PathPrefix("/swagger-ui/").HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+				g.router.HandleFunc("/swagger-ui", func(w http.ResponseWriter, r *http.Request) {}).Methods("GET")
+			}
+		}
+	}
+
 	// Add catch-all route for 404s
 	g.router.NotFoundHandler = http.HandlerFunc(g.notFoundHandler)
 
@@ -111,6 +134,20 @@ func (g *Gateway) setupMiddleware() error {
 	g.router.Use(g.loggingMiddleware())
 	g.router.Use(g.metricsMiddleware())
 	g.router.Use(g.securityHeadersMiddleware())
+
+	// Inject logger into plugins
+	plugin.SetLogger(g.logger)
+
+	// Add global plugin middleware (OpenAPI, Swagger UI, etc.)
+	for pluginName, pluginConfig := range g.config.Plugins {
+		if p, ok := plugin.Get(pluginName); ok {
+			if err := p.Init(pluginConfig); err != nil {
+				g.logger.Warn("Failed to initialize global plugin", logging.String("plugin", pluginName), logging.Error(err))
+				continue
+			}
+			g.router.Use(p.Middleware())
+		}
+	}
 
 	return nil
 }
@@ -166,8 +203,37 @@ func (g *Gateway) clientCredentialAuthMiddleware() func(http.Handler) http.Handl
 
 // loadPlugins loads built-in and external plugins
 func (g *Gateway) loadPlugins() error {
-	// Register built-in plugins here (example: CORS, Auth, RateLimit, etc.)
-	// TODO: Dynamically load plugins from plugins directory
+	// Dynamically load plugins from plugins directory
+	pluginsDir := g.config.Server.PluginsDir
+	if pluginsDir == "" {
+		return nil
+	}
+	files, err := os.ReadDir(pluginsDir)
+	if err != nil {
+		return err
+	}
+	for _, file := range files {
+		if filepath.Ext(file.Name()) != ".so" {
+			continue
+		}
+		plug, err := pluginlib.Open(filepath.Join(pluginsDir, file.Name()))
+		if err != nil {
+			g.logger.Warn("Failed to open plugin", logging.String("file", file.Name()), logging.Error(err))
+			continue
+		}
+		sym, err := plug.Lookup("Plugin")
+		if err != nil {
+			g.logger.Warn("Plugin missing 'Plugin' symbol", logging.String("file", file.Name()), logging.Error(err))
+			continue
+		}
+		p, ok := sym.(plugin.Plugin)
+		if !ok {
+			g.logger.Warn("Plugin symbol does not implement Plugin interface", logging.String("file", file.Name()))
+			continue
+		}
+		plugin.Register(p)
+		g.logger.Info("Dynamically loaded plugin", logging.String("name", p.Name()), logging.String("file", file.Name()))
+	}
 	return nil
 }
 
@@ -175,16 +241,16 @@ func (g *Gateway) loadPlugins() error {
 func (g *Gateway) addProxyRoute(route config.RouterConfig) error {
 	var handler http.Handler = http.HandlerFunc(g.proxyHandler(route))
 
-	// Per-route plugin middleware
-	for pluginName, pluginConfig := range g.config.Plugins {
-		if p, ok := plugin.Get(pluginName); ok {
-			if err := p.Init(pluginConfig); err != nil {
-				g.logger.Warn("Failed to initialize plugin for route", logging.String("plugin", pluginName), logging.Error(err))
-				continue
-			}
-			handler = p.Middleware()(handler)
-		}
-	}
+	// (Optional: per-route plugin middleware can be added here if you want per-route plugins)
+	// for pluginName, pluginConfig := range g.config.Plugins {
+	// 	if p, ok := plugin.Get(pluginName); ok {
+	// 		if err := p.Init(pluginConfig); err != nil {
+	// 			g.logger.Warn("Failed to initialize plugin for route", logging.String("plugin", pluginName), logging.Error(err))
+	// 			continue
+	// 		}
+	// 		handler = p.Middleware()(handler)
+	// 	}
+	// }
 
 	// Apply route-specific middleware
 	if route.RequireAuth {

@@ -25,7 +25,7 @@ type ServerConfig struct {
 	ReadTimeout   string `yaml:"readTimeout"`
 	WriteTimeout  string `yaml:"writeTimeout"`
 	IdleTimeout   string `yaml:"idleTimeout"`
-	PluginsDir    string `yaml:"pluginsDir"`
+	PluginsDir    string `yaml:"pluginsDir,omitempty"`
 	EnableLogging bool   `yaml:"enableLogging"`
 }
 
@@ -59,6 +59,18 @@ type RouterConfig struct {
 	Headers        map[string]string `yaml:"headers"`
 	StripPath      bool              `yaml:"stripPath"`
 	ValidateSchema string            `yaml:"validateSchema"`
+	WebSocket      *WebSocketOptions `yaml:"websocket,omitempty"`
+}
+
+type WebSocketOptions struct {
+	Timeout             string            `yaml:"timeout,omitempty"`
+	BufferSize          int               `yaml:"bufferSize,omitempty"`
+	DNSRoundRobin       bool              `yaml:"dnsRoundRobin,omitempty"`
+	InjectHeaders       map[string]string `yaml:"injectHeaders,omitempty"`
+	AllowedSubprotocols []string          `yaml:"allowedSubprotocols,omitempty"`
+	MaxConnections      int               `yaml:"maxConnections,omitempty"`
+	MaxConnectionsPerIP int               `yaml:"maxConnectionsPerIP,omitempty"`
+	RateLimit           int               `yaml:"rateLimit,omitempty"`
 }
 
 // Provider defines the interface for configuration providers
