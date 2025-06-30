@@ -222,6 +222,217 @@ docker-compose -f docker-compose.prod.yaml restart
 4. **Resource limits** in docker-compose
 5. **Monitoring and alerting** setup
 
+
+
+
+## 1. **DNS Configuration**
+
+- **Domain Name:**  
+  Register a domain (e.g., `api.example.com`) and point it to the public IP address of your server (where Iket is running).
+- **DNS Record:**  
+  Create an `A` record (for IPv4) or `AAAA` record (for IPv6) in your DNS provider’s dashboard:
+  ```
+  api.example.com  ->  <your-server-ip>
+  ```
+
+---
+
+## 2. **TLS/SSL Configuration**
+
+You need a TLS certificate (and private key) for your domain.  
+**Options:**
+- **Let’s Encrypt (Recommended, Free):** Use [certbot](https://certbot.eff.org/) or similar to generate a certificate.
+- **Commercial CA:** Buy a certificate from a provider (e.g., DigiCert, Sectigo).
+
+**You will get:**
+- `fullchain.pem` or `cert.pem` (certificate)
+- `privkey.pem` or `key.pem` (private key)
+
+---
+
+## 3. **Iket Gateway TLS Setup**
+
+### **A. Place Certificates**
+- Place your certificate and key in a directory, e.g.:
+  ```
+  certs/server.crt
+  certs/server.key
+  ```
+
+### **B. Update Config**
+Edit your `config/config.yaml` to enable TLS:
+
+```yaml
+server:
+  port: 8080
+  tls:
+    enabled: true
+    certFile: "/app/certs/server.crt"
+    keyFile: "/app/certs/server.key"
+    # (Optional) minVersion: "TLS12"
+    # (Optional) clientCA: "/app/certs/ca.crt"  # for mTLS
+  # ...other settings...
+```
+
+- Make sure the `certFile` and `keyFile` paths match where you mount/copy them in your Docker container.
+
+### **C. Update Docker Compose (if using Docker)**
+Mount the certs directory:
+```yaml
+services:
+  iket:
+    # ...
+    volumes:
+      - ./config:/app/config:ro
+      - ./certs:/app/certs:ro
+    ports:
+      - "8080:8080"
+      - "8443:8443"  # Expose HTTPS port
+```
+- Iket will listen on 8443 for HTTPS if configured.
+
+---
+
+## 4. **Firewall/Cloud Configuration**
+
+- Open port **443** (or **8443** if you use that) on your server/cloud firewall.
+- Make sure your DNS points to the correct public IP.
+
+---
+
+## 5. **Test**
+
+- Access your gateway via `https://api.example.com` (or your chosen domain).
+- You should see a valid certificate in your browser.
+
+---
+
+## 6. **(Optional) Redirect HTTP to HTTPS**
+
+- You can configure Iket or a reverse proxy (like Nginx) to redirect all HTTP traffic to HTTPS for better security.
+
+---
+
+## **Summary Table**
+
+| Step                | What to do                                      |
+|---------------------|-------------------------------------------------|
+| DNS                 | Point domain to server IP                       |
+| TLS                 | Obtain cert/key, place in `certs/`              |
+| Iket config         | Enable TLS in `config.yaml`                     |
+| Docker              | Mount `certs/` and expose 8443                  |
+| Firewall            | Open port 443/8443                              |
+| Test                | Visit `https://your-domain`                     |
+
+---
+
+
+
+Great! Here’s a concise guide for setting up JWT authentication for both the **gateway** (server) and the **client**:
+
+---
+
+## 1. Gateway Side (Server) Setup
+
+**A. For HS256 (symmetric secret):**
+
+In your `config.yaml` (or equivalent), set:
+
+```yaml
+security:
+  jwt:
+    enabled: true
+    secret: "your_hs256_secret"         # Shared secret for HS256
+    algorithms: ["HS256"]               # or ["HS256", "RS256"] if you want both
+    required: true                      # Set to true to require JWT on all routes (unless overridden per route)
+```
+
+**B. For RS256 (asymmetric public/private key):**
+
+1. Generate a key pair (if you don’t have one):
+   ```sh
+   openssl genrsa -out private.pem 2048
+   openssl rsa -in private.pem -pubout -out public.pem
+   ```
+
+2. In your `config.yaml`:
+   ```yaml
+   security:
+     jwt:
+       enabled: true
+       publicKeyFile: "/app/certs/public.pem"  # Path inside the container or host
+       algorithms: ["RS256"]
+       required: true
+   ```
+
+3. Make sure the public key file is accessible to the gateway (mount it in Docker if needed).
+
+---
+
+## 2. Client Side (How to Call the Gateway)
+
+**A. For HS256:**
+- The client must send a valid JWT signed with the shared secret (`your_hs256_secret`).
+- Example (using a JWT library, e.g., [jwt.io](https://jwt.io/) or a language-specific library):
+
+```sh
+curl -H "Authorization: Bearer <your_jwt_token>" http://localhost:8080/your/route
+```
+
+- **Note:** `<your_jwt_token>` is a JWT signed with the secret. Do **not** use the secret itself as the token.
+
+**B. For RS256:**
+- The client must send a JWT signed with the **private key** corresponding to the public key the gateway has.
+- Example (using a JWT library):
+
+```sh
+curl -H "Authorization: Bearer <your_jwt_token>" http://localhost:8080/your/route
+```
+
+- **Note:** `<your_jwt_token>` is a JWT signed with the private key.
+
+---
+
+## 3. Generating JWTs
+
+- Use a JWT library in your language (e.g., `jsonwebtoken` for Node.js, `pyjwt` for Python, `golang-jwt/jwt` for Go).
+- For HS256, sign with the shared secret.
+- For RS256, sign with the private key.
+
+**Example (HS256, using jwt.io):**
+- Header: `{ "alg": "HS256", "typ": "JWT" }`
+- Payload: `{ "sub": "user1", "exp": <timestamp> }`
+- Sign with: `your_hs256_secret`
+
+**Example (RS256, using jwt.io):**
+- Header: `{ "alg": "RS256", "typ": "JWT" }`
+- Payload: `{ "sub": "user1", "exp": <timestamp> }`
+- Sign with: your private key
+
+---
+
+## 4. Per-Route JWT
+
+- In your `routes.yaml` or config, you can override JWT requirements per route:
+  ```yaml
+  routes:
+    - path: "/public"
+      requireJwt: false
+    - path: "/private"
+      requireJwt: true
+  ```
+
+---
+
+**Summary:**  
+- Set up JWT config in the gateway (`config.yaml`).
+- For HS256: use a shared secret; for RS256: use a public/private key pair.
+- Clients must send a valid JWT in the `Authorization: Bearer ...` header.
+- Use a JWT library to generate tokens.
+
+If you want a code example for generating a JWT in a specific language, let me know!
+
+
 ## Support
 
 For issues and questions:

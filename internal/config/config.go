@@ -1,14 +1,20 @@
 package config
 
 import (
+	"crypto/rsa"
+	"encoding/pem"
+	"errors"
+	"io/ioutil"
 	"os"
 	"sync"
 	"time"
 
 	"gopkg.in/yaml.v3"
 
-	"iket/internal/core/errors"
+	coreerrors "iket/internal/core/errors"
 	"iket/internal/logging"
+
+	"github.com/golang-jwt/jwt/v4"
 )
 
 // Config represents the main configuration structure
@@ -37,6 +43,7 @@ type SecurityConfig struct {
 	IPWhitelist     []string          `yaml:"ipWhitelist"`
 	Headers         map[string]string `yaml:"headers"`
 	Clients         map[string]string `yaml:"clients"` // clientID: clientSecret
+	Jwt             JWTConfig         `yaml:"jwt"`
 }
 
 // TLSConfig represents TLS configuration
@@ -60,6 +67,7 @@ type RouterConfig struct {
 	StripPath      bool              `yaml:"stripPath"`
 	ValidateSchema string            `yaml:"validateSchema"`
 	WebSocket      *WebSocketOptions `yaml:"websocket,omitempty"`
+	RequireJwt     bool              `yaml:"requireJwt"`
 }
 
 type WebSocketOptions struct {
@@ -71,6 +79,15 @@ type WebSocketOptions struct {
 	MaxConnections      int               `yaml:"maxConnections,omitempty"`
 	MaxConnectionsPerIP int               `yaml:"maxConnectionsPerIP,omitempty"`
 	RateLimit           int               `yaml:"rateLimit,omitempty"`
+}
+
+// JWTConfig holds JWT auth settings
+type JWTConfig struct {
+	Enabled       bool     `yaml:"enabled"`
+	Secret        string   `yaml:"secret"`
+	Algorithms    []string `yaml:"algorithms"`
+	PublicKeyFile string   `yaml:"publicKeyFile"`
+	Required      bool     `yaml:"required"`
 }
 
 // Provider defines the interface for configuration providers
@@ -106,24 +123,24 @@ func (p *FileProvider) Load() (*Config, error) {
 	// Load main config
 	configData, err := os.ReadFile(p.configPath)
 	if err != nil {
-		return nil, errors.NewConfigError("failed to read config file", err)
+		return nil, coreerrors.NewConfigError("failed to read config file", err)
 	}
 
 	var config Config
 	if err := yaml.Unmarshal(configData, &config); err != nil {
-		return nil, errors.NewConfigError("failed to parse config file", err)
+		return nil, coreerrors.NewConfigError("failed to parse config file", err)
 	}
 
 	// Load routes config if separate file
 	if p.routesPath != "" && p.routesPath != p.configPath {
 		routesData, err := os.ReadFile(p.routesPath)
 		if err != nil {
-			return nil, errors.NewConfigError("failed to read routes file", err)
+			return nil, coreerrors.NewConfigError("failed to read routes file", err)
 		}
 
 		var routesConfig Config
 		if err := yaml.Unmarshal(routesData, &routesConfig); err != nil {
-			return nil, errors.NewConfigError("failed to parse routes file", err)
+			return nil, coreerrors.NewConfigError("failed to parse routes file", err)
 		}
 
 		config.Routes = routesConfig.Routes
@@ -150,11 +167,11 @@ func (p *FileProvider) Save(cfg *Config) error {
 	// Save main config
 	configData, err := yaml.Marshal(cfg)
 	if err != nil {
-		return errors.NewConfigError("failed to marshal config", err)
+		return coreerrors.NewConfigError("failed to marshal config", err)
 	}
 
 	if err := os.WriteFile(p.configPath, configData, 0644); err != nil {
-		return errors.NewConfigError("failed to write config file", err)
+		return coreerrors.NewConfigError("failed to write config file", err)
 	}
 
 	// Save routes to separate file if needed
@@ -162,11 +179,11 @@ func (p *FileProvider) Save(cfg *Config) error {
 		routesConfig := Config{Routes: cfg.Routes}
 		routesData, err := yaml.Marshal(routesConfig)
 		if err != nil {
-			return errors.NewConfigError("failed to marshal routes", err)
+			return coreerrors.NewConfigError("failed to marshal routes", err)
 		}
 
 		if err := os.WriteFile(p.routesPath, routesData, 0644); err != nil {
-			return errors.NewConfigError("failed to write routes file", err)
+			return coreerrors.NewConfigError("failed to write routes file", err)
 		}
 	}
 
@@ -270,20 +287,20 @@ func (c *Config) GetRouteByPath(path string) (*RouterConfig, error) {
 			return &route, nil
 		}
 	}
-	return nil, errors.ErrRouteNotFound
+	return nil, coreerrors.ErrRouteNotFound
 }
 
 // AddRoute adds a new route to the configuration
 func (c *Config) AddRoute(route RouterConfig) error {
 	// Validate the route
 	if route.Path == "" {
-		return errors.NewValidationError("path", "path is required")
+		return coreerrors.NewValidationError("path", "path is required")
 	}
 
 	// Check for duplicate paths
 	for _, existingRoute := range c.Routes {
 		if existingRoute.Path == route.Path {
-			return errors.NewValidationError("path", "duplicate path found")
+			return coreerrors.NewValidationError("path", "duplicate path found")
 		}
 	}
 
@@ -299,7 +316,7 @@ func (c *Config) RemoveRoute(path string) error {
 			return nil
 		}
 	}
-	return errors.ErrRouteNotFound
+	return coreerrors.ErrRouteNotFound
 }
 
 // GetPluginConfig returns configuration for a specific plugin
@@ -314,4 +331,21 @@ func (c *Config) SetPluginConfig(pluginName string, config map[string]interface{
 		c.Plugins = make(map[string]map[string]interface{})
 	}
 	c.Plugins[pluginName] = config
+}
+
+// loadRSAPublicKey loads an RSA public key from a PEM file
+func LoadRSAPublicKey(path string) (*rsa.PublicKey, error) {
+	data, err := ioutil.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	block, _ := pem.Decode(data)
+	if block == nil || block.Type != "PUBLIC KEY" {
+		return nil, errors.New("invalid PEM public key")
+	}
+	pub, err := jwt.ParseRSAPublicKeyFromPEM(data)
+	if err != nil {
+		return nil, err
+	}
+	return pub, nil
 }

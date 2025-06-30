@@ -135,6 +135,18 @@ func (g *Gateway) setupMiddleware() error {
 	g.router.Use(g.metricsMiddleware())
 	g.router.Use(g.securityHeadersMiddleware())
 
+	// Add JWT middleware if enabled
+	if g.config.Security.Jwt.Enabled {
+		jwtCfg := config.JWTConfig{
+			Enabled:       g.config.Security.Jwt.Enabled,
+			Secret:        g.config.Security.Jwt.Secret,
+			Algorithms:    g.config.Security.Jwt.Algorithms,
+			PublicKeyFile: g.config.Security.Jwt.PublicKeyFile,
+			Required:      g.config.Security.Jwt.Required,
+		}
+		g.router.Use(g.jwtAuthMiddleware(jwtCfg))
+	}
+
 	// Inject logger into plugins
 	plugin.SetLogger(g.logger)
 

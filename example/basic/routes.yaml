@@ -5,3 +5,19 @@ routes:
     methods: ["GET"]
     requireAuth: false
 
+  - path: "/docs/{rest:.*}"
+    destination: "http://localhost:7112"
+    methods: ["GET"]
+    requireAuth: false
+    stripPath: true
+  - path: "/openapi"
+    destination: "http://localhost:7112"
+    methods: ["GET", "OPTIONS"]
+    requireAuth: false 
+    stripPath: false
+  - path: "/api/{rest:.*}"
+    destination: "http://localhost:7112"
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+    requireAuth: false
+    stripPath: false
+    requireJwt: true

@@ -12,8 +12,16 @@ import (
 	"sync"
 	"time"
 
+	"crypto/rsa"
+	"errors"
 	"iket/internal/config"
 	"iket/internal/logging"
+
+	"crypto/x509"
+	"encoding/pem"
+	"os"
+
+	"github.com/golang-jwt/jwt/v4"
 )
 
 var wsDNSRRState = make(map[string]int) // host -> next IP index
@@ -149,6 +157,18 @@ func (g *Gateway) timeoutMiddleware(timeout time.Duration) func(http.Handler) ht
 // proxyHandler creates a reverse proxy handler for the given route
 func (g *Gateway) proxyHandler(route config.RouterConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Skip proxying for OpenAPI and Swagger UI plugin endpoints
+		if r.URL.Path == "/openapi" || r.URL.Path == "/swagger-ui" || r.URL.Path == "/swagger-ui/" || strings.HasPrefix(r.URL.Path, "/swagger-ui/") {
+			// If there's a next handler in the chain, call it; otherwise, return 404
+			if next := r.Context().Value("next"); next != nil {
+				h := next.(http.Handler)
+				h.ServeHTTP(w, r)
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte(`{"error":"Not Found","message":"The requested resource does not exist"}`))
+			return
+		}
 		// Parse destination URL
 		destURL, err := url.Parse(route.Destination)
 		if err != nil {
@@ -460,4 +480,108 @@ func (rw *responseWriter) WriteHeader(code int) {
 
 func (rw *responseWriter) Write(b []byte) (int, error) {
 	return rw.ResponseWriter.Write(b)
+}
+
+// jwtAuthMiddleware enforces JWT authentication
+func (g *Gateway) jwtAuthMiddleware(cfg config.JWTConfig) func(http.Handler) http.Handler {
+	var pubKey *rsa.PublicKey
+	var useRS256 bool
+	if cfg.Enabled && contains(cfg.Algorithms, "RS256") && cfg.PublicKeyFile != "" {
+		k, err := loadRSAPublicKey(cfg.PublicKeyFile)
+		if err == nil {
+			pubKey = k
+			useRS256 = true
+		} else {
+			g.logger.Warn("Failed to load RS256 public key", logging.Error(err))
+		}
+	}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Per-route override: if route disables JWT, skip
+			if route, ok := g.matchRoute(r); ok {
+				if !route.RequireJwt {
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+			if !cfg.Enabled {
+				next.ServeHTTP(w, r)
+				return
+			}
+			auth := r.Header.Get("Authorization")
+			if !strings.HasPrefix(auth, "Bearer ") {
+				w.WriteHeader(http.StatusUnauthorized)
+				w.Write([]byte("Missing or invalid JWT"))
+				return
+			}
+			tokenStr := strings.TrimPrefix(auth, "Bearer ")
+			var token *jwt.Token
+			var err error
+			if useRS256 && pubKey != nil {
+				token, err = jwt.Parse(tokenStr, func(token *jwt.Token) (interface{}, error) {
+					if token.Method.Alg() != "RS256" {
+						return nil, errors.New("unexpected signing method")
+					}
+					return pubKey, nil
+				})
+			} else {
+				token, err = jwt.Parse(tokenStr, func(token *jwt.Token) (interface{}, error) {
+					if token.Method.Alg() != "HS256" {
+						return nil, errors.New("unexpected signing method")
+					}
+					return []byte(cfg.Secret), nil
+				})
+			}
+			if err != nil || !token.Valid {
+				w.WriteHeader(http.StatusUnauthorized)
+				w.Write([]byte("Invalid JWT"))
+				return
+			}
+			if claims, ok := token.Claims.(jwt.MapClaims); ok {
+				ctx := context.WithValue(r.Context(), "jwtClaims", claims)
+				r = r.WithContext(ctx)
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+func contains(arr []string, s string) bool {
+	for _, v := range arr {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+// matchRoute finds the route config for the current request
+func (g *Gateway) matchRoute(r *http.Request) (config.RouterConfig, bool) {
+	for _, route := range g.config.Routes {
+		if route.Path == r.URL.Path {
+			return route, true
+		}
+	}
+	return config.RouterConfig{}, false
+}
+
+// Helper to load an RSA public key from a PEM file
+func loadRSAPublicKey(path string) (*rsa.PublicKey, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	block, _ := pem.Decode(data)
+	if block == nil || block.Type != "PUBLIC KEY" {
+		return nil, errors.New("failed to decode PEM block containing public key")
+	}
+	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return nil, err
+	}
+	rsaPub, ok := pub.(*rsa.PublicKey)
+	if !ok {
+		return nil, errors.New("not an RSA public key")
+	}
+	return rsaPub, nil
 }
