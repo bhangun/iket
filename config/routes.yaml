@@ -1,5 +1,0 @@
-routes:
-  - path: "/hello"
-    destination: "http://localhost:9000"
-    methods: ["GET"]
-    requireAuth: false
