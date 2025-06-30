@@ -161,6 +161,9 @@ func (g *Gateway) setupMiddleware() error {
 		}
 	}
 
+	// Add error logging middleware last to catch all 4xx/5xx
+	g.router.Use(g.errorLoggingMiddleware())
+
 	return nil
 }
 
@@ -389,6 +392,11 @@ func (g *Gateway) metricsHandler(w http.ResponseWriter, r *http.Request) {
 
 // notFoundHandler handles 404 requests
 func (g *Gateway) notFoundHandler(w http.ResponseWriter, r *http.Request) {
+	g.logger.Warn("404 Not Found",
+		logging.String("method", r.Method),
+		logging.String("path", r.URL.Path),
+		logging.String("remote_addr", r.RemoteAddr),
+	)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusNotFound)
 	w.Write([]byte(`{"error":"Not Found","message":"The requested resource does not exist"}`))

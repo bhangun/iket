@@ -109,12 +109,24 @@ func (g *Gateway) authMiddleware(next http.Handler) http.Handler {
 		if g.config.Security.EnableBasicAuth {
 			user, pass, ok := r.BasicAuth()
 			if !ok || user == "" || pass == "" {
+				g.logger.Warn("401 Unauthorized",
+					logging.String("reason", "Missing or invalid credentials"),
+					logging.String("method", r.Method),
+					logging.String("path", r.URL.Path),
+					logging.String("remote_addr", r.RemoteAddr),
+				)
 				w.Header().Set("WWW-Authenticate", "Basic realm=\"Iket Gateway\"")
 				w.WriteHeader(http.StatusUnauthorized)
 				w.Write([]byte("Missing or invalid credentials"))
 				return
 			}
 			if expected, ok := g.config.Security.BasicAuthUsers[user]; !ok || expected != pass {
+				g.logger.Warn("401 Unauthorized",
+					logging.String("reason", "Invalid username or password"),
+					logging.String("method", r.Method),
+					logging.String("path", r.URL.Path),
+					logging.String("remote_addr", r.RemoteAddr),
+				)
 				w.Header().Set("WWW-Authenticate", "Basic realm=\"Iket Gateway\"")
 				w.WriteHeader(http.StatusUnauthorized)
 				w.Write([]byte("Invalid username or password"))
@@ -510,6 +522,12 @@ func (g *Gateway) jwtAuthMiddleware(cfg config.JWTConfig) func(http.Handler) htt
 			}
 			auth := r.Header.Get("Authorization")
 			if !strings.HasPrefix(auth, "Bearer ") {
+				g.logger.Warn("401 Unauthorized",
+					logging.String("reason", "Missing or invalid JWT"),
+					logging.String("method", r.Method),
+					logging.String("path", r.URL.Path),
+					logging.String("remote_addr", r.RemoteAddr),
+				)
 				w.WriteHeader(http.StatusUnauthorized)
 				w.Write([]byte("Missing or invalid JWT"))
 				return
@@ -533,6 +551,12 @@ func (g *Gateway) jwtAuthMiddleware(cfg config.JWTConfig) func(http.Handler) htt
 				})
 			}
 			if err != nil || !token.Valid {
+				g.logger.Warn("401 Unauthorized",
+					logging.String("reason", "Invalid JWT"),
+					logging.String("method", r.Method),
+					logging.String("path", r.URL.Path),
+					logging.String("remote_addr", r.RemoteAddr),
+				)
 				w.WriteHeader(http.StatusUnauthorized)
 				w.Write([]byte("Invalid JWT"))
 				return
@@ -584,4 +608,22 @@ func loadRSAPublicKey(path string) (*rsa.PublicKey, error) {
 		return nil, errors.New("not an RSA public key")
 	}
 	return rsaPub, nil
+}
+
+// errorLoggingMiddleware logs all 4xx and 5xx responses
+func (g *Gateway) errorLoggingMiddleware() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			rw := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+			next.ServeHTTP(rw, r)
+			if rw.statusCode >= 400 {
+				g.logger.Warn("HTTP error response",
+					logging.Int("status_code", rw.statusCode),
+					logging.String("method", r.Method),
+					logging.String("path", r.URL.Path),
+					logging.String("remote_addr", r.RemoteAddr),
+				)
+			}
+		})
+	}
 }
