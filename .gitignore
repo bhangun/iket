@@ -9,6 +9,8 @@
 # Test binary
 *.test
 
+.DS_Store
+
 # Output directory
 /out/
 
