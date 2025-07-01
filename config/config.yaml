@@ -1,8 +1,25 @@
 server:
-  port: 8080
+  port: 7100
   readTimeout: "10s"
   writeTimeout: "10s"
   idleTimeout: "60s"
   enableLogging: true
-routes: []
-plugins: {} 
+  tls:
+    enabled: false
+
+security:
+  jwt:
+    enabled: true
+    secret: "3vTGhJSj0n3TfUDgOIWI="         
+    algorithms: ["HS256"] 
+    required: false 
+
+plugins:
+  openapi:
+    enabled: true
+    spec_path: "./config/openapi.yaml"
+    path: "/openapi"
+    format: "json"
+    swagger_ui: true
+
+routes: [] 

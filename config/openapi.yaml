@@ -1,0 +1,48 @@
+openapi: 3.1.0
+info:
+  title: Iket Gateway API
+  description: API Gateway service for routing and managing requests
+  version: 1.0.0
+  contact:
+    name: Iket Gateway Support
+servers:
+  - url: http://localhost:7100
+    description: Development server
+paths:
+  /hello:
+    get:
+      summary: Hello endpoint
+      description: A simple hello endpoint for testing
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Hello from Iket Gateway!"
+  /openapi:
+    get:
+      summary: Get OpenAPI specification
+      description: Returns the OpenAPI specification in JSON format
+      responses:
+        '200':
+          description: OpenAPI specification
+          content:
+            application/json:
+              schema:
+                type: object
+components:
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+        message:
+          type: string
+        code:
+          type: integer 

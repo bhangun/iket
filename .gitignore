@@ -30,3 +30,6 @@ go.work
 
 # Security
 certs/
+
+plugins/consul/
+plugins/auth/

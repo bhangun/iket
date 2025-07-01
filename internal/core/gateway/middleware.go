@@ -21,6 +21,8 @@ import (
 	"encoding/pem"
 	"os"
 
+	"iket/internal/core/plugin"
+
 	"github.com/golang-jwt/jwt/v4"
 )
 
@@ -181,11 +183,36 @@ func (g *Gateway) proxyHandler(route config.RouterConfig) http.HandlerFunc {
 			w.Write([]byte(`{"error":"Not Found","message":"The requested resource does not exist"}`))
 			return
 		}
+
+		destination := route.Destination
+		// If destination starts with service://, resolve using Consul plugin
+		if strings.HasPrefix(destination, "service://") {
+			if p, ok := plugin.Get("consul"); ok {
+				if resolver, ok := p.(interface{ ResolveService(string) (string, error) }); ok {
+					addr, err := resolver.ResolveService(destination)
+					if err != nil {
+						g.logger.Error("Consul service resolution failed", err, logging.String("service", destination))
+						http.Error(w, "Service discovery failed", http.StatusBadGateway)
+						return
+					}
+					destination = addr
+				} else {
+					g.logger.Error("Consul plugin does not support ResolveService", nil)
+					http.Error(w, "Service discovery not supported", http.StatusBadGateway)
+					return
+				}
+			} else {
+				g.logger.Error("Consul plugin not loaded", nil)
+				http.Error(w, "Service discovery plugin not loaded", http.StatusBadGateway)
+				return
+			}
+		}
+
 		// Parse destination URL
-		destURL, err := url.Parse(route.Destination)
+		destURL, err := url.Parse(destination)
 		if err != nil {
 			g.logger.Error("Failed to parse destination URL", err,
-				logging.String("destination", route.Destination))
+				logging.String("destination", destination))
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			return
 		}

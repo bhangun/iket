@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"iket/internal/config"
 	"iket/internal/core/gateway"
@@ -57,6 +58,8 @@ func ensureDefaultConfig(configPath, routesPath string) bool {
 }
 
 func main() {
+	startTime := time.Now()
+
 	configPath := flag.String("config", defaultConfigPath, "Path to config.yaml")
 	routesPath := flag.String("routes", defaultRoutesPath, "Path to routes.yaml")
 	portFlag := flag.Int("port", 0, "Port to run the gateway on (overrides config and IKET_PORT env var)")
@@ -120,6 +123,9 @@ func main() {
 	if err != nil {
 		logger.Fatal("Failed to create gateway", logging.Error(err))
 	}
+
+	startupDuration := time.Since(startTime)
+	logger.Info("Gateway startup complete", logging.Duration("startup_time", startupDuration))
 
 	// Setup graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
