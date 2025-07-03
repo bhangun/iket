@@ -402,6 +402,7 @@ func (g *Gateway) metricsHandler(w http.ResponseWriter, r *http.Request) {
 
 // notFoundHandler handles 404 requests
 func (g *Gateway) notFoundHandler(w http.ResponseWriter, r *http.Request) {
+	fmt.Printf("notFoundHandler called for path: %s\n", r.URL.Path)
 	g.logger.Warn("404 Not Found",
 		logging.String("method", r.Method),
 		logging.String("path", r.URL.Path),

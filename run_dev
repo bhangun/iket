@@ -1,2 +1,2 @@
 #!/bin/bash
-./bin/pkg
+go run cmd/gateway/main.go --config=config/config.yaml --routes=config/routes.yaml --port=7110

@@ -79,6 +79,11 @@ type WebSocketOptions struct {
 	MaxConnections      int               `yaml:"maxConnections,omitempty"`
 	MaxConnectionsPerIP int               `yaml:"maxConnectionsPerIP,omitempty"`
 	RateLimit           int               `yaml:"rateLimit,omitempty"`
+	HandshakeTimeout    time.Duration     `json:"handshake_timeout"`
+	ReadBufferSize      int               `json:"read_buffer_size"`
+	WriteBufferSize     int               `json:"write_buffer_size"`
+	EnableCompression   bool              `json:"enable_compression"`
+	CheckOrigin         bool              `json:"check_origin"`
 }
 
 // JWTConfig holds JWT auth settings

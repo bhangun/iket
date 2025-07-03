@@ -33,3 +33,8 @@ certs/
 
 plugins/consul/
 plugins/auth/
+plugins/storage/
+
+
+tester/basic/
+run_tester

@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"context"
-	"crypto/tls"
 	"io"
 	"net"
 	"net/http"
@@ -23,7 +22,11 @@ import (
 
 	"iket/internal/core/plugin"
 
+	"bufio"
+	"fmt"
+
 	"github.com/golang-jwt/jwt/v4"
+	"github.com/gorilla/websocket"
 )
 
 var wsDNSRRState = make(map[string]int) // host -> next IP index
@@ -171,6 +174,7 @@ func (g *Gateway) timeoutMiddleware(timeout time.Duration) func(http.Handler) ht
 // proxyHandler creates a reverse proxy handler for the given route
 func (g *Gateway) proxyHandler(route config.RouterConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		fmt.Printf("proxyHandler called for path: %s\n", r.URL.Path)
 		// Skip proxying for OpenAPI and Swagger UI plugin endpoints
 		if r.URL.Path == "/openapi" || r.URL.Path == "/swagger-ui" || r.URL.Path == "/swagger-ui/" || strings.HasPrefix(r.URL.Path, "/swagger-ui/") {
 			// If there's a next handler in the chain, call it; otherwise, return 404
@@ -248,8 +252,23 @@ func (g *Gateway) proxyHandler(route config.RouterConfig) http.HandlerFunc {
 
 		// --- WebSocket proxy support ---
 		if isWebSocketRequest(r) {
-			g.logger.Info("WebSocket upgrade detected, proxying WebSocket connection", logging.String("path", r.URL.Path), logging.String("destination", destURL.String()))
-			proxyWebSocket(w, r, destURL, g.logger, route.WebSocket)
+			g.logger.Info("Initiating WebSocket proxy",
+				logging.String("path", r.URL.Path),
+				logging.String("destination", destURL.String()))
+
+			// Get WebSocket options (defaults if nil)
+			wsOpts := route.WebSocket
+			if wsOpts == nil {
+				wsOpts = &config.WebSocketOptions{
+					HandshakeTimeout:  45 * time.Second,
+					ReadBufferSize:    4096,
+					WriteBufferSize:   4096,
+					EnableCompression: true,
+					CheckOrigin:       false,
+				}
+			}
+
+			proxyWebSocket(w, r, destURL, g.logger, wsOpts)
 			return
 		}
 		// --- End WebSocket proxy support ---
@@ -281,6 +300,12 @@ func (g *Gateway) proxyHandler(route config.RouterConfig) http.HandlerFunc {
 		r.Header.Set("X-Forwarded-Host", r.Header.Get("Host"))
 		r.Host = destURL.Host
 
+		// Forward ALL headers from the client request to the backend
+		headers := http.Header{}
+		for k, v := range r.Header {
+			headers[k] = v
+		}
+
 		// Forward the request
 		proxy.ServeHTTP(w, r)
 	}
@@ -293,191 +318,147 @@ func isWebSocketRequest(r *http.Request) bool {
 	return upgrade == "websocket" && strings.Contains(connection, "upgrade")
 }
 
-// proxyWebSocket proxies a WebSocket connection between client and backend, with options
+// proxyWebSocket proxies a WebSocket connection between client and backend, with protocol-aware handling
+// proxyWebSocket proxies a WebSocket connection between client and backend
 func proxyWebSocket(w http.ResponseWriter, r *http.Request, destURL *url.URL, logger *logging.Logger, wsOpts *config.WebSocketOptions) {
-	// Parse options
-	timeout := 30 * time.Second
-	dnsRoundRobin := false
-	injectHeaders := map[string]string{}
-	allowedSubprotocols := []string{}
-	if wsOpts != nil {
-		if wsOpts.Timeout != "" {
-			t, err := time.ParseDuration(wsOpts.Timeout)
-			if err == nil {
-				timeout = t
-			}
-		}
-		dnsRoundRobin = wsOpts.DNSRoundRobin
-		if wsOpts.InjectHeaders != nil {
-			injectHeaders = wsOpts.InjectHeaders
-		}
-		if wsOpts.AllowedSubprotocols != nil {
-			allowedSubprotocols = wsOpts.AllowedSubprotocols
-		}
-		// if wsOpts.BufferSize > 0 {
-		// 	bufferSize = wsOpts.BufferSize
-		// }
-	}
-
-	// --- Connection limits and rate limiting ---
-	var maxConns, maxConnsPerIP, rateLimit int
-	var routeKey, clientIP string
-	if wsOpts != nil {
-		maxConns = wsOpts.MaxConnections
-		maxConnsPerIP = wsOpts.MaxConnectionsPerIP
-		rateLimit = wsOpts.RateLimit
-	}
-	routeKey = r.URL.Path // could use route.Path if available
-	clientIP, _, _ = net.SplitHostPort(r.RemoteAddr)
-	if clientIP == "" {
-		clientIP = r.RemoteAddr
-	}
-	wsActiveConns.Lock()
-	if maxConns > 0 && wsActiveConns.byRoute[routeKey] >= maxConns {
-		wsActiveConns.Unlock()
-		logger.Warn("WebSocket maxConnections exceeded", logging.String("route", routeKey))
-		w.WriteHeader(http.StatusServiceUnavailable)
-		w.Write([]byte("WebSocket max connections exceeded"))
+	// Validate WebSocket upgrade request
+	if !isWebSocketRequest(r) {
+		logger.Warn("Request is not a WebSocket upgrade",
+			logging.String("path", r.URL.Path))
+		http.Error(w, "Not a WebSocket request", http.StatusBadRequest)
 		return
 	}
-	if maxConnsPerIP > 0 {
-		if wsActiveConns.byRouteIP[routeKey] == nil {
-			wsActiveConns.byRouteIP[routeKey] = make(map[string]int)
-		}
-		if wsActiveConns.byRouteIP[routeKey][clientIP] >= maxConnsPerIP {
-			wsActiveConns.Unlock()
-			logger.Warn("WebSocket maxConnectionsPerIP exceeded", logging.String("route", routeKey), logging.String("ip", clientIP))
-			w.WriteHeader(http.StatusTooManyRequests)
-			w.Write([]byte("WebSocket max connections per IP exceeded"))
-			return
-		}
-		wsActiveConns.byRouteIP[routeKey][clientIP]++
-	}
-	wsActiveConns.byRoute[routeKey]++
-	wsActiveConns.Unlock()
-	defer func() {
-		wsActiveConns.Lock()
-		wsActiveConns.byRoute[routeKey]--
-		if maxConnsPerIP > 0 {
-			wsActiveConns.byRouteIP[routeKey][clientIP]--
-		}
-		wsActiveConns.Unlock()
-	}()
-	if rateLimit > 0 {
-		wsUpgradeTimestamps.Lock()
-		times := wsUpgradeTimestamps.byRoute[routeKey]
-		cutoff := time.Now().Add(-1 * time.Minute)
-		var filtered []time.Time
-		for _, t := range times {
-			if t.After(cutoff) {
-				filtered = append(filtered, t)
-			}
-		}
-		if len(filtered) >= rateLimit {
-			wsUpgradeTimestamps.Unlock()
-			logger.Warn("WebSocket rate limit exceeded", logging.String("route", routeKey))
-			w.WriteHeader(http.StatusTooManyRequests)
-			w.Write([]byte("WebSocket upgrade rate limit exceeded"))
-			return
-		}
-		filtered = append(filtered, time.Now())
-		wsUpgradeTimestamps.byRoute[routeKey] = filtered
-		wsUpgradeTimestamps.Unlock()
+
+	// Determine backend scheme (ws or wss)
+	backendScheme := "ws"
+	if destURL.Scheme == "https" || destURL.Scheme == "wss" {
+		backendScheme = "wss"
 	}
 
-	useTLS := destURL.Scheme == "https" || destURL.Scheme == "wss"
-	backendHost := destURL.Hostname()
-	backendPort := destURL.Port()
-	if backendPort == "" {
-		if useTLS {
-			backendPort = "443"
-		} else {
-			backendPort = "80"
+	// Build backend URL
+	backendURL := url.URL{
+		Scheme:   backendScheme,
+		Host:     destURL.Host,
+		Path:     r.URL.Path,
+		RawQuery: r.URL.RawQuery,
+	}
+
+	// Create dialer with proper timeouts
+	dialer := websocket.Dialer{
+		HandshakeTimeout: 45 * time.Second,
+		Proxy:            http.ProxyFromEnvironment,
+	}
+
+	// Prepare request headers - exclude WebSocket specific headers
+	requestHeader := http.Header{}
+	for k, vv := range r.Header {
+		lowerKey := strings.ToLower(k)
+		// Skip WebSocket specific headers and hop-by-hop headers
+		switch lowerKey {
+		case "upgrade", "connection", "sec-websocket-key",
+			"sec-websocket-version", "sec-websocket-extensions",
+			"sec-websocket-protocol":
+			continue
+		default:
+			requestHeader[k] = vv
 		}
 	}
 
-	backendAddr := backendHost + ":" + backendPort
-
-	// DNS round robin with failover
-	if dnsRoundRobin {
-		ips, err := net.DefaultResolver.LookupIPAddr(r.Context(), backendHost)
-		if err == nil && len(ips) > 0 {
-			wsDNSRRLock.Lock()
-			i := wsDNSRRState[backendHost] % len(ips)
-			wsDNSRRState[backendHost] = (i + 1) % len(ips)
-			wsDNSRRLock.Unlock()
-			backendAddr = ips[i].String() + ":" + backendPort
-			logger.Info("WebSocket DNS round robin", logging.String("resolved_ip", ips[i].String()), logging.String("backendAddr", backendAddr))
-			// Failover: try next IP if connect fails (below)
-		}
+	// Add X-Forwarded headers
+	if clientIP, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		requestHeader.Set("X-Forwarded-For", clientIP)
 	}
-
-	// Dial backend with failover if DNS round robin
-	var backendConn net.Conn
-	var err error
-	if dnsRoundRobin {
-		ips, _ := net.DefaultResolver.LookupIPAddr(r.Context(), backendHost)
-		for j := 0; j < len(ips); j++ {
-			tryAddr := ips[(wsDNSRRState[backendHost]+j)%len(ips)].String() + ":" + backendPort
-			if useTLS {
-				backendConn, err = tls.DialWithDialer(&net.Dialer{Timeout: timeout}, "tcp", tryAddr, &tls.Config{ServerName: backendHost})
-			} else {
-				backendConn, err = net.DialTimeout("tcp", tryAddr, timeout)
-			}
-			if err == nil {
-				break
-			}
-			logger.Error("WebSocket DNS failover: connect failed", err, logging.String("tryAddr", tryAddr))
-		}
-	} else {
-		if useTLS {
-			backendConn, err = tls.DialWithDialer(&net.Dialer{Timeout: timeout}, "tcp", backendAddr, &tls.Config{ServerName: backendHost})
-		} else {
-			backendConn, err = net.DialTimeout("tcp", backendAddr, timeout)
-		}
+	requestHeader.Set("X-Forwarded-Proto", "http")
+	if r.TLS != nil {
+		requestHeader.Set("X-Forwarded-Proto", "https")
 	}
+	requestHeader.Set("X-Forwarded-Host", r.Host)
+
+	logger.Debug("Dialing backend WebSocket",
+		logging.String("url", backendURL.String()),
+		logging.Any("headers", requestHeader))
+
+	// Connect to backend
+	backendConn, resp, err := dialer.Dial(backendURL.String(), requestHeader)
 	if err != nil {
-		logger.Error("WebSocket backend dial failed", err, logging.String("backendAddr", backendAddr))
-		w.WriteHeader(http.StatusBadGateway)
-		w.Write([]byte("WebSocket backend connection failed"))
+		logger.Error("Failed to dial backend WebSocket", err,
+			logging.String("url", backendURL.String()))
+
+		if resp != nil {
+			logger.Debug("Backend response",
+				logging.Int("status", resp.StatusCode),
+				logging.Any("headers", resp.Header))
+			// Copy headers from backend response
+			for k, vv := range resp.Header {
+				for _, v := range vv {
+					w.Header().Add(k, v)
+				}
+			}
+			w.WriteHeader(resp.StatusCode)
+			io.Copy(w, resp.Body)
+		} else {
+			http.Error(w, "Unable to connect to backend", http.StatusBadGateway)
+		}
 		return
 	}
 	defer backendConn.Close()
 
-	// Hijack client connection
-	hj, ok := w.(http.Hijacker)
-	if !ok {
-		logger.Error("ResponseWriter does not support hijacking for WebSocket", nil)
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("WebSocket proxying not supported"))
-		return
+	// Upgrade client connection
+	upgrader := websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool { return true }, // Allow all origins
 	}
-	clientConn, _, err := hj.Hijack()
+
+	clientConn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		logger.Error("Failed to hijack client connection for WebSocket", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("WebSocket proxying failed"))
+		logger.Error("Failed to upgrade client connection", err)
 		return
 	}
 	defer clientConn.Close()
 
-	// Forward headers, subprotocols, and extensions
-	for k, v := range injectHeaders {
-		r.Header.Set(k, v)
-	}
-	if len(allowedSubprotocols) > 0 {
-		r.Header.Set("Sec-WebSocket-Protocol", strings.Join(allowedSubprotocols, ", "))
-	}
-	// Forward Sec-WebSocket-Extensions (compression)
-	if ext := r.Header.Get("Sec-WebSocket-Extensions"); ext != "" {
-		r.Header.Set("Sec-WebSocket-Extensions", ext)
+	// Start proxying
+	errClient := make(chan error, 1)
+	errBackend := make(chan error, 1)
+
+	replicate := func(dst, src *websocket.Conn, errc chan error) {
+		for {
+			msgType, msg, err := src.ReadMessage()
+			if err != nil {
+				if websocket.IsUnexpectedCloseError(err,
+					websocket.CloseNormalClosure,
+					websocket.CloseGoingAway,
+					websocket.CloseNoStatusReceived) {
+					logger.Debug("WebSocket close error", logging.Error(err))
+				}
+				errc <- err
+				return
+			}
+			err = dst.WriteMessage(msgType, msg)
+			if err != nil {
+				errc <- err
+				return
+			}
+		}
 	}
 
-	// Relay data between client and backend
-	errc := make(chan error, 2)
-	go copyWebSocketData(backendConn, clientConn, errc)
-	go copyWebSocketData(clientConn, backendConn, errc)
-	<-errc // wait for one side to close
+	go replicate(clientConn, backendConn, errClient)
+	go replicate(backendConn, clientConn, errBackend)
+
+	// Wait for either connection to close
+	select {
+	case err = <-errClient:
+		logger.Debug("Client to backend connection closed", logging.Error(err))
+	case err = <-errBackend:
+		logger.Debug("Backend to client connection closed", logging.Error(err))
+	}
+}
+
+// copyHeader copies headers from src to dst
+func copyHeader(dst, src http.Header) {
+	for k, vv := range src {
+		for _, v := range vv {
+			dst.Add(k, v)
+		}
+	}
 }
 
 // websocketDial dials the backend WebSocket server
@@ -492,8 +473,27 @@ func websocketDial(r *http.Request, backendAddr string) (net.Conn, error) {
 
 // copyWebSocketData relays data between two connections
 func copyWebSocketData(dst net.Conn, src net.Conn, errc chan error) {
-	_, err := io.Copy(dst, src)
-	errc <- err
+	buf := make([]byte, 4096)
+	for {
+		n, err := src.Read(buf)
+		if n > 0 {
+			// Debug log: data read from src
+			fmt.Printf("[copyWebSocketData] Read %d bytes from %T\n", n, src)
+			written, werr := dst.Write(buf[:n])
+			fmt.Printf("[copyWebSocketData] Wrote %d bytes to %T\n", written, dst)
+			if werr != nil {
+				errc <- werr
+				return
+			}
+		}
+		if err != nil {
+			if err != io.EOF {
+				fmt.Printf("[copyWebSocketData] Error: %v\n", err)
+			}
+			errc <- err
+			return
+		}
+	}
 }
 
 // findWildcardIndex returns the index of the first wildcard ("{") in the path, or -1 if not found
@@ -519,6 +519,14 @@ func (rw *responseWriter) WriteHeader(code int) {
 
 func (rw *responseWriter) Write(b []byte) (int, error) {
 	return rw.ResponseWriter.Write(b)
+}
+
+// Add Hijack support for WebSocket proxying
+func (rw *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if hj, ok := rw.ResponseWriter.(http.Hijacker); ok {
+		return hj.Hijack()
+	}
+	return nil, nil, fmt.Errorf("underlying ResponseWriter does not support hijacking")
 }
 
 // jwtAuthMiddleware enforces JWT authentication
