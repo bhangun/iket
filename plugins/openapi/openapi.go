@@ -3,11 +3,15 @@ package openapi
 import (
 	"embed"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path"
 	"strings"
+	"time"
+
+	"iket/pkg/plugin"
 
 	"gopkg.in/yaml.v3"
 )
@@ -24,15 +28,76 @@ type OpenAPIPlugin struct {
 	swaggerUI bool
 	// Tag for reflection-based discovery
 	PluginName string `plugin:"type" plugin:"openapi"`
+	// Health tracking
+	lastHealthCheck time.Time
+	isHealthy       bool
+	loadTime        time.Time
 }
 
 func NewOpenAPIPlugin() *OpenAPIPlugin {
 	return &OpenAPIPlugin{
-		PluginName: "openapi",
+		PluginName:      "openapi",
+		lastHealthCheck: time.Now(),
+		isHealthy:       true,
+		loadTime:        time.Now(),
 	}
 }
 
 func (p *OpenAPIPlugin) Name() string { return "openapi" }
+
+// Type implements TypedPlugin interface
+func (p *OpenAPIPlugin) Type() plugin.PluginType {
+	return plugin.TransformPlugin // OpenAPI transforms requests/responses
+}
+
+// Tags implements TaggedPlugin interface
+func (p *OpenAPIPlugin) Tags() map[string]string {
+	return map[string]string{
+		"category": "documentation",
+		"type":     "api-docs",
+		"priority": "low",
+	}
+}
+
+// Health implements HealthChecker interface
+func (p *OpenAPIPlugin) Health() error {
+	p.lastHealthCheck = time.Now()
+
+	if !p.enabled {
+		return nil // Disabled plugins are considered healthy
+	}
+
+	if p.specPath == "" {
+		p.isHealthy = false
+		return fmt.Errorf("openapi plugin not properly configured: missing spec_path")
+	}
+
+	// Check if spec file still exists and is readable
+	if _, err := os.Stat(p.specPath); err != nil {
+		p.isHealthy = false
+		return fmt.Errorf("openapi spec file not accessible: %w", err)
+	}
+
+	// Check if spec data is valid
+	if len(p.specData) == 0 {
+		p.isHealthy = false
+		return fmt.Errorf("openapi spec data is empty")
+	}
+
+	p.isHealthy = true
+	return nil
+}
+
+// Status implements StatusReporter interface
+func (p *OpenAPIPlugin) Status() string {
+	if !p.enabled {
+		return "disabled"
+	}
+	if p.isHealthy {
+		return "healthy"
+	}
+	return "unhealthy"
+}
 
 // Config options:
 //
@@ -48,15 +113,18 @@ func (p *OpenAPIPlugin) Initialize(config map[string]interface{}) error {
 	}
 	p.enabled = enabled
 	if !enabled {
-		return nil // plugin is disabled
+		p.isHealthy = true // Disabled plugins are healthy
+		return nil         // plugin is disabled
 	}
 	pathVal, ok := config["spec_path"].(string)
 	if !ok || pathVal == "" {
+		p.isHealthy = false
 		return nil // no spec path, plugin is a no-op
 	}
 	p.specPath = pathVal
 	data, err := os.ReadFile(pathVal)
 	if err != nil {
+		p.isHealthy = false
 		return err
 	}
 	p.specData = data
@@ -72,6 +140,8 @@ func (p *OpenAPIPlugin) Initialize(config map[string]interface{}) error {
 	if v, ok := config["swagger_ui"].(bool); ok {
 		p.swaggerUI = v
 	}
+	p.isHealthy = true
+	p.loadTime = time.Now()
 	return nil
 }
 

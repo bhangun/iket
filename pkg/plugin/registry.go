@@ -56,6 +56,14 @@ type Registry struct {
 	mu      sync.RWMutex
 }
 
+type HealthChecker interface {
+	Health() error
+}
+
+type StatusReporter interface {
+	Status() string
+}
+
 // NewRegistry creates a new plugin registry
 func NewRegistry() *Registry {
 	return &Registry{
@@ -178,9 +186,11 @@ func (r *Registry) Initialize(configs map[string]map[string]interface{}) error {
 	defer r.mu.RUnlock()
 
 	for name, p := range r.plugins {
-		config, ok := configs[name]
-		if !ok {
-			return fmt.Errorf("configuration for plugin %s not found", name)
+		//config, ok := configs[name]
+
+		config := configs[name]
+		if config == nil {
+			config = make(map[string]interface{}) // default empty config
 		}
 
 		if err := p.Initialize(config); err != nil {
@@ -188,6 +198,36 @@ func (r *Registry) Initialize(configs map[string]map[string]interface{}) error {
 		}
 	}
 
+	return nil
+}
+
+// StartAll invokes OnStart for all plugins that implement LifecyclePlugin
+func (r *Registry) StartAll() error {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	for name, p := range r.plugins {
+		if lp, ok := p.(LifecyclePlugin); ok {
+			if err := lp.OnStart(); err != nil {
+				return fmt.Errorf("plugin %s failed to start: %w", name, err)
+			}
+		}
+	}
+	return nil
+}
+
+// ShutdownAll invokes OnShutdown for all plugins that implement LifecyclePlugin
+func (r *Registry) ShutdownAll() error {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	for name, p := range r.plugins {
+		if lp, ok := p.(LifecyclePlugin); ok {
+			if err := lp.OnShutdown(); err != nil {
+				return fmt.Errorf("plugin %s failed to shutdown: %w", name, err)
+			}
+		}
+	}
 	return nil
 }
 
@@ -246,4 +286,32 @@ func (r *Registry) ReloadAll(configs map[string]map[string]interface{}) error {
 		}
 	}
 	return nil
+}
+
+// HealthCheck runs Health() on all plugins that support it
+func (r *Registry) HealthCheck() map[string]error {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	results := make(map[string]error)
+	for name, p := range r.plugins {
+		if hc, ok := p.(HealthChecker); ok {
+			results[name] = hc.Health()
+		}
+	}
+	return results
+}
+
+// PluginStatuses returns human-readable status strings
+func (r *Registry) PluginStatuses() map[string]string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	statuses := make(map[string]string)
+	for name, p := range r.plugins {
+		if sr, ok := p.(StatusReporter); ok {
+			statuses[name] = sr.Status()
+		}
+	}
+	return statuses
 }

@@ -45,9 +45,9 @@ func main() {
 		panic(fmt.Sprintf("Failed to build middleware chain: %v", err))
 	}
 
-	// Alternative: Build middleware chain using reflection-based tag discovery
-	// This would find all plugins with the "plugin" tag set to "auth"
-	_, err = registry.BuildMiddlewareChainFromTags("plugin", "auth", finalHandler)
+	// Alternative: Build middleware chain using tag-based discovery
+	// This would find all plugins with the "security" tag set to "authentication"
+	_, err = registry.BuildMiddlewareChainFromTags("security", "authentication", finalHandler)
 	if err != nil {
 		panic(fmt.Sprintf("Failed to build tagged middleware chain: %v", err))
 	}
@@ -61,6 +61,17 @@ func main() {
 	// Check if a specific plugin is a middleware plugin
 	if registry.IsMiddlewarePlugin("auth") {
 		fmt.Println("Auth plugin implements MiddlewarePlugin interface")
+	}
+
+	// Demonstrate new plugin type features
+	authPlugins := registry.GetByType(plugin.AuthPlugin)
+	fmt.Printf("Found %d auth plugins\n", len(authPlugins))
+
+	// Get plugin tags
+	if authP, err := registry.Get("auth"); err == nil {
+		if tagged, ok := authP.(plugin.TaggedPlugin); ok {
+			fmt.Printf("Auth plugin tags: %v\n", tagged.Tags())
+		}
 	}
 
 	// Start HTTP server with middleware chain
