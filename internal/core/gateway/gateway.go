@@ -16,8 +16,6 @@ import (
 	"iket/internal/logging"
 	"iket/internal/metrics"
 
-	_ "iket/internal/core/plugin" // ensure built-in plugins are registered
-
 	pluginlib "plugin"
 
 	"github.com/gorilla/mux"
@@ -137,7 +135,7 @@ func (g *Gateway) setupRoutes() error {
 // setupMiddleware configures the middleware chain
 func (g *Gateway) setupMiddleware() error {
 	// Add client credential auth middleware if enabled
-	if g.config.Security.Clients != nil && len(g.config.Security.Clients) > 0 {
+	if len(g.config.Security.Clients) > 0 {
 		g.router.Use(g.clientCredentialAuthMiddleware())
 	}
 	// Add global middleware
@@ -156,9 +154,6 @@ func (g *Gateway) setupMiddleware() error {
 		}
 		g.router.Use(g.jwtAuthMiddleware(jwtCfg))
 	}
-
-	// Inject logger into plugins
-	plugin.SetLogger(g.logger)
 
 	// Add global plugin middleware (OpenAPI, Swagger UI, etc.)
 	for pluginName, pluginConfig := range g.config.Plugins {
@@ -361,6 +356,11 @@ func (g *Gateway) GetConfig() *config.Config {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	return g.config
+}
+
+// GetRouter returns the router for external route registration
+func (g *Gateway) GetRouter() *mux.Router {
+	return g.router
 }
 
 // UpdateConfig updates the gateway configuration

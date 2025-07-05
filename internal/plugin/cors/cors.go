@@ -39,7 +39,3 @@ func (c *CORSPlugin) Middleware() func(next http.Handler) http.Handler {
 		})
 	}
 }
-
-func init() {
-	Register(&CORSPlugin{})
-}

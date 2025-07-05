@@ -84,7 +84,3 @@ func (p *IPWhitelistPlugin) Middleware() func(next http.Handler) http.Handler {
 		})
 	}
 }
-
-func init() {
-	Register(&IPWhitelistPlugin{})
-}
