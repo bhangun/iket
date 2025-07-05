@@ -42,7 +42,3 @@ func (p *RateLimitPlugin) Middleware() func(next http.Handler) http.Handler {
 		})
 	}
 }
-
-func init() {
-	Register(&RateLimitPlugin{})
-}

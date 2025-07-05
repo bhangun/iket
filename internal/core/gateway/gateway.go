@@ -157,9 +157,6 @@ func (g *Gateway) setupMiddleware() error {
 		g.router.Use(g.jwtAuthMiddleware(jwtCfg))
 	}
 
-	// Inject logger into plugins
-	plugin.SetLogger(g.logger)
-
 	// Add global plugin middleware (OpenAPI, Swagger UI, etc.)
 	for pluginName, pluginConfig := range g.config.Plugins {
 		if p, ok := plugin.Get(pluginName); ok {
