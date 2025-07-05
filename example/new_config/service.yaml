@@ -1,0 +1,47 @@
+version: 1
+services:
+  - name: "User Service"
+    description: "Handles user registration and authentication"
+    host: "http://user-service:8000"
+    base_path: "/user"
+    tags: ["public", "auth"]
+    group: "authentication"
+    routes:
+      - path: /register
+        method: POST
+        name: "User Registration"
+        description: "Registers a new user"
+        tags: ["public"]
+        priority: 1
+        concurrent_calls: "10"
+        backend:
+          - url_pattern: /register
+      - path: /me
+        method: GET
+        name: "Get Profile"
+        description: "Fetch current user profile"
+        tags: ["internal"]
+        group: "profile"
+        max_rate: "100"
+        backend:
+          - url_pattern: /me
+
+  - name: "Admin Dashboard"
+    description: "Admin-level service for managing data"
+    host: "http://admin-api:8080"
+    tags: ["admin"]
+    routes:
+      - path: /stats
+        method: GET
+        name: "Fetch Stats"
+        description: "Provides usage statistics"
+        tags: ["internal"]
+        priority: 5
+        backend:
+          - url_pattern: /stats
+
+oauth:
+  disable: false
+
+cache_ttl: 5m
+timeout: 10s
