@@ -61,6 +61,22 @@ func (api *ManagementAPI) RegisterRoutes(router *mux.Router) {
 	// API v1 routes
 	v1 := router.PathPrefix("/api/v1").Subrouter()
 
+	// Add CORS middleware for management API
+	v1.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+			if r.Method == "OPTIONS" {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	})
+
 	// Gateway management
 	v1.HandleFunc("/gateway/status", api.getGatewayStatus).Methods("GET")
 	v1.HandleFunc("/gateway/config", api.getGatewayConfig).Methods("GET")
@@ -194,7 +210,7 @@ func (api *ManagementAPI) getGatewayStatus(w http.ResponseWriter, r *http.Reques
 	status := GatewayStatus{
 		Status:            "running",
 		Uptime:            "2h 15m 30s", // Calculate from start time
-		Version:           "1.0.0",      // Get from gateway
+		Version:           "0.1.12",     // Get from gateway
 		StartTime:         time.Now().Add(-2*time.Hour - 15*time.Minute - 30*time.Second),
 		ConfigLoaded:      true,
 		LastReload:        time.Now().Add(-30 * time.Minute),

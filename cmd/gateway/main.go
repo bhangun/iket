@@ -11,10 +11,12 @@ import (
 	"syscall"
 	"time"
 
+	"iket/internal/api"
 	"iket/internal/config"
 	"iket/internal/core/gateway"
 	"iket/internal/logging"
 	"iket/internal/metrics"
+	"iket/pkg/plugin"
 )
 
 var (
@@ -114,6 +116,9 @@ func main() {
 	// Initialize metrics collector
 	metricsCollector := metrics.NewCollector()
 
+	// Create plugin registry
+	registry := plugin.NewRegistry()
+
 	// Create gateway with dependencies
 	gw, err := gateway.NewGateway(gateway.Dependencies{
 		Config:  cfg,
@@ -123,6 +128,12 @@ func main() {
 	if err != nil {
 		logger.Fatal("Failed to create gateway", logging.Error(err))
 	}
+
+	// Create and register management API
+	managementAPI := api.NewManagementAPI(gw, logger, registry)
+	managementAPI.RegisterRoutes(gw.GetRouter())
+
+	logger.Info("Management API registered", logging.String("base_path", "/api/v1"))
 
 	startupDuration := time.Since(startTime)
 	logger.Info("Gateway startup complete", logging.Duration("startup_time", startupDuration))

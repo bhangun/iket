@@ -358,6 +358,11 @@ func (g *Gateway) GetConfig() *config.Config {
 	return g.config
 }
 
+// GetRouter returns the router for external route registration
+func (g *Gateway) GetRouter() *mux.Router {
+	return g.router
+}
+
 // UpdateConfig updates the gateway configuration
 func (g *Gateway) UpdateConfig(cfg *config.Config) error {
 	g.mu.Lock()
