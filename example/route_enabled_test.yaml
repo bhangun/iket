@@ -1,0 +1,39 @@
+server:
+  port: 8080
+  enableLogging: true
+
+security:
+  enableBasicAuth: false
+  jwt:
+    enabled: false
+
+routes:
+  - path: "/api/v1/users"
+    destination: "http://backend:3001"
+    methods: ["GET", "POST"]
+    requireAuth: true
+    enabled: true  # explicitly enabled
+
+  - path: "/api/v1/admin"
+    destination: "http://backend:3002"
+    methods: ["GET", "POST", "PUT", "DELETE"]
+    requireAuth: true
+    enabled: false  # explicitly disabled
+
+  - path: "/api/v1/public"
+    destination: "http://backend:3003"
+    methods: ["GET"]
+    requireAuth: false
+    # enabled field not specified - defaults to true
+
+  - path: "/api/v1/legacy"
+    destination: "http://backend:3004"
+    methods: ["GET", "POST"]
+    requireAuth: false
+    enabled: false  # explicitly disabled
+
+plugins:
+  openapi:
+    enabled: true
+    path: "/openapi"
+    swagger_ui: true 

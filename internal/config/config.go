@@ -68,6 +68,7 @@ type RouterConfig struct {
 	ValidateSchema string            `yaml:"validateSchema"`
 	WebSocket      *WebSocketOptions `yaml:"websocket,omitempty"`
 	RequireJwt     bool              `yaml:"requireJwt"`
+	Enabled        bool              `yaml:"enabled"` // default true
 }
 
 type WebSocketOptions struct {

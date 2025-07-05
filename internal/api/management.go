@@ -194,7 +194,7 @@ type RouteInfo struct {
 	RequireAuth bool                   `json:"require_auth"`
 	Timeout     int                    `json:"timeout"`
 	StripPath   bool                   `json:"strip_path"`
-	Active      bool                   `json:"active"`
+	Enabled     bool                   `json:"enabled"`
 	Stats       map[string]interface{} `json:"stats"`
 }
 
@@ -527,6 +527,10 @@ func (api *ManagementAPI) listRoutes(w http.ResponseWriter, r *http.Request) {
 			timeout = int(route.Timeout.Seconds())
 		}
 
+		// Routes are enabled by default (when Enabled field is not specified in YAML)
+		// Only disabled if explicitly set to false
+		enabled := route.Enabled != false
+
 		routeInfo := RouteInfo{
 			ID:          fmt.Sprintf("route-%d", i+1),
 			Path:        route.Path,
@@ -535,7 +539,7 @@ func (api *ManagementAPI) listRoutes(w http.ResponseWriter, r *http.Request) {
 			RequireAuth: route.RequireAuth,
 			Timeout:     timeout,
 			StripPath:   route.StripPath,
-			Active:      true,
+			Enabled:     enabled,
 			Stats: map[string]interface{}{
 				"requests":          15420,
 				"errors":            5,

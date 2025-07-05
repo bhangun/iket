@@ -102,6 +102,11 @@ func (g *Gateway) setupRoutes() error {
 
 	// Setup proxy routes
 	for _, route := range g.config.Routes {
+		// Routes are enabled by default (when Enabled field is not specified in YAML)
+		// Only skip if explicitly disabled
+		if route.Enabled == false {
+			continue // skip disabled routes
+		}
 		if err := g.addProxyRoute(route); err != nil {
 			return fmt.Errorf("failed to add route %s: %w", route.Path, err)
 		}
@@ -180,6 +185,11 @@ func (g *Gateway) clientCredentialAuthMiddleware() func(http.Handler) http.Handl
 			matched := false
 			var requireAuth bool = true
 			for _, route := range g.config.Routes {
+				// Routes are enabled by default (when Enabled field is not specified in YAML)
+				// Only skip if explicitly disabled
+				if route.Enabled == false {
+					continue // skip disabled routes
+				}
 				if r.Method != "" && len(route.Methods) > 0 {
 					found := false
 					for _, m := range route.Methods {

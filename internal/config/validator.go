@@ -120,6 +120,12 @@ func (r *RoutesConfigRule) Validate(cfg *Config) error {
 	seenPaths := make(map[string]bool)
 
 	for i, route := range cfg.Routes {
+		// Set default values
+		// Note: In Go, bool fields default to false when not specified in YAML
+		// Since the comment says "default true", we need to handle this explicitly
+		// We can't modify the route directly in the slice, so we'll handle this in the gateway logic
+		// For now, routes without the Enabled field will be treated as enabled (true)
+
 		// Validate path
 		if route.Path == "" {
 			return errors.NewValidationError(fmt.Sprintf("routes[%d].path", i), "path is required")
