@@ -8,7 +8,6 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
-	"sync"
 	"time"
 
 	"crypto/rsa"
@@ -29,19 +28,9 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-var wsDNSRRState = make(map[string]int) // host -> next IP index
-var wsDNSRRLock sync.Mutex
+type contextKey string
 
-var wsActiveConns = struct {
-	byRoute   map[string]int
-	byRouteIP map[string]map[string]int
-	sync.Mutex
-}{byRoute: make(map[string]int), byRouteIP: make(map[string]map[string]int)}
-
-var wsUpgradeTimestamps = struct {
-	byRoute map[string][]time.Time
-	sync.Mutex
-}{byRoute: make(map[string][]time.Time)}
+const jwtClaimsKey contextKey = "jwtClaims"
 
 // loggingMiddleware logs HTTP requests with structured logging
 func (g *Gateway) loggingMiddleware() func(http.Handler) http.Handler {
@@ -597,7 +586,7 @@ func (g *Gateway) jwtAuthMiddleware(cfg config.JWTConfig) func(http.Handler) htt
 				return
 			}
 			if claims, ok := token.Claims.(jwt.MapClaims); ok {
-				ctx := context.WithValue(r.Context(), "jwtClaims", claims)
+				ctx := context.WithValue(r.Context(), jwtClaimsKey, claims)
 				r = r.WithContext(ctx)
 			}
 			next.ServeHTTP(w, r)

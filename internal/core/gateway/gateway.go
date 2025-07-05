@@ -16,8 +16,6 @@ import (
 	"iket/internal/logging"
 	"iket/internal/metrics"
 
-	_ "iket/internal/core/plugin" // ensure built-in plugins are registered
-
 	pluginlib "plugin"
 
 	"github.com/gorilla/mux"
@@ -137,7 +135,7 @@ func (g *Gateway) setupRoutes() error {
 // setupMiddleware configures the middleware chain
 func (g *Gateway) setupMiddleware() error {
 	// Add client credential auth middleware if enabled
-	if g.config.Security.Clients != nil && len(g.config.Security.Clients) > 0 {
+	if len(g.config.Security.Clients) > 0 {
 		g.router.Use(g.clientCredentialAuthMiddleware())
 	}
 	// Add global middleware
