@@ -1,6 +1,6 @@
 package app
 
-const (
+var (
 	Version = "0.1.12"
 	Name    = "iket"
 )

@@ -11,19 +11,19 @@ help: ## Show this help message
 # Build targets
 build: ## Build the main gateway binary
 	@echo "Building Iket Gateway..."
-	go build -ldflags="-w -s" -o bin/iket ./pkg/main.go
+	go build -ldflags="-w -s" -o bin/iket ./cmd/gateway
 	@echo "Build complete: bin/iket"
 
 build-basic: ## Build with basic tags (no storage dependencies)
 	@echo "Building Iket Gateway (basic mode)..."
-	go build -tags="basic" -ldflags="-w -s" -o bin/iket-basic ./pkg/main.go
+	go build -tags="basic" -ldflags="-w -s" -o bin/iket-basic ./cmd/gateway
 	@echo "Build complete: bin/iket-basic"
 
 build-prod: ## Build production binary with optimizations
 	@echo "Building Iket Gateway (production)..."
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
 		-ldflags="-w -s -extldflags=-static" \
-		-o bin/iket-prod ./pkg/main.go
+		-o bin/iket-prod ./cmd/gateway
 	@echo "Build complete: bin/iket-prod"
 
 build-plugins: ## Build all plugins
@@ -100,11 +100,11 @@ docker-logs: ## Show docker-compose logs
 # Development targets
 dev: ## Start development server
 	@echo "Starting development server..."
-	go run ./pkg/main.go --config ./config/config.yaml --routes ./config/routes.yaml
+	go run ./cmd/gateway --config ./config/config.yaml --routes ./config/routes.yaml
 
 dev-basic: ## Start development server (basic mode)
 	@echo "Starting development server (basic mode)..."
-	go run -tags=basic ./pkg/main.go --config ./config/config.yaml --routes ./config/routes.yaml
+	go run -tags=basic ./cmd/gateway --config ./config/config.yaml --routes ./config/routes.yaml
 
 setup: ## Setup development environment
 	@echo "Setting up development environment..."
@@ -151,14 +151,14 @@ release: ## Create release build
 	@version=$$(git describe --tags --always --dirty); \
 	echo "Building version: $$version"; \
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-		-ldflags="-w -s -X main.Version=$$version" \
-		-o releases/iket-$$version-linux-amd64 ./pkg/main.go; \
+		-ldflags="-w -s -X iket/internal/app.Version=$$version" \
+		-o releases/iket-$$version-linux-amd64 ./cmd/gateway; \
 	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build \
-		-ldflags="-w -s -X main.Version=$$version" \
-		-o releases/iket-$$version-darwin-amd64 ./pkg/main.go; \
+		-ldflags="-w -s -X iket/internal/app.Version=$$version" \
+		-o releases/iket-$$version-darwin-amd64 ./cmd/gateway; \
 	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build \
-		-ldflags="-w -s -X main.Version=$$version" \
-		-o releases/iket-$$version-windows-amd64.exe ./pkg/main.go; \
+		-ldflags="-w -s -X iket/internal/app.Version=$$version" \
+		-o releases/iket-$$version-windows-amd64.exe ./cmd/gateway; \
 	echo "Release builds complete in releases/"
 
 # Monitoring targets

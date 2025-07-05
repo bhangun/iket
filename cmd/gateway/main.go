@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"iket/internal/api"
+	"iket/internal/app"
 	"iket/internal/config"
 	"iket/internal/core/gateway"
 	"iket/internal/logging"
@@ -22,7 +23,7 @@ import (
 var (
 	defaultConfigPath = "config/config.yaml"
 	defaultRoutesPath = "config/routes.yaml"
-	version           = "dev" // can be set at build time with -ldflags
+	version           = app.Version // use version from app package
 )
 
 var defaultConfig = `server:
@@ -66,7 +67,13 @@ func main() {
 	routesPath := flag.String("routes", defaultRoutesPath, "Path to routes.yaml")
 	portFlag := flag.Int("port", 0, "Port to run the gateway on (overrides config and IKET_PORT env var)")
 	printConfig := flag.Bool("print-config", false, "Print the loaded configuration and exit")
+	printVersion := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
+
+	if *printVersion {
+		fmt.Printf("Iket Gateway version: %s\n", version)
+		os.Exit(0)
+	}
 
 	fmt.Printf("Iket Gateway version: %s\n", version)
 
