@@ -12,14 +12,15 @@ import (
 
 	"crypto/rsa"
 	"errors"
-	"iket/internal/config"
-	"iket/internal/logging"
+
+	"github.com/bhangun/iket/pkg/config"
+	"github.com/bhangun/iket/pkg/logging"
 
 	"crypto/x509"
 	"encoding/pem"
 	"os"
 
-	"iket/internal/core/plugin"
+	"github.com/bhangun/iket/pkg/core/plugin"
 
 	"bufio"
 	"fmt"

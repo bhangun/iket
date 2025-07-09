@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"net/http"
 
-	"iket/pkg/plugin"
-	"iket/plugins/auth"
-	"iket/plugins/openapi"
+	"github.com/bhangun/iket/pkg/plugin"
+	"github.com/bhangun/iket/pkg/plugins/auth"
+	"github.com/bhangun/iket/pkg/plugins/openapi"
 )
 
 func mainOpenAPI() {

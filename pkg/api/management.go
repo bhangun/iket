@@ -7,10 +7,11 @@ import (
 	"sync"
 	"time"
 
-	"iket/internal/config"
-	"iket/internal/core/gateway"
-	"iket/internal/logging"
-	"iket/pkg/plugin"
+	"github.com/bhangun/iket/pkg/config"
+	"github.com/bhangun/iket/pkg/logging"
+
+	"github.com/bhangun/iket/pkg/core/gateway"
+	"github.com/bhangun/iket/pkg/plugin"
 
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"

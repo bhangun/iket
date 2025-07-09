@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"iket/internal/core/errors"
+	"github.com/bhangun/iket/pkg/core/errors"
 )
 
 // ValidationRule defines a configuration validation rule

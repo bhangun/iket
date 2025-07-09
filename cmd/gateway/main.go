@@ -11,13 +11,13 @@ import (
 	"syscall"
 	"time"
 
-	"iket/internal/api"
-	"iket/internal/app"
-	"iket/internal/config"
-	"iket/internal/core/gateway"
-	"iket/internal/logging"
-	"iket/internal/metrics"
-	"iket/pkg/plugin"
+	"github.com/bhangun/iket/pkg/api"
+	"github.com/bhangun/iket/pkg/app"
+	"github.com/bhangun/iket/pkg/config"
+	"github.com/bhangun/iket/pkg/core/gateway"
+	"github.com/bhangun/iket/pkg/logging"
+	"github.com/bhangun/iket/pkg/metrics"
+	"github.com/bhangun/iket/pkg/plugin"
 )
 
 var (

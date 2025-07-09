@@ -11,8 +11,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	coreerrors "iket/internal/core/errors"
-	"iket/internal/logging"
+	coreerrors "github.com/bhangun/iket/pkg/core/errors"
+	"github.com/bhangun/iket/pkg/logging"
 
 	"github.com/golang-jwt/jwt/v4"
 )

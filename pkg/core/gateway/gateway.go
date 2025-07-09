@@ -10,11 +10,11 @@ import (
 	"sync"
 	"time"
 
-	"iket/internal/config"
-	"iket/internal/core/errors"
-	"iket/internal/core/plugin"
-	"iket/internal/logging"
-	"iket/internal/metrics"
+	"github.com/bhangun/iket/pkg/config"
+	"github.com/bhangun/iket/pkg/core/errors"
+	"github.com/bhangun/iket/pkg/core/plugin"
+	"github.com/bhangun/iket/pkg/logging"
+	"github.com/bhangun/iket/pkg/metrics"
 
 	pluginlib "plugin"
 
