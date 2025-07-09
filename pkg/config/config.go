@@ -21,7 +21,7 @@ import (
 type Config struct {
 	Server   ServerConfig                      `yaml:"server"`
 	Security SecurityConfig                    `yaml:"security"`
-	Routes   []RouterConfig                    `yaml:"routes"`
+	Services []ServiceConfig                   `yaml:"services,omitempty"` // New service-based configuration
 	Plugins  map[string]map[string]interface{} `yaml:"plugins"`
 }
 
@@ -46,20 +46,12 @@ type SecurityConfig struct {
 	Jwt             JWTConfig         `yaml:"jwt"`
 }
 
-// TLSConfig represents TLS configuration
-type TLSConfig struct {
-	Enabled    bool     `yaml:"enabled"`
-	CertFile   string   `yaml:"certFile"`
-	KeyFile    string   `yaml:"keyFile"`
-	MinVersion string   `yaml:"minVersion"`
-	Ciphers    []string `yaml:"ciphers"`
-}
-
 // RouterConfig represents a route configuration
 type RouterConfig struct {
 	Path           string            `yaml:"path"`
 	Destination    string            `yaml:"destination"`
 	Methods        []string          `yaml:"methods"`
+	Method         string            `yaml:"method"` // Single method for new format
 	RequireAuth    bool              `yaml:"requireAuth"`
 	RateLimit      *int              `yaml:"rateLimit"`
 	Timeout        *time.Duration    `yaml:"timeout"`
@@ -69,6 +61,24 @@ type RouterConfig struct {
 	WebSocket      *WebSocketOptions `yaml:"websocket,omitempty"`
 	RequireJwt     bool              `yaml:"requireJwt"`
 	Enabled        bool              `yaml:"enabled"`
+	// New fields for enhanced configuration
+	Name            string    `yaml:"name,omitempty" json:"name,omitempty"`
+	Description     string    `yaml:"description,omitempty" json:"description,omitempty"`
+	Tags            []string  `yaml:"tags,omitempty" json:"tags,omitempty"`
+	Group           string    `yaml:"group,omitempty" json:"group,omitempty"`
+	Priority        int       `yaml:"priority,omitempty" json:"priority,omitempty"`
+	ConcurrentCalls string    `yaml:"concurrent_calls,omitempty" json:"concurrent_calls,omitempty"`
+	MaxRate         string    `yaml:"max_rate,omitempty" json:"max_rate,omitempty"`
+	Backends        []Backend `yaml:"backend" json:"backend"`
+}
+
+// TLSConfig represents TLS configuration
+type TLSConfig struct {
+	Enabled    bool     `yaml:"enabled"`
+	CertFile   string   `yaml:"certFile"`
+	KeyFile    string   `yaml:"keyFile"`
+	MinVersion string   `yaml:"minVersion"`
+	Ciphers    []string `yaml:"ciphers"`
 }
 
 type WebSocketOptions struct {
@@ -94,6 +104,30 @@ type JWTConfig struct {
 	Algorithms    []string `yaml:"algorithms"`
 	PublicKeyFile string   `yaml:"publicKeyFile"`
 	Required      bool     `yaml:"required"`
+}
+
+// ServiceConfig represents the new service-based configuration structure
+type ServiceConfig struct {
+	Version  int       `yaml:"version" json:"version"`
+	Services []Service `yaml:"services" json:"services"`
+	CacheTTL string    `yaml:"cache_ttl" json:"cache_ttl"`
+	Timeout  string    `yaml:"timeout" json:"timeout"`
+}
+
+// Service represents a service in the new configuration format
+type Service struct {
+	Name        string         `yaml:"name,omitempty" json:"name,omitempty"`
+	Description string         `yaml:"description,omitempty" json:"description,omitempty"`
+	Host        string         `yaml:"host" json:"host"`
+	BasePath    string         `yaml:"base_path,omitempty" json:"base_path,omitempty"`
+	Tags        []string       `yaml:"tags,omitempty" json:"tags,omitempty"`
+	Group       string         `yaml:"group,omitempty" json:"group,omitempty"`
+	Routes      []RouterConfig `yaml:"routes" json:"routes"`
+}
+
+// Backend represents a backend configuration for routes
+type Backend struct {
+	URLPattern string `yaml:"url_pattern" json:"url_pattern"`
 }
 
 // Provider defines the interface for configuration providers
@@ -137,19 +171,19 @@ func (p *FileProvider) Load() (*Config, error) {
 		return nil, coreerrors.NewConfigError("failed to parse config file", err)
 	}
 
-	// Load routes config if separate file
+	// Load service config if separate file (new format)
 	if p.routesPath != "" && p.routesPath != p.configPath {
-		routesData, err := os.ReadFile(p.routesPath)
+		// If a --services file is provided, load services from that file
+		serviceData, err := os.ReadFile(p.routesPath)
 		if err != nil {
-			return nil, coreerrors.NewConfigError("failed to read routes file", err)
+			return nil, coreerrors.NewConfigError("failed to read service config file", err)
 		}
-
-		var routesConfig Config
-		if err := yaml.Unmarshal(routesData, &routesConfig); err != nil {
-			return nil, coreerrors.NewConfigError("failed to parse routes file", err)
+		var serviceConfig ServiceConfig
+		if err := yaml.Unmarshal(serviceData, &serviceConfig); err != nil {
+			return nil, coreerrors.NewConfigError("failed to parse service config file", err)
 		}
-
-		config.Routes = routesConfig.Routes
+		// Merge: append serviceConfig to any already loaded in main config
+		config.Services = append(config.Services, serviceConfig)
 	}
 
 	// Validate configuration
@@ -180,16 +214,16 @@ func (p *FileProvider) Save(cfg *Config) error {
 		return coreerrors.NewConfigError("failed to write config file", err)
 	}
 
-	// Save routes to separate file if needed
+	// Save service config to separate file if needed
 	if p.routesPath != "" && p.routesPath != p.configPath {
-		routesConfig := Config{Routes: cfg.Routes}
-		routesData, err := yaml.Marshal(routesConfig)
-		if err != nil {
-			return coreerrors.NewConfigError("failed to marshal routes", err)
-		}
-
-		if err := os.WriteFile(p.routesPath, routesData, 0644); err != nil {
-			return coreerrors.NewConfigError("failed to write routes file", err)
+		if len(cfg.Services) > 0 {
+			serviceData, err := yaml.Marshal(cfg.Services[0])
+			if err != nil {
+				return coreerrors.NewConfigError("failed to marshal service config", err)
+			}
+			if err := os.WriteFile(p.routesPath, serviceData, 0644); err != nil {
+				return coreerrors.NewConfigError("failed to write service config file", err)
+			}
 		}
 	}
 
@@ -286,45 +320,6 @@ func (c *Config) Validate() error {
 	return validator.Validate(c)
 }
 
-// GetRouteByPath finds a route by its path
-func (c *Config) GetRouteByPath(path string) (*RouterConfig, error) {
-	for _, route := range c.Routes {
-		if route.Path == path {
-			return &route, nil
-		}
-	}
-	return nil, coreerrors.ErrRouteNotFound
-}
-
-// AddRoute adds a new route to the configuration
-func (c *Config) AddRoute(route RouterConfig) error {
-	// Validate the route
-	if route.Path == "" {
-		return coreerrors.NewValidationError("path", "path is required")
-	}
-
-	// Check for duplicate paths
-	for _, existingRoute := range c.Routes {
-		if existingRoute.Path == route.Path {
-			return coreerrors.NewValidationError("path", "duplicate path found")
-		}
-	}
-
-	c.Routes = append(c.Routes, route)
-	return nil
-}
-
-// RemoveRoute removes a route by path
-func (c *Config) RemoveRoute(path string) error {
-	for i, route := range c.Routes {
-		if route.Path == path {
-			c.Routes = append(c.Routes[:i], c.Routes[i+1:]...)
-			return nil
-		}
-	}
-	return coreerrors.ErrRouteNotFound
-}
-
 // GetPluginConfig returns configuration for a specific plugin
 func (c *Config) GetPluginConfig(pluginName string) (map[string]interface{}, bool) {
 	config, exists := c.Plugins[pluginName]
@@ -354,4 +349,96 @@ func LoadRSAPublicKey(path string) (*rsa.PublicKey, error) {
 		return nil, err
 	}
 	return pub, nil
+}
+
+// GetServiceByName finds a service by its name
+func (c *Config) GetServiceByName(name string) (*Service, error) {
+	for _, serviceConfig := range c.Services {
+		for _, service := range serviceConfig.Services {
+			if service.Name == name {
+				return &service, nil
+			}
+		}
+	}
+	return nil, coreerrors.NewValidationError("service", "service not found")
+}
+
+// GetServiceByGroup finds all services in a specific group
+func (c *Config) GetServiceByGroup(group string) []Service {
+	var services []Service
+	for _, serviceConfig := range c.Services {
+		for _, service := range serviceConfig.Services {
+			if service.Group == group {
+				services = append(services, service)
+			}
+		}
+	}
+	return services
+}
+
+// GetServiceByTag finds all services with a specific tag
+func (c *Config) GetServiceByTag(tag string) []Service {
+	var services []Service
+	for _, serviceConfig := range c.Services {
+		for _, service := range serviceConfig.Services {
+			for _, serviceTag := range service.Tags {
+				if serviceTag == tag {
+					services = append(services, service)
+					break
+				}
+			}
+		}
+	}
+	return services
+}
+
+// GetAllRoutesFromServices returns all routes from all services
+func (c *Config) GetAllRoutesFromServices() []RouterConfig {
+	var allRoutes []RouterConfig
+	for _, serviceConfig := range c.Services {
+		for _, service := range serviceConfig.Services {
+			allRoutes = append(allRoutes, service.Routes...)
+		}
+	}
+	return allRoutes
+}
+
+// GetRouteByPathFromServices finds a route by path from service configurations
+func (c *Config) GetRouteByPathFromServices(path string) (*RouterConfig, error) {
+	for _, serviceConfig := range c.Services {
+		for _, service := range serviceConfig.Services {
+			for _, route := range service.Routes {
+				if route.Path == path {
+					return &route, nil
+				}
+			}
+		}
+	}
+	return nil, coreerrors.ErrRouteNotFound
+}
+
+// AddService adds a new service to the configuration
+func (c *Config) AddService(service Service) error {
+	if len(c.Services) == 0 {
+		c.Services = []ServiceConfig{{
+			Version:  1,
+			Services: []Service{},
+		}}
+	}
+
+	c.Services[0].Services = append(c.Services[0].Services, service)
+	return nil
+}
+
+// RemoveService removes a service by name
+func (c *Config) RemoveService(name string) error {
+	for i, serviceConfig := range c.Services {
+		for j, service := range serviceConfig.Services {
+			if service.Name == name {
+				c.Services[i].Services = append(c.Services[i].Services[:j], c.Services[i].Services[j+1:]...)
+				return nil
+			}
+		}
+	}
+	return coreerrors.NewValidationError("service", "service not found")
 }

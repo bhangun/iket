@@ -25,7 +25,7 @@ func NewConfigValidator() *ConfigValidator {
 		rules: []ValidationRule{
 			&ServerConfigRule{},
 			&SecurityConfigRule{},
-			&RoutesConfigRule{},
+			&ServicesConfigRule{},
 			&PluginsConfigRule{},
 		},
 	}
@@ -109,72 +109,125 @@ func (r *SecurityConfigRule) Validate(cfg *Config) error {
 	return nil
 }
 
-// RoutesConfigRule validates routes configuration
-type RoutesConfigRule struct{}
+// ServicesConfigRule validates service-based configuration
+type ServicesConfigRule struct{}
 
-func (r *RoutesConfigRule) Validate(cfg *Config) error {
-	if len(cfg.Routes) == 0 {
-		return errors.NewValidationError("routes", "at least one route must be configured")
+func (r *ServicesConfigRule) Validate(cfg *Config) error {
+	if len(cfg.Services) == 0 {
+		// Services are optional, so no error if not present
+		return nil
 	}
 
-	seenPaths := make(map[string]bool)
-
-	for i, route := range cfg.Routes {
-		// Set default values
-		// Note: In Go, bool fields default to false when not specified in YAML
-		// Since the comment says "default true", we need to handle this explicitly
-		// We can't modify the route directly in the slice, so we'll handle this in the gateway logic
-		// For now, routes without the Enabled field will be treated as enabled (true)
-
-		// Validate path
-		if route.Path == "" {
-			return errors.NewValidationError(fmt.Sprintf("routes[%d].path", i), "path is required")
+	for i, serviceConfig := range cfg.Services {
+		// Validate service config version
+		if serviceConfig.Version <= 0 {
+			return errors.NewValidationError(fmt.Sprintf("services[%d].version", i), "version must be positive")
 		}
 
-		if !strings.HasPrefix(route.Path, "/") {
-			return errors.NewValidationError(fmt.Sprintf("routes[%d].path", i), "path must start with /")
+		// Validate services array
+		if len(serviceConfig.Services) == 0 {
+			return errors.NewValidationError(fmt.Sprintf("services[%d].services", i), "at least one service must be configured")
 		}
 
-		// Check for duplicate paths
-		if seenPaths[route.Path] {
-			return errors.NewValidationError(fmt.Sprintf("routes[%d].path", i), "duplicate path found")
-		}
-		seenPaths[route.Path] = true
-
-		// Validate destination
-		if route.Destination == "" {
-			return errors.NewValidationError(fmt.Sprintf("routes[%d].destination", i), "destination is required")
-		}
-
-		// Validate destination URL
-		if _, err := url.Parse(route.Destination); err != nil {
-			return errors.NewValidationError(fmt.Sprintf("routes[%d].destination", i), "invalid destination URL")
-		}
-
-		// Validate methods
-		if len(route.Methods) == 0 {
-			return errors.NewValidationError(fmt.Sprintf("routes[%d].methods", i), "at least one HTTP method is required")
-		}
-
-		validMethods := map[string]bool{
-			"GET": true, "POST": true, "PUT": true, "DELETE": true,
-			"PATCH": true, "HEAD": true, "OPTIONS": true, "TRACE": true,
-		}
-
-		for _, method := range route.Methods {
-			if !validMethods[strings.ToUpper(method)] {
-				return errors.NewValidationError(fmt.Sprintf("routes[%d].methods", i), fmt.Sprintf("invalid HTTP method: %s", method))
+		// Validate cache TTL if specified
+		if serviceConfig.CacheTTL != "" {
+			if _, err := time.ParseDuration(serviceConfig.CacheTTL); err != nil {
+				return errors.NewValidationError(fmt.Sprintf("services[%d].cache_ttl", i), "invalid duration format")
 			}
 		}
 
 		// Validate timeout if specified
-		if route.Timeout != nil && *route.Timeout <= 0 {
-			return errors.NewValidationError(fmt.Sprintf("routes[%d].timeout", i), "timeout must be positive")
+		if serviceConfig.Timeout != "" {
+			if _, err := time.ParseDuration(serviceConfig.Timeout); err != nil {
+				return errors.NewValidationError(fmt.Sprintf("services[%d].timeout", i), "invalid duration format")
+			}
 		}
 
-		// Validate rate limit if specified
-		if route.RateLimit != nil && *route.RateLimit <= 0 {
-			return errors.NewValidationError(fmt.Sprintf("routes[%d].rateLimit", i), "rate limit must be positive")
+		// Validate each service
+		seenServiceNames := make(map[string]bool)
+		for j, service := range serviceConfig.Services {
+			// Validate service name
+			if service.Name == "" {
+				return errors.NewValidationError(fmt.Sprintf("services[%d].services[%d].name", i, j), "service name is required")
+			}
+
+			// Check for duplicate service names
+			if seenServiceNames[service.Name] {
+				return errors.NewValidationError(fmt.Sprintf("services[%d].services[%d].name", i, j), "duplicate service name found")
+			}
+			seenServiceNames[service.Name] = true
+
+			// Validate host
+			if service.Host == "" {
+				return errors.NewValidationError(fmt.Sprintf("services[%d].services[%d].host", i, j), "host is required")
+			}
+
+			// Validate host URL
+			if _, err := url.Parse(service.Host); err != nil {
+				return errors.NewValidationError(fmt.Sprintf("services[%d].services[%d].host", i, j), "invalid host URL")
+			}
+
+			// Validate base path if specified
+			if service.BasePath != "" && !strings.HasPrefix(service.BasePath, "/") {
+				return errors.NewValidationError(fmt.Sprintf("services[%d].services[%d].base_path", i, j), "base path must start with /")
+			}
+
+			// Validate routes
+			if len(service.Routes) == 0 {
+				return errors.NewValidationError(fmt.Sprintf("services[%d].services[%d].routes", i, j), "at least one route must be configured")
+			}
+
+			// Validate each route in the service
+			seenRoutePaths := make(map[string]bool)
+			for k, route := range service.Routes {
+				// Validate path
+				if route.Path == "" {
+					return errors.NewValidationError(fmt.Sprintf("services[%d].services[%d].routes[%d].path", i, j, k), "path is required")
+				}
+
+				if !strings.HasPrefix(route.Path, "/") {
+					return errors.NewValidationError(fmt.Sprintf("services[%d].services[%d].routes[%d].path", i, j, k), "path must start with /")
+				}
+
+				// Check for duplicate paths within the service
+				fullPath := service.BasePath + route.Path
+				if seenRoutePaths[fullPath] {
+					return errors.NewValidationError(fmt.Sprintf("services[%d].services[%d].routes[%d].path", i, j, k), "duplicate path found within service")
+				}
+				seenRoutePaths[fullPath] = true
+
+				// Validate method (new format) or methods (old format)
+				if route.Method == "" && len(route.Methods) == 0 {
+					return errors.NewValidationError(fmt.Sprintf("services[%d].services[%d].routes[%d]", i, j, k), "either method or methods is required")
+				}
+
+				// Validate method if specified
+				if route.Method != "" {
+					validMethods := map[string]bool{
+						"GET": true, "POST": true, "PUT": true, "DELETE": true,
+						"PATCH": true, "HEAD": true, "OPTIONS": true, "TRACE": true,
+					}
+					if !validMethods[strings.ToUpper(route.Method)] {
+						return errors.NewValidationError(fmt.Sprintf("services[%d].services[%d].routes[%d].method", i, j, k), fmt.Sprintf("invalid HTTP method: %s", route.Method))
+					}
+				}
+
+				// Validate priority if specified
+				if route.Priority < 0 {
+					return errors.NewValidationError(fmt.Sprintf("services[%d].services[%d].routes[%d].priority", i, j, k), "priority must be non-negative")
+				}
+
+				// Validate backends
+				if len(route.Backends) == 0 {
+					return errors.NewValidationError(fmt.Sprintf("services[%d].services[%d].routes[%d].backend", i, j, k), "at least one backend must be configured")
+				}
+
+				for l, backend := range route.Backends {
+					if backend.URLPattern == "" {
+						return errors.NewValidationError(fmt.Sprintf("services[%d].services[%d].routes[%d].backend[%d].url_pattern", i, j, k, l), "url_pattern is required")
+					}
+				}
+			}
 		}
 	}
 

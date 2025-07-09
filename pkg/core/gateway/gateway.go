@@ -101,7 +101,7 @@ func (g *Gateway) setupRoutes() error {
 	g.router.Handle("/admin/version", g.adminAuthMiddleware(http.HandlerFunc(g.versionHandler))).Methods(http.MethodGet)
 
 	// Setup proxy routes
-	for _, route := range g.config.Routes {
+	for _, route := range g.config.GetAllRoutesFromServices() {
 		// Routes are enabled by default (when Enabled field is not specified in YAML)
 		// Only skip if explicitly disabled
 		if route.Enabled == false {
@@ -184,7 +184,7 @@ func (g *Gateway) clientCredentialAuthMiddleware() func(http.Handler) http.Handl
 			// Find route config for this path
 			matched := false
 			var requireAuth bool = true
-			for _, route := range g.config.Routes {
+			for _, route := range g.config.GetAllRoutesFromServices() {
 				// Routes are enabled by default (when Enabled field is not specified in YAML)
 				// Only skip if explicitly disabled
 				if route.Enabled == false {

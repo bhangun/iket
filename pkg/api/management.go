@@ -122,6 +122,12 @@ func (api *ManagementAPI) RegisterRoutes(router *mux.Router) {
 	v1.HandleFunc("/backup", api.createBackup).Methods("POST")
 	v1.HandleFunc("/backup", api.listBackups).Methods("GET")
 	v1.HandleFunc("/backup/{id}/restore", api.restoreBackup).Methods("POST")
+
+	// Service management
+	v1.HandleFunc("/services", api.getServices).Methods("GET")
+	v1.HandleFunc("/services", api.createService).Methods("POST")
+	v1.HandleFunc("/services/{name}", api.updateService).Methods("PUT")
+	v1.HandleFunc("/services/{name}", api.deleteService).Methods("DELETE")
 }
 
 // Response structures
@@ -521,17 +527,14 @@ func (api *ManagementAPI) listRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	routes := make([]RouteInfo, 0, len(cfg.Routes))
-	for i, route := range cfg.Routes {
+	routes := cfg.GetAllRoutesFromServices()
+	routeInfos := make([]RouteInfo, 0, len(routes))
+	for i, route := range routes {
 		timeout := 0
 		if route.Timeout != nil {
 			timeout = int(route.Timeout.Seconds())
 		}
-
-		// Routes are enabled by default (when Enabled field is not specified in YAML)
-		// Only disabled if explicitly set to false
 		enabled := route.Enabled != false
-
 		routeInfo := RouteInfo{
 			ID:          fmt.Sprintf("route-%d", i+1),
 			Path:        route.Path,
@@ -547,11 +550,10 @@ func (api *ManagementAPI) listRoutes(w http.ResponseWriter, r *http.Request) {
 				"avg_response_time": 45.2,
 			},
 		}
-		routes = append(routes, routeInfo)
+		routeInfos = append(routeInfos, routeInfo)
 	}
-
 	response := map[string]interface{}{
-		"routes": routes,
+		"routes": routeInfos,
 	}
 	api.writeJSON(w, response)
 }
@@ -1048,4 +1050,197 @@ func getErrorCode(statusCode int) string {
 	default:
 		return "INTERNAL_ERROR"
 	}
+}
+
+func (api *ManagementAPI) getServices(w http.ResponseWriter, r *http.Request) {
+	cfg := api.gateway.GetConfig()
+	if cfg == nil {
+		api.writeError(w, "Configuration not available", http.StatusInternalServerError)
+		return
+	}
+
+	// Redact sensitive info if needed (e.g., backend URLs, secrets)
+	services := make([]map[string]interface{}, 0)
+	for _, svcConfig := range cfg.Services {
+		for _, svc := range svcConfig.Services {
+			serviceInfo := map[string]interface{}{
+				"name":        svc.Name,
+				"description": svc.Description,
+				"host":        svc.Host,
+				"base_path":   svc.BasePath,
+				"tags":        svc.Tags,
+				"group":       svc.Group,
+				"routes":      make([]map[string]interface{}, 0),
+			}
+			for _, route := range svc.Routes {
+				routeInfo := map[string]interface{}{
+					"path":        route.Path,
+					"method":      route.Method,
+					"name":        route.Name,
+					"description": route.Description,
+					"tags":        route.Tags,
+					"group":       route.Group,
+					"priority":    route.Priority,
+					"enabled":     route.Enabled,
+					// Do not include backend URLs or secrets
+				}
+				serviceInfo["routes"] = append(serviceInfo["routes"].([]map[string]interface{}), routeInfo)
+			}
+			services = append(services, serviceInfo)
+		}
+	}
+	response := map[string]interface{}{
+		"services": services,
+	}
+	api.writeJSON(w, response)
+}
+
+// POST /api/v1/services
+func (api *ManagementAPI) createService(w http.ResponseWriter, r *http.Request) {
+	cfg := api.gateway.GetConfig()
+	if cfg == nil {
+		api.writeError(w, "Configuration not available", http.StatusInternalServerError)
+		return
+	}
+	var req struct {
+		Services []config.Service `json:"services"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		api.writeError(w, "Invalid service definition", http.StatusBadRequest)
+		return
+	}
+	if len(req.Services) == 0 {
+		api.writeError(w, "No services provided", http.StatusBadRequest)
+		return
+	}
+	if len(cfg.Services) == 0 {
+		cfg.Services = []config.ServiceConfig{{Version: 1, Services: []config.Service{}}}
+	}
+	addedRoutes := []map[string]interface{}{}
+	skippedRoutes := []map[string]interface{}{}
+	for _, newSvc := range req.Services {
+		found := false
+		for i, svc := range cfg.Services[0].Services {
+			if svc.Host == newSvc.Host { // merge by host
+				found = true
+				existingRoutes := svc.Routes
+				for _, newRoute := range newSvc.Routes {
+					dup := false
+					for _, existRoute := range existingRoutes {
+						if existRoute.Path == newRoute.Path && existRoute.Method == newRoute.Method {
+							dup = true
+							break
+						}
+					}
+					if dup {
+						skippedRoutes = append(skippedRoutes, map[string]interface{}{"path": newRoute.Path, "method": newRoute.Method, "reason": "duplicate"})
+						continue
+					}
+					cfg.Services[0].Services[i].Routes = append(cfg.Services[0].Services[i].Routes, newRoute)
+					addedRoutes = append(addedRoutes, map[string]interface{}{"path": newRoute.Path, "method": newRoute.Method})
+				}
+				break
+			}
+		}
+		if !found {
+			cfg.Services[0].Services = append(cfg.Services[0].Services, newSvc)
+			for _, newRoute := range newSvc.Routes {
+				addedRoutes = append(addedRoutes, map[string]interface{}{"path": newRoute.Path, "method": newRoute.Method})
+			}
+		}
+	}
+	api.gateway.UpdateConfig(cfg)
+	msg := fmt.Sprintf("%d route(s) added, %d skipped due to duplication", len(addedRoutes), len(skippedRoutes))
+	api.writeJSON(w, map[string]interface{}{
+		"success":        true,
+		"added_routes":   addedRoutes,
+		"skipped_routes": skippedRoutes,
+		"message":        msg,
+	})
+}
+
+// PUT /api/v1/services/{name}
+func (api *ManagementAPI) updateService(w http.ResponseWriter, r *http.Request) {
+	cfg := api.gateway.GetConfig()
+	if cfg == nil {
+		api.writeError(w, "Configuration not available", http.StatusInternalServerError)
+		return
+	}
+	name := mux.Vars(r)["name"]
+	var update config.Service
+	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
+		api.writeError(w, "Invalid service definition", http.StatusBadRequest)
+		return
+	}
+	updated := false
+	addedRoutes := []map[string]interface{}{}
+	updatedRoutes := []map[string]interface{}{}
+	for i, svcConfig := range cfg.Services {
+		for j, svc := range svcConfig.Services {
+			if svc.Name == name {
+				existingRoutes := svc.Routes
+				for _, newRoute := range update.Routes {
+					found := false
+					for k, existRoute := range existingRoutes {
+						if existRoute.Path == newRoute.Path && existRoute.Method == newRoute.Method {
+							cfg.Services[i].Services[j].Routes[k] = newRoute
+							updatedRoutes = append(updatedRoutes, map[string]interface{}{"path": newRoute.Path, "method": newRoute.Method})
+							found = true
+							break
+						}
+					}
+					if !found {
+						cfg.Services[i].Services[j].Routes = append(cfg.Services[i].Services[j].Routes, newRoute)
+						addedRoutes = append(addedRoutes, map[string]interface{}{"path": newRoute.Path, "method": newRoute.Method})
+					}
+				}
+				// Optionally update other service fields
+				cfg.Services[i].Services[j].Description = update.Description
+				cfg.Services[i].Services[j].Host = update.Host
+				cfg.Services[i].Services[j].BasePath = update.BasePath
+				cfg.Services[i].Services[j].Tags = update.Tags
+				cfg.Services[i].Services[j].Group = update.Group
+				updated = true
+				break
+			}
+		}
+	}
+	if !updated {
+		api.writeError(w, "Service not found", http.StatusNotFound)
+		return
+	}
+	api.gateway.UpdateConfig(cfg)
+	msg := fmt.Sprintf("%d route(s) updated, %d added", len(updatedRoutes), len(addedRoutes))
+	api.writeJSON(w, map[string]interface{}{
+		"success":        true,
+		"updated_routes": updatedRoutes,
+		"added_routes":   addedRoutes,
+		"message":        msg,
+	})
+}
+
+// DELETE /api/v1/services/{name}
+func (api *ManagementAPI) deleteService(w http.ResponseWriter, r *http.Request) {
+	cfg := api.gateway.GetConfig()
+	if cfg == nil {
+		api.writeError(w, "Configuration not available", http.StatusInternalServerError)
+		return
+	}
+	name := mux.Vars(r)["name"]
+	deleted := false
+	for i, svcConfig := range cfg.Services {
+		for j, svc := range svcConfig.Services {
+			if svc.Name == name {
+				cfg.Services[i].Services = append(cfg.Services[i].Services[:j], cfg.Services[i].Services[j+1:]...)
+				deleted = true
+				break
+			}
+		}
+	}
+	if !deleted {
+		api.writeError(w, "Service not found", http.StatusNotFound)
+		return
+	}
+	api.gateway.UpdateConfig(cfg)
+	api.writeJSON(w, APIResponse{Success: true, Message: "Service deleted successfully"})
 }

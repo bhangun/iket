@@ -156,6 +156,90 @@ func (api *ManagementAPI) RegisterRoutes(router *mux.Router) {
 | `/api/v1/ws/metrics` | Real-time metrics updates |
 | `/api/v1/ws/logs` | Real-time log updates |
 
+---
+
+## Service Management API
+
+### `/api/v1/services`
+
+#### Supported Methods
+- `GET /api/v1/services` — List all services and their routes (non-sensitive info)
+- `POST /api/v1/services` — (Planned) Create a new service
+- `PUT /api/v1/services/{id}` — (Planned) Update a service
+- `DELETE /api/v1/services/{id}` — (Planned) Delete a service
+
+#### **GET /api/v1/services**
+Returns all service definitions currently loaded by the gateway, including their routes, but omits sensitive information (such as backend URLs and secrets).
+
+**Request:**
+```http
+GET /api/v1/services
+Authorization: Basic <base64(username:password)>
+```
+
+**Response:**
+- Status: 200 OK
+- Content-Type: application/json
+
+```json
+{
+  "services": [
+    {
+      "name": "User Service",
+      "description": "Handles user registration and authentication",
+      "host": "http://user-service:8000",
+      "base_path": "/user",
+      "tags": ["public", "auth"],
+      "group": "authentication",
+      "routes": [
+        {
+          "path": "/register",
+          "method": "POST",
+          "name": "User Registration",
+          "description": "Registers a new user",
+          "tags": ["public"],
+          "group": null,
+          "priority": 1,
+          "enabled": true
+        }
+      ]
+    }
+  ]
+}
+```
+
+**Service Object Fields:**
+- `name` (string): Service name
+- `description` (string): Service description
+- `host` (string): Upstream host for the service
+- `base_path` (string|null): Base path for the service
+- `tags` (array of string): Tags for the service
+- `group` (string|null): Service group
+- `routes` (array of Route): List of route definitions
+
+**Route Object Fields:**
+- `path` (string): Route path
+- `method` (string): HTTP method (e.g., GET, POST)
+- `name` (string): Route name
+- `description` (string): Route description
+- `tags` (array of string): Tags for the route
+- `group` (string|null): Route group
+- `priority` (integer): Route priority
+- `enabled` (boolean): Whether the route is enabled
+
+> **Note:** Backend URLs and any secrets are omitted from this endpoint for security.
+
+#### **POST /api/v1/services**
+_(Planned)_ Create a new service. Not yet implemented.
+
+#### **PUT /api/v1/services/{id}**
+_(Planned)_ Update an existing service. Not yet implemented.
+
+#### **DELETE /api/v1/services/{id}**
+_(Planned)_ Delete a service. Not yet implemented.
+
+---
+
 ## Client Examples
 
 ### Go Client
@@ -466,3 +550,35 @@ curl http://localhost:8080/health
 5. **Create Custom Dashboard Themes**
 6. **Implement Multi-Tenant Support**
 7. **Add API Documentation (Swagger/OpenAPI)** 
+
+
+
+
+```
+curl -X POST -u admin:admin123 http://localhost:7110/api/v1/services \
+  -H "Content-Type: application/json" \
+  -d '{
+    "services": [
+      {
+        "name": "E-commerce",
+        "description": "Online shop",
+        "host": "http://olshop-service:8000",
+        "base_path": "/olshop",
+        "tags": ["public", "product"],
+        "group": "olshop",
+        "routes": [
+          {
+            "path": "/product",
+            "method": "POST",
+            "name": "Product",
+            "description": "Create new product",
+            "tags": ["public"],
+            "group": null,
+            "priority": 1,
+            "enabled": true
+          }
+        ]
+      }
+    ]
+  }'
+```
