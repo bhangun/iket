@@ -156,6 +156,103 @@ func (api *ManagementAPI) RegisterRoutes(router *mux.Router) {
 | `/api/v1/ws/metrics` | Real-time metrics updates |
 | `/api/v1/ws/logs` | Real-time log updates |
 
+---
+
+## Service Management API
+
+### `/api/v1/services`
+
+#### Supported Methods
+- `GET /api/v1/services` — List all services and their routes (non-sensitive info)
+- `POST /api/v1/services` — (Planned) Create a new service
+- `PUT /api/v1/services/{id}` — (Planned) Update a service
+- `DELETE /api/v1/services/{id}` — (Planned) Delete a service
+
+#### **GET /api/v1/services**
+Returns all service definitions currently loaded by the gateway, including their routes, but omits sensitive information (such as backend URLs and secrets).
+
+**Request:**
+```http
+GET /api/v1/services
+Authorization: Basic <base64(username:password)>
+```
+
+**Response:**
+- Status: 200 OK
+- Content-Type: application/json
+
+```json
+{
+  "services": [
+    {
+      "name": "User Service",
+      "description": "Handles user registration and authentication",
+      "host": "http://user-service:8000",
+      "base_path": "/user",
+      "tags": ["public", "auth"],
+      "group": "authentication",
+      "routes": [
+        {
+          "path": "/register",
+          "method": "POST",
+          "name": "User Registration",
+          "description": "Registers a new user",
+          "tags": ["public"],
+          "group": null,
+          "priority": 1,
+          "enabled": true
+        }
+      ]
+    }
+  ]
+}
+```
+
+**Service Object Fields:**
+- `name` (string): Service name
+- `description` (string): Service description
+- `host` (string): Upstream host for the service
+- `base_path` (string|null): Base path for the service
+- `tags` (array of string): Tags for the service
+- `group` (string|null): Service group
+- `routes` (array of Route): List of route definitions
+
+---
+
+### Service BasePath vs. Route StripPath
+
+- **Service `base_path`:**
+  - Defines a common prefix for all routes in a service (e.g., `/api/v1/users`).
+  - Used for grouping and matching incoming requests to the correct service.
+
+- **Route `stripPath`:**
+  - If `true`, the gateway removes the route's path prefix before forwarding the request to the backend.
+  - Useful when your backend expects the path to start after the prefix (e.g., `/api/v1/users/profile` → `/profile`).
+  - If `false`, the full path is forwarded to the backend.
+
+**Example:**
+- Gateway route: `/api/v1/users/profile`
+- Service base path: `/api/v1/users`
+- Backend expects: `/profile`
+- Set `stripPath: true` in the route config.
+
+---
+
+**Route Object Fields:**
+- `path` (string): Route path
+- `method` (string): HTTP method (e.g., GET, POST)
+- `name` (string): Route name
+- `description` (string): Route description
+- `tags` (array of string): Tags for the route
+- `group` (string|null): Route group
+- `priority` (integer): Route priority
+- `enabled` (boolean): Whether the route is enabled
+- `stripPath` (boolean): Whether to remove the route's prefix before proxying to the backend
+
+> **Note:** Use `stripPath: true` if your backend does not expect the full route prefix.
+
+---
+
 ## Client Examples
 
 ### Go Client
@@ -466,3 +563,35 @@ curl http://localhost:8080/health
 5. **Create Custom Dashboard Themes**
 6. **Implement Multi-Tenant Support**
 7. **Add API Documentation (Swagger/OpenAPI)** 
+
+
+
+
+```
+curl -X POST -u admin:admin123 http://localhost:7110/api/v1/services \
+  -H "Content-Type: application/json" \
+  -d '{
+    "services": [
+      {
+        "name": "E-commerce",
+        "description": "Online shop",
+        "host": "http://olshop-service:8000",
+        "base_path": "/olshop",
+        "tags": ["public", "product"],
+        "group": "olshop",
+        "routes": [
+          {
+            "path": "/product",
+            "method": "POST",
+            "name": "Product",
+            "description": "Create new product",
+            "tags": ["public"],
+            "group": null,
+            "priority": 1,
+            "enabled": true
+          }
+        ]
+      }
+    ]
+  }'
+```

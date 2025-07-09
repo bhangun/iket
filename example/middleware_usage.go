@@ -5,7 +5,7 @@ import (
 	"net/http"
 
 	"github.com/bhangun/iket/pkg/plugin"
-	"github.com/bhangun/iket/pkg/plugins/auth"
+	"github.com/bhangun/iket/plugins/auth"
 )
 
 func main() {

@@ -32,21 +32,59 @@ go build -o iket ./cmd/iket
 ### Run Example
 
 ```bash
-./iket -config ./config.yaml
+./iket -config ./example/service_based/service.yaml
 ```
 
-### Example config.yaml
+### Example service.yaml
 
 ```yaml
-server:
-  port: 8080
-  enableLogging: true
+version: 1
+services:
+  - name: "User Service"
+    description: "Handles user registration and authentication"
+    host: "http://user-service:8000"
+    base_path: "/user"
+    tags: ["public", "auth"]
+    group: "authentication"
+    routes:
+      - path: /register
+        method: POST
+        name: "User Registration"
+        description: "Registers a new user"
+        tags: ["public"]
+        priority: 1
+        concurrent_calls: "10"
+        backend:
+          - url_pattern: /register
+      - path: /me
+        method: GET
+        name: "Get Profile"
+        description: "Fetch current user profile"
+        tags: ["internal"]
+        group: "profile"
+        max_rate: "100"
+        backend:
+          - url_pattern: /me
 
-routes:
-  - path: "/api"
-    destination: "http://localhost:3000"
-    methods: ["GET"]
-    requireJwt: true
+  - name: "Admin Dashboard"
+    description: "Admin-level service for managing data"
+    host: "http://admin-api:8080"
+    tags: ["admin"]
+    routes:
+      - path: /stats
+        method: GET
+        name: "Fetch Stats"
+        description: "Provides usage statistics"
+        tags: ["internal"]
+        priority: 5
+        backend:
+          - url_pattern: /stats
+
+oauth:
+  disable: false
+
+cache_ttl: 5m
+timeout: 10s
 ```
 
 ---
@@ -61,9 +99,13 @@ routes:
 
 * `enableBasicAuth`, `jwt.secret`, `tls.certFile`
 
-### Routes
+### Services
 
-* `path`, `destination`, `methods`, `headers`, `rateLimit`, `timeout`
+* `name`, `host`, `base_path`, `tags`, `group`, `routes`
+
+### Route (inside a service)
+
+* `path`, `method`, `name`, `description`, `tags`, `priority`, `backend`, etc.
 
 ### Plugins
 
@@ -254,7 +296,7 @@ plugins: {}
 ## Running the Gateway
 
 ```sh
-go run cmd/gateway/main.go --config=example/basic/config.yaml --routes=example/basic/routes.yaml --port=7110
+go run cmd/gateway/main.go --config=example/basic/config.yaml --services=example/basic/service.yaml --port=7110
 ```
 
 ## Notes

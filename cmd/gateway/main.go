@@ -22,8 +22,8 @@ import (
 
 var (
 	defaultConfigPath = "config/config.yaml"
-	defaultRoutesPath = "config/routes.yaml"
-	version           = app.Version // use version from app package
+	//defaultRoutesPath = "config/routes.yaml"
+	version = app.Version // use version from app package
 )
 
 var defaultConfig = `server:
@@ -64,7 +64,7 @@ func main() {
 	startTime := time.Now()
 
 	configPath := flag.String("config", defaultConfigPath, "Path to config.yaml")
-	routesPath := flag.String("routes", defaultRoutesPath, "Path to routes.yaml")
+	servicesPath := flag.String("services", "", "Path to service-based config (service.yaml), optional")
 	portFlag := flag.Int("port", 0, "Port to run the gateway on (overrides config and IKET_PORT env var)")
 	printConfig := flag.Bool("print-config", false, "Print the loaded configuration and exit")
 	printVersion := flag.Bool("version", false, "Print version and exit")
@@ -77,8 +77,8 @@ func main() {
 
 	fmt.Printf("Iket Gateway version: %s\n", version)
 
-	if ensureDefaultConfig(*configPath, *routesPath) {
-		fmt.Printf("\nDefault config created at %s and/or %s. Please review and run again.\n", *configPath, *routesPath)
+	if ensureDefaultConfig(*configPath, *servicesPath) {
+		fmt.Printf("\nDefault config created at %s and/or %s. Please review and run again.\n", *configPath, *servicesPath)
 		os.Exit(0)
 	}
 
@@ -90,7 +90,7 @@ func main() {
 	logger.Info("Starting Iket Gateway")
 
 	// Load configuration
-	cfg, err := config.LoadConfig(*configPath, *routesPath, logger)
+	cfg, err := config.LoadConfig(*configPath, *servicesPath, logger)
 	if err != nil {
 		logger.Fatal("Failed to load configuration", logging.Error(err))
 	}

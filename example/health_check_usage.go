@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"github.com/bhangun/iket/pkg/plugin"
-	"github.com/bhangun/iket/pkg/plugins/auth"
-	"github.com/bhangun/iket/pkg/plugins/openapi"
+	"github.com/bhangun/iket/plugins/auth"
+	"github.com/bhangun/iket/plugins/openapi"
 )
 
 func mainHealthCheck() {

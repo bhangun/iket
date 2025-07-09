@@ -324,7 +324,7 @@ GET /routes
       "require_auth": true,
       "timeout": 30,
       "strip_path": false,
-      "active": true,
+      "enabled": true,
       "stats": {
         "requests": 15420,
         "errors": 5,
@@ -334,6 +334,8 @@ GET /routes
   ]
 }
 ```
+
+// Note: The actual configuration is now service-based. When creating or updating a route, the request should specify the service context. Example request bodies should reflect the new structure if your management API supports service-based route creation.
 
 #### Get Route Details
 ```http
