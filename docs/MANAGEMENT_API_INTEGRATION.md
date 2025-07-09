@@ -217,6 +217,27 @@ Authorization: Basic <base64(username:password)>
 - `group` (string|null): Service group
 - `routes` (array of Route): List of route definitions
 
+---
+
+### Service BasePath vs. Route StripPath
+
+- **Service `base_path`:**
+  - Defines a common prefix for all routes in a service (e.g., `/api/v1/users`).
+  - Used for grouping and matching incoming requests to the correct service.
+
+- **Route `stripPath`:**
+  - If `true`, the gateway removes the route's path prefix before forwarding the request to the backend.
+  - Useful when your backend expects the path to start after the prefix (e.g., `/api/v1/users/profile` → `/profile`).
+  - If `false`, the full path is forwarded to the backend.
+
+**Example:**
+- Gateway route: `/api/v1/users/profile`
+- Service base path: `/api/v1/users`
+- Backend expects: `/profile`
+- Set `stripPath: true` in the route config.
+
+---
+
 **Route Object Fields:**
 - `path` (string): Route path
 - `method` (string): HTTP method (e.g., GET, POST)
@@ -226,17 +247,9 @@ Authorization: Basic <base64(username:password)>
 - `group` (string|null): Route group
 - `priority` (integer): Route priority
 - `enabled` (boolean): Whether the route is enabled
+- `stripPath` (boolean): Whether to remove the route's prefix before proxying to the backend
 
-> **Note:** Backend URLs and any secrets are omitted from this endpoint for security.
-
-#### **POST /api/v1/services**
-_(Planned)_ Create a new service. Not yet implemented.
-
-#### **PUT /api/v1/services/{id}**
-_(Planned)_ Update an existing service. Not yet implemented.
-
-#### **DELETE /api/v1/services/{id}**
-_(Planned)_ Delete a service. Not yet implemented.
+> **Note:** Use `stripPath: true` if your backend does not expect the full route prefix.
 
 ---
 
