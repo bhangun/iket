@@ -22,7 +22,7 @@ import (
 
 var (
 	defaultConfigPath = "config/config.yaml"
-	//defaultRoutesPath = "config/routes.yaml"
+	// defaultServicePath = "config/service.yaml"
 	version = app.Version // use version from app package
 )
 
@@ -32,15 +32,40 @@ var defaultConfig = `server:
   writeTimeout: "10s"
   idleTimeout: "60s"
   enableLogging: true
-routes: []
-plugins: {}
+
+security:
+  enableBasicAuth: true
+  basicAuthUsers:
+    admin: admin123
+  clients:
+    my-client-id: my-secret
+  jwt:
+    enabled: false
+    secret: "changeme"
+    algorithms: ["HS256"]
+    publicKeyFile: ""
+    required: false
+	
+plugins:
+  auth:
+    api_key: "your-secret-api-key-here"
+  openapi:
+    spec_path: "openapi.yaml"
+    enabled: true
+    swagger_ui: true
 `
 
-var defaultRoutes = `routes:
-  - path: "/hello"
-    destination: "http://localhost:9000"
-    methods: ["GET"]
-    requireAuth: false
+var defaultService = `
+services:
+  - name: "Example Service"
+    host: "http://localhost:9000"
+    base_path: "/example"
+    routes:
+      - path: "/hello"
+        method: GET
+        requireAuth: false
+        backend:
+          - url_pattern: /hello
 `
 
 func ensureDefaultConfig(configPath, routesPath string) bool {
@@ -51,13 +76,34 @@ func ensureDefaultConfig(configPath, routesPath string) bool {
 		os.WriteFile(configPath, []byte(defaultConfig), 0644)
 		created = true
 	}
-	routesDir := filepath.Dir(routesPath)
-	if _, err := os.Stat(routesPath); os.IsNotExist(err) {
-		os.MkdirAll(routesDir, 0755)
-		os.WriteFile(routesPath, []byte(defaultRoutes), 0644)
-		created = true
+	if routesPath != "" {
+		routesDir := filepath.Dir(routesPath)
+		if _, err := os.Stat(routesPath); os.IsNotExist(err) {
+			os.MkdirAll(routesDir, 0755)
+			os.WriteFile(routesPath, []byte(defaultService), 0644)
+			created = true
+		}
 	}
 	return created
+}
+
+func printBanner() {
+	blue := "\033[34m"
+	red := "\033[31m"
+	reset := "\033[0m"
+	fmt.Print(blue + `
+ _ _                 
+(_) |            _   
+ _| |  _ _____ _| |_ 
+| | |_/ ) ___ (_   _)
+| |  _ (| ____| | |_ 
+|_|_| \_)_____)  \__)` + red + " G a t e w a y \n\n" + reset)
+}
+
+func printFileIfExists(path string, label string) {
+	if data, err := os.ReadFile(path); err == nil {
+		fmt.Printf("\n===== %s (%s) =====\n%s\n", label, path, string(data))
+	}
 }
 
 func main() {
@@ -71,11 +117,11 @@ func main() {
 	flag.Parse()
 
 	if *printVersion {
-		fmt.Printf("Iket Gateway version: %s\n", version)
+		yellow := "\033[33m"
+		reset := "\033[0m"
+		fmt.Printf(yellow+"Iket Gateway version: %s\n\n"+reset, version)
 		os.Exit(0)
 	}
-
-	fmt.Printf("Iket Gateway version: %s\n", version)
 
 	if ensureDefaultConfig(*configPath, *servicesPath) {
 		fmt.Printf("\nDefault config created at %s and/or %s. Please review and run again.\n", *configPath, *servicesPath)
@@ -85,6 +131,14 @@ func main() {
 	// Initialize logger
 	logger := logging.NewLoggerFromEnv()
 	defer logger.Sync()
+
+	printBanner()
+	yellow := "\033[33m"
+	reset := "\033[0m"
+	fmt.Printf(yellow+"Version: %s\n\n"+reset, version)
+
+	printFileIfExists("config/config.yaml", "Default Config")
+	printFileIfExists("config/service.yaml", "Default Service Config")
 
 	logger.Info("Iket Gateway version", logging.String("version", version))
 	logger.Info("Starting Iket Gateway")
@@ -143,6 +197,7 @@ func main() {
 	logger.Info("Management API registered", logging.String("base_path", "/api/v1"))
 
 	startupDuration := time.Since(startTime)
+
 	logger.Info("Gateway startup complete", logging.Duration("startup_time", startupDuration))
 
 	// Setup graceful shutdown

@@ -1,6 +1,6 @@
 package app
 
 var (
-	Version = "0.2.0"
+	Version = "dev" // will be overwritten by build flags
 	Name    = "iket"
 )

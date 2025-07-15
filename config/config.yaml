@@ -4,5 +4,4 @@ server:
   writeTimeout: "10s"
   idleTimeout: "60s"
   enableLogging: true
-routes: []
 plugins: {}

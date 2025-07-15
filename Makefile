@@ -8,10 +8,12 @@ help: ## Show this help message
 	@echo "Iket Gateway - Available targets:"
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
+VERSION := $(shell git describe --tags --abbrev=0)
+
 # Build targets
 build: ## Build the main gateway binary
 	@echo "Building Iket Gateway..."
-	go build -ldflags="-w -s" -o bin/iket ./cmd/gateway
+	go build -ldflags "-X 'github.com/bhangun/iket/pkg/app.Version=$(VERSION)'" -o iket ./cmd/gateway
 	@echo "Build complete: bin/iket"
 
 build-basic: ## Build with basic tags (no storage dependencies)
