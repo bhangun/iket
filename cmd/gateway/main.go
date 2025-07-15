@@ -26,7 +26,8 @@ var (
 	version = app.Version // use version from app package
 )
 
-var defaultConfig = `server:
+var defaultConfig = `
+server:
   port: 8080
   readTimeout: "10s"
   writeTimeout: "10s"
