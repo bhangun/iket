@@ -186,6 +186,25 @@ func (p *FileProvider) Load() (*Config, error) {
 		config.Services = append(config.Services, serviceConfig)
 	}
 
+	// After merging serviceConfig into config.Services, set default backend if missing
+	for si := range config.Services {
+		for sj := range config.Services[si].Services {
+			for rk := range config.Services[si].Services[sj].Routes {
+				route := &config.Services[si].Services[sj].Routes[rk]
+				// If no backends and not a plugin/internal route, set default backend
+				if len(route.Backends) == 0 && !isPluginOrInternalRoute(route.Path) {
+					route.Backends = []Backend{{URLPattern: route.Path}}
+				}
+				// Set default backend URLPattern if missing
+				for bk := range route.Backends {
+					if route.Backends[bk].URLPattern == "" {
+						route.Backends[bk].URLPattern = route.Path
+					}
+				}
+			}
+		}
+	}
+
 	// Validate configuration
 	validator := NewConfigValidator()
 	if err := validator.Validate(&config); err != nil {

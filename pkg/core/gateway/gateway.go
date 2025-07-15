@@ -282,16 +282,16 @@ func (g *Gateway) loadPlugins() error {
 func (g *Gateway) addProxyRoute(route config.RouterConfig) error {
 	var handler http.Handler = http.HandlerFunc(g.proxyHandler(route))
 
-	// (Optional: per-route plugin middleware can be added here if you want per-route plugins)
-	// for pluginName, pluginConfig := range g.config.Plugins {
-	// 	if p, ok := plugin.Get(pluginName); ok {
-	// 		if err := p.Init(pluginConfig); err != nil {
-	// 			g.logger.Warn("Failed to initialize plugin for route", logging.String("plugin", pluginName), logging.Error(err))
-	// 			continue
-	// 		}
-	// 		handler = p.Middleware()(handler)
-	// 	}
-	// }
+	// (Optional: per-route plugin middleware can be added here if per-route plugins activated)
+	/* for pluginName, pluginConfig := range g.config.Plugins {
+	 	if p, ok := plugin.Get(pluginName); ok {
+	 		if err := p.Init(pluginConfig); err != nil {
+	 			g.logger.Warn("Failed to initialize plugin for route", logging.String("plugin", pluginName), logging.Error(err))
+	 			continue
+	 		}
+	 		handler = p.Middleware()(handler)
+	 	}
+	} */
 
 	// Apply route-specific middleware
 	if route.RequireAuth {

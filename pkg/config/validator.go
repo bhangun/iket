@@ -218,8 +218,8 @@ func (r *ServicesConfigRule) Validate(cfg *Config) error {
 				}
 
 				// Validate backends
-				if len(route.Backends) == 0 {
-					return errors.NewValidationError(fmt.Sprintf("services[%d].services[%d].routes[%d].backend", i, j, k), "at least one backend must be configured")
+				if len(route.Backends) == 0 && !isPluginOrInternalRoute(route.Path) {
+					return errors.NewValidationError(fmt.Sprintf("services[%d].services[%d].routes[%d].backend", i, j, k), "at least one backend must be configured unless this is a plugin or internal route")
 				}
 
 				for l, backend := range route.Backends {
@@ -316,4 +316,15 @@ func (r *PluginsConfigRule) validateCorsPlugin(config map[string]interface{}) er
 	}
 
 	return nil
+}
+
+// Add helper function to check if a route is plugin/static/internal
+func isPluginOrInternalRoute(path string) bool {
+	pluginPaths := []string{"/openapi", "/swagger-ui", "/docs", "/docs/", "/docs/{rest:.*}"}
+	for _, p := range pluginPaths {
+		if strings.HasPrefix(path, p) {
+			return true
+		}
+	}
+	return false
 }

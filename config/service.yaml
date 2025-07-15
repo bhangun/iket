@@ -23,8 +23,8 @@ services:
         tags: ["internal"]
         group: "profile"
         max_rate: "100"
-        backend:
-          - url_pattern: /me
+        #backend:
+        #  - url_pattern: /me
 
   - name: "Admin Dashboard"
     description: "Admin-level service for managing data"
@@ -37,8 +37,8 @@ services:
         description: "Provides usage statistics"
         tags: ["internal"]
         priority: 5
-        backend:
-          - url_pattern: /stats
+        #backend:
+        #  - url_pattern: /stats
 
 cache_ttl: 5m
 timeout: 10s 

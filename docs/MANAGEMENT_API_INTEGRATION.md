@@ -19,7 +19,7 @@ The management API provides REST endpoints and WebSocket connections for:
 Update the main gateway application to include the management API:
 
 ```go
-// In cmd/gateway/main.go or your main application file
+// In main.go or your main application file
 package main
 
 import (
@@ -465,7 +465,7 @@ security:
 FROM golang:1.21-alpine AS builder
 WORKDIR /app
 COPY . .
-RUN go build -o iket cmd/gateway/main.go
+RUN go build -o iket /main.go
 
 FROM alpine:latest
 RUN apk --no-cache add ca-certificates

@@ -1,2 +1,2 @@
 #!/bin/bash
-go run cmd/gateway/main.go --config=example/service_based/config.yaml --services=example/service_based/service.yaml --port=7110
+go run main.go --config=example/service_based/config.yaml --services=example/service_based/service.yaml --port=7110
