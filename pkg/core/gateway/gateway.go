@@ -12,9 +12,9 @@ import (
 
 	"github.com/bhangun/iket/pkg/config"
 	"github.com/bhangun/iket/pkg/core/errors"
-	"github.com/bhangun/iket/pkg/core/plugin"
 	"github.com/bhangun/iket/pkg/logging"
 	"github.com/bhangun/iket/pkg/metrics"
+	"github.com/bhangun/iket/pkg/plugin"
 
 	pluginlib "plugin"
 
@@ -35,6 +35,8 @@ type Gateway struct {
 	shutdown chan struct{}
 
 	version string // Add version field
+	// Add a field to Gateway struct for the plugin registry
+	pluginRegistry *plugin.Registry
 }
 
 // Dependencies contains all the dependencies required to create a Gateway
@@ -60,12 +62,13 @@ func NewGateway(deps Dependencies, version string) (*Gateway, error) {
 	}
 
 	gateway := &Gateway{
-		config:   deps.Config,
-		router:   mux.NewRouter(),
-		metrics:  deps.Metrics,
-		logger:   deps.Logger,
-		shutdown: make(chan struct{}),
-		version:  version,
+		config:         deps.Config,
+		router:         mux.NewRouter(),
+		metrics:        deps.Metrics,
+		logger:         deps.Logger,
+		shutdown:       make(chan struct{}),
+		version:        version,
+		pluginRegistry: plugin.NewRegistry(),
 	}
 
 	// Setup routes and middleware
@@ -162,12 +165,17 @@ func (g *Gateway) setupMiddleware() error {
 
 	// Add global plugin middleware (OpenAPI, Swagger UI, etc.)
 	for pluginName, pluginConfig := range g.config.Plugins {
-		if p, ok := plugin.Get(pluginName); ok {
-			if err := p.Init(pluginConfig); err != nil {
-				g.logger.Warn("Failed to initialize global plugin", logging.String("plugin", pluginName), logging.Error(err))
-				continue
-			}
-			g.router.Use(p.Middleware())
+		p, err := g.pluginRegistry.Get(pluginName)
+		if err != nil {
+			g.logger.Warn("Plugin not found", logging.String("plugin", pluginName), logging.Error(err))
+			continue
+		}
+		if err := p.Initialize(pluginConfig); err != nil {
+			g.logger.Warn("Failed to initialize global plugin", logging.String("plugin", pluginName), logging.Error(err))
+			continue
+		}
+		if mp, ok := p.(plugin.MiddlewarePlugin); ok {
+			g.router.Use(mp.Middleware)
 		}
 	}
 
@@ -261,7 +269,10 @@ func (g *Gateway) loadPlugins() error {
 			g.logger.Warn("Plugin symbol does not implement Plugin interface", logging.String("file", file.Name()))
 			continue
 		}
-		plugin.Register(p)
+		if err := g.pluginRegistry.Register(p); err != nil {
+			g.logger.Warn("Failed to register plugin", logging.String("name", p.Name()), logging.Error(err))
+			continue
+		}
 		g.logger.Info("Dynamically loaded plugin", logging.String("name", p.Name()), logging.String("file", file.Name()))
 	}
 	return nil

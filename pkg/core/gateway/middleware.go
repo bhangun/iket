@@ -20,8 +20,6 @@ import (
 	"encoding/pem"
 	"os"
 
-	"github.com/bhangun/iket/pkg/core/plugin"
-
 	"bufio"
 	"fmt"
 
@@ -181,7 +179,8 @@ func (g *Gateway) proxyHandler(route config.RouterConfig) http.HandlerFunc {
 		destination := route.Destination
 		// If destination starts with service://, resolve using Consul plugin
 		if strings.HasPrefix(destination, "service://") {
-			if p, ok := plugin.Get("consul"); ok {
+			p, err := g.pluginRegistry.Get("consul")
+			if err == nil {
 				if resolver, ok := p.(interface{ ResolveService(string) (string, error) }); ok {
 					addr, err := resolver.ResolveService(destination)
 					if err != nil {
