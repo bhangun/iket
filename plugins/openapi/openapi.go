@@ -27,7 +27,7 @@ type OpenAPIPlugin struct {
 	format    string // "yaml" or "json"
 	swaggerUI bool
 	// Tag for reflection-based discovery
-	PluginName string `plugin:"type" plugin:"openapi"`
+	PluginName string `plugin:"type,openapi"`
 	// Health tracking
 	lastHealthCheck time.Time
 	isHealthy       bool

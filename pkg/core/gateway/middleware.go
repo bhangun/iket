@@ -608,7 +608,7 @@ func (g *Gateway) matchRoute(r *http.Request) (config.RouterConfig, bool) {
 	for _, route := range g.config.GetAllRoutesFromServices() {
 		// Routes are enabled by default (when Enabled field is not specified in YAML)
 		// Only skip if explicitly disabled
-		if route.Enabled == false {
+		if !route.Enabled {
 			continue // skip disabled routes
 		}
 		if route.Path == r.URL.Path {
