@@ -14,8 +14,9 @@ RUN go mod download
 COPY . .
 
 # Build the main application
+ARG VERSION=dev
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    go build -ldflags="-w -s" \
+    go build -ldflags="-w -s -X 'github.com/bhangun/iket/pkg/app.Version=${VERSION}'" \
     -o /bin/iket ./cmd/gateway/main.go
 
 # Runtime stage
@@ -54,7 +55,7 @@ EXPOSE 8080 8443
 
 # Health check (adjust as necessary)
 HEALTHCHECK --interval=30s --timeout=3s \
-    CMD curl -k --fail https://localhost:8443/health || exit 1
+    CMD curl -f http://localhost:8080/health || exit 1
 
 # Run the application
 ENTRYPOINT ["/app/iket"]

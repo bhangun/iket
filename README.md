@@ -1,4 +1,12 @@
 [![Logo][iket-logo]][iket-logo]
+
+<!-- Badges -->
+[![Build Status](https://github.com/bhangun/iket/actions/workflows/ci.yml/badge.svg)](https://github.com/bhangun/iket/actions)
+[![Go Report Card](https://goreportcard.com/badge/github.com/bhangun/iket)](https://goreportcard.com/report/github.com/bhangun/iket)
+[![GitHub release](https://img.shields.io/github/v/tag/bhangun/iket?label=release)](https://github.com/bhangun/iket/releases)
+[![License](https://img.shields.io/github/license/bhangun/iket)](LICENSE)
+[![Docker Pulls](https://img.shields.io/docker/pulls/bhangun/iket)](https://hub.docker.com/r/bhangun/iket)
+
 # Iket API Gateway
 
 
