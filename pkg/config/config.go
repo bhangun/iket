@@ -140,21 +140,21 @@ type Provider interface {
 
 // FileProvider implements configuration loading from files
 type FileProvider struct {
-	configPath  string
-	routesPath  string
-	logger      *logging.Logger
-	watchers    []func(*Config) error
-	mu          sync.RWMutex
-	stopWatcher chan struct{}
+	configPath   string
+	servicesPath string
+	logger       *logging.Logger
+	watchers     []func(*Config) error
+	mu           sync.RWMutex
+	stopWatcher  chan struct{}
 }
 
 // NewFileProvider creates a new file-based configuration provider
-func NewFileProvider(configPath, routesPath string, logger *logging.Logger) *FileProvider {
+func NewFileProvider(configPath, servicesPath string, logger *logging.Logger) *FileProvider {
 	return &FileProvider{
-		configPath:  configPath,
-		routesPath:  routesPath,
-		logger:      logger,
-		stopWatcher: make(chan struct{}),
+		configPath:   configPath,
+		servicesPath: servicesPath,
+		logger:       logger,
+		stopWatcher:  make(chan struct{}),
 	}
 }
 
@@ -172,9 +172,9 @@ func (p *FileProvider) Load() (*Config, error) {
 	}
 
 	// Load service config if separate file (new format)
-	if p.routesPath != "" && p.routesPath != p.configPath {
+	if p.servicesPath != "" && p.servicesPath != p.configPath {
 		// If a --services file is provided, load services from that file
-		serviceData, err := os.ReadFile(p.routesPath)
+		serviceData, err := os.ReadFile(p.servicesPath)
 		if err != nil {
 			return nil, coreerrors.NewConfigError("failed to read service config file", err)
 		}
@@ -182,8 +182,14 @@ func (p *FileProvider) Load() (*Config, error) {
 		if err := yaml.Unmarshal(serviceData, &serviceConfig); err != nil {
 			return nil, coreerrors.NewConfigError("failed to parse service config file", err)
 		}
-		// Merge: append serviceConfig to any already loaded in main config
-		config.Services = append(config.Services, serviceConfig)
+		// Merge: append all services from serviceConfig.Services to config.Services
+		if len(serviceConfig.Services) > 0 {
+			if len(config.Services) == 0 {
+				config.Services = []ServiceConfig{serviceConfig}
+			} else {
+				config.Services[0].Services = append(config.Services[0].Services, serviceConfig.Services...)
+			}
+		}
 	}
 
 	// After merging serviceConfig into config.Services, set default backend if missing
@@ -234,13 +240,13 @@ func (p *FileProvider) Save(cfg *Config) error {
 	}
 
 	// Save service config to separate file if needed
-	if p.routesPath != "" && p.routesPath != p.configPath {
+	if p.servicesPath != "" && p.servicesPath != p.configPath {
 		if len(cfg.Services) > 0 {
 			serviceData, err := yaml.Marshal(cfg.Services[0])
 			if err != nil {
 				return coreerrors.NewConfigError("failed to marshal service config", err)
 			}
-			if err := os.WriteFile(p.routesPath, serviceData, 0644); err != nil {
+			if err := os.WriteFile(p.servicesPath, serviceData, 0644); err != nil {
 				return coreerrors.NewConfigError("failed to write service config file", err)
 			}
 		}
@@ -316,8 +322,8 @@ func (p *FileProvider) Close() error {
 }
 
 // LoadConfig loads configuration from the specified path
-func LoadConfig(configPath, routesPath string, logger *logging.Logger) (*Config, error) {
-	provider := NewFileProvider(configPath, routesPath, logger)
+func LoadConfig(configPath, servicesPath string, logger *logging.Logger) (*Config, error) {
+	provider := NewFileProvider(configPath, servicesPath, logger)
 	return provider.Load()
 }
 
@@ -328,8 +334,8 @@ func LoadFromFile(configPath string) (*Config, error) {
 }
 
 // SaveConfig saves configuration to the specified path
-func SaveConfig(cfg *Config, configPath, routesPath string, logger *logging.Logger) error {
-	provider := NewFileProvider(configPath, routesPath, logger)
+func SaveConfig(cfg *Config, configPath, servicesPath string, logger *logging.Logger) error {
+	provider := NewFileProvider(configPath, servicesPath, logger)
 	return provider.Save(cfg)
 }
 

@@ -69,7 +69,7 @@ services:
           - url_pattern: /hello
 `
 
-func ensureDefaultConfig(configPath, routesPath string) bool {
+func ensureDefaultConfig(configPath, servicesPath string) bool {
 	created := false
 	configDir := filepath.Dir(configPath)
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
@@ -77,11 +77,11 @@ func ensureDefaultConfig(configPath, routesPath string) bool {
 		os.WriteFile(configPath, []byte(defaultConfig), 0644)
 		created = true
 	}
-	if routesPath != "" {
-		routesDir := filepath.Dir(routesPath)
-		if _, err := os.Stat(routesPath); os.IsNotExist(err) {
+	if servicesPath != "" {
+		routesDir := filepath.Dir(servicesPath)
+		if _, err := os.Stat(servicesPath); os.IsNotExist(err) {
 			os.MkdirAll(routesDir, 0755)
-			os.WriteFile(routesPath, []byte(defaultService), 0644)
+			os.WriteFile(servicesPath, []byte(defaultService), 0644)
 			created = true
 		}
 	}
