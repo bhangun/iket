@@ -9,7 +9,7 @@ services:
     container_name: iket
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "7100:8080"
     command: ["/app/iket", "--config", "/app/config/config.yaml", "--services", "/app/config/service.yaml"]
     environment:
       - LOG_LEVEL=info

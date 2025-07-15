@@ -6,23 +6,63 @@ name: Release
 on:
   push:
     tags:
-      - 'v0.*'
+      - 'v*.*.*'
 
 jobs:
   build:
+    name: Build and Release Binaries
     runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        goos: [linux, windows, darwin]
+        goarch: [amd64]
+      fail-fast: false
+
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v4
+
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
-          go-version: '1.21'
+          go-version: '1.23.8'
+
+      - name: Set version from tag
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+
       - name: Build binary
         run: |
-          GOOS=linux GOARCH=amd64 go build -o iket ./cmd/gateway
-      - name: Upload Release Asset
-        uses: softprops/action-gh-release@v1
+          mkdir -p dist
+          EXT=""
+          if [ "${{ matrix.goos }}" = "windows" ]; then EXT=".exe"; fi
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
+          go build -ldflags "-X 'github.com/bhangun/iket/pkg/app.Version=${VERSION}'" \
+            -o dist/iket-${{ matrix.goos }}-${{ matrix.goarch }}$EXT ./cmd/gateway
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
-          files: iket
+          name: iket-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/iket-${{ matrix.goos }}-${{ matrix.goarch }}*
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Display files
+        run: ls -R dist
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/**/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 

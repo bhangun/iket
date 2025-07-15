@@ -35,4 +35,5 @@ plugins/consul/
 plugins/auth/
 plugins/storage/
 
+tester/
 iket

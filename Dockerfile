@@ -17,7 +17,7 @@ COPY . .
 ARG VERSION=dev
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build -ldflags="-w -s -X 'github.com/bhangun/iket/pkg/app.Version=${VERSION}'" \
-    -o /bin/iket ./cmd/gateway/main.go
+    -o /bin/iket ./cmd/gateway
 
 # Runtime stage
 FROM alpine:3.19
@@ -29,17 +29,20 @@ RUN adduser -D -u 10001 appuser
 RUN apk add --no-cache ca-certificates tzdata curl
 
 # Create necessary directories
-RUN mkdir -p /app/plugins /app/certs && \
+RUN mkdir -p /app/bin /app/plugins /app/certs && \
     chown -R appuser:appuser /app
 
 # Copy binary
-COPY --from=builder /bin/iket /app/iket
+COPY --from=builder /bin/iket /app/bin/iket
 # Copy config files
 COPY config /app/config
 
 # Set correct permissions for config files
 RUN chmod 644 /app/config/*.yaml 2>/dev/null || true && \
     chown -R appuser:appuser /app/config
+
+# Set permissions for /app/bin/iket
+RUN chmod 755 /app/bin/iket && chown appuser:appuser /app/bin/iket
 
 WORKDIR /app
 
@@ -58,4 +61,4 @@ HEALTHCHECK --interval=30s --timeout=3s \
     CMD curl -f http://localhost:8080/health || exit 1
 
 # Run the application
-ENTRYPOINT ["/app/iket"]
+ENTRYPOINT ["/app/bin/iket"]
