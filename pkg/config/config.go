@@ -182,13 +182,9 @@ func (p *FileProvider) Load() (*Config, error) {
 		if err := yaml.Unmarshal(serviceData, &serviceConfig); err != nil {
 			return nil, coreerrors.NewConfigError("failed to parse service config file", err)
 		}
-		// Merge: append all services from serviceConfig.Services to config.Services
+		// Instead of merging into config.Services[0], append as a new ServiceConfig
 		if len(serviceConfig.Services) > 0 {
-			if len(config.Services) == 0 {
-				config.Services = []ServiceConfig{serviceConfig}
-			} else {
-				config.Services[0].Services = append(config.Services[0].Services, serviceConfig.Services...)
-			}
+			config.Services = append(config.Services, serviceConfig)
 		}
 	}
 
