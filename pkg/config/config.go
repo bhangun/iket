@@ -1,11 +1,15 @@
 package config
 
 import (
+	"bufio"
 	"crypto/rsa"
 	"encoding/pem"
 	"errors"
 	"io/ioutil"
 	"os"
+	"reflect"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -161,6 +165,25 @@ func NewFileProvider(configPath, servicesPath string, logger *logging.Logger) *F
 
 // Load loads configuration from files
 func (p *FileProvider) Load() (*Config, error) {
+	// Load .env file if present
+	if _, err := os.Stat(".env"); err == nil {
+		file, err := os.Open(".env")
+		if err == nil {
+			scanner := bufio.NewScanner(file)
+			for scanner.Scan() {
+				line := scanner.Text()
+				if strings.HasPrefix(line, "#") || !strings.Contains(line, "=") {
+					continue
+				}
+				parts := strings.SplitN(line, "=", 2)
+				key := strings.TrimSpace(parts[0])
+				val := strings.TrimSpace(parts[1])
+				os.Setenv(key, val)
+			}
+			file.Close()
+		}
+	}
+
 	// Load main config
 	configData, err := os.ReadFile(p.configPath)
 	if err != nil {
@@ -171,6 +194,8 @@ func (p *FileProvider) Load() (*Config, error) {
 	if err := yaml.Unmarshal(configData, &config); err != nil {
 		return nil, coreerrors.NewConfigError("failed to parse config file", err)
 	}
+	// Expand env vars in all string fields
+	expandEnvVarsInStruct(&config)
 
 	// Load service config if separate file (new format)
 	if p.servicesPath != "" && p.servicesPath != p.configPath {
@@ -487,4 +512,48 @@ func (c *Config) FindServiceForRoute(path string, method string) *Service {
 		}
 	}
 	return nil
+}
+
+var envVarPattern = regexp.MustCompile(`\$\{([A-Za-z0-9_]+)(:-([^}]*))?\}`)
+
+func expandEnvVarsInStruct(s interface{}) {
+	v := reflect.ValueOf(s).Elem()
+	for i := 0; i < v.NumField(); i++ {
+		field := v.Field(i)
+		if field.Kind() == reflect.String {
+			field.SetString(expandEnvVars(field.String()))
+		} else if field.Kind() == reflect.Struct {
+			expandEnvVarsInStruct(field.Addr().Interface())
+		} else if field.Kind() == reflect.Slice {
+			for j := 0; j < field.Len(); j++ {
+				elem := field.Index(j)
+				if elem.Kind() == reflect.Struct {
+					expandEnvVarsInStruct(elem.Addr().Interface())
+				}
+			}
+		} else if field.Kind() == reflect.Map {
+			for _, key := range field.MapKeys() {
+				val := field.MapIndex(key)
+				if val.Kind() == reflect.String {
+					field.SetMapIndex(key, reflect.ValueOf(expandEnvVars(val.String())))
+				}
+			}
+		}
+	}
+}
+
+func expandEnvVars(s string) string {
+	return envVarPattern.ReplaceAllStringFunc(s, func(m string) string {
+		matches := envVarPattern.FindStringSubmatch(m)
+		key := matches[1]
+		def := ""
+		if len(matches) > 3 {
+			def = matches[3]
+		}
+		val := os.Getenv(key)
+		if val == "" {
+			val = def
+		}
+		return val
+	})
 }
