@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+
+	"github.com/bhangun/iket/pkg/logging"
 )
 
 // Plugin interface that all plugins must implement
@@ -62,6 +64,33 @@ type HealthChecker interface {
 
 type StatusReporter interface {
 	Status() string
+}
+
+var globalPlugins = make(map[string]Plugin)
+var globalPluginsMu sync.RWMutex
+
+// RegisterGlobal allows plugins to self-register globally (for auto-discovery)
+func RegisterGlobal(p Plugin) {
+	globalPluginsMu.Lock()
+	defer globalPluginsMu.Unlock()
+	fmt.Printf("[DEBUG] RegisterGlobal: registering plugin '%s'\n", p.Name())
+	globalPlugins[p.Name()] = p
+}
+
+// RegisterAllGlobal registers all globally registered plugins to the given registry
+func (r *Registry) RegisterAllGlobal() {
+	// Initialize logger
+	logger := logging.NewLoggerFromEnv()
+	defer logger.Sync()
+	globalPluginsMu.RLock()
+	defer globalPluginsMu.RUnlock()
+	logger.Info(
+		"Registering plugins to registry",
+		logging.String("count", fmt.Sprintf("%d", len(globalPlugins))),
+	)
+	for _, p := range globalPlugins {
+		_ = r.Register(p)
+	}
 }
 
 // NewRegistry creates a new plugin registry

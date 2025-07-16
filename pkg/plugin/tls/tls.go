@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"os"
 	"sync"
+
+	"github.com/bhangun/iket/pkg/plugin"
 )
 
 type TLSPlugin struct {
@@ -213,4 +215,8 @@ func (t *TLSPlugin) OnStart() error {
 func (t *TLSPlugin) OnShutdown() error {
 	// Clean up any TLS-related resources if needed
 	return nil
+}
+
+func init() {
+	plugin.RegisterGlobal(&TLSPlugin{})
 }

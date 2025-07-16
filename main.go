@@ -18,6 +18,16 @@ import (
 	"github.com/bhangun/iket/pkg/logging"
 	"github.com/bhangun/iket/pkg/metrics"
 	"github.com/bhangun/iket/pkg/plugin"
+	_ "github.com/bhangun/iket/pkg/plugin/circuitbreaker"
+	_ "github.com/bhangun/iket/pkg/plugin/cors"
+	_ "github.com/bhangun/iket/pkg/plugin/ipwhitelist"
+	_ "github.com/bhangun/iket/pkg/plugin/jwt"
+	_ "github.com/bhangun/iket/pkg/plugin/mtls"
+	_ "github.com/bhangun/iket/pkg/plugin/oauth2"
+	_ "github.com/bhangun/iket/pkg/plugin/ratelimit"
+	_ "github.com/bhangun/iket/pkg/plugin/tls"
+	_ "github.com/bhangun/iket/pkg/plugin/validation"
+	_ "github.com/bhangun/iket/pkg/plugin/websocket"
 )
 
 var (
@@ -181,6 +191,9 @@ func main() {
 	// Create plugin registry
 	registry := plugin.NewRegistry()
 
+	// Auto-register all plugins that self-register via init()
+	registry.RegisterAllGlobal()
+
 	// Create gateway with dependencies
 	gw, err := gateway.NewGateway(gateway.Dependencies{
 		Config:  cfg,
@@ -195,6 +208,7 @@ func main() {
 	managementAPI := api.NewManagementAPI(gw, logger, registry)
 	managementAPI.RegisterRoutes(gw.GetRouter())
 
+	logger.Info("Registered plugins", logging.Any("plugins", managementAPI.ListPlugins()))
 	logger.Info("Management API registered", logging.String("base_path", "/api/v1"))
 
 	startupDuration := time.Since(startTime)

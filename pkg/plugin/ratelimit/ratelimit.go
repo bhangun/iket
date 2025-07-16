@@ -3,6 +3,7 @@ package plugin
 import (
 	"net/http"
 
+	"github.com/bhangun/iket/pkg/plugin"
 	"golang.org/x/time/rate"
 )
 
@@ -29,6 +30,10 @@ func (p *RateLimitPlugin) Init(config map[string]interface{}) error {
 	return nil
 }
 
+func (p *RateLimitPlugin) Initialize(config map[string]interface{}) error {
+	return p.Init(config)
+}
+
 func (p *RateLimitPlugin) Middleware() func(next http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -41,4 +46,8 @@ func (p *RateLimitPlugin) Middleware() func(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+func init() {
+	plugin.RegisterGlobal(&RateLimitPlugin{})
 }

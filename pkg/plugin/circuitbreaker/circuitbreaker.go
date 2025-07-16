@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/bhangun/iket/pkg/plugin"
 )
 
 type CircuitState string
@@ -248,4 +250,8 @@ func (c *CircuitBreakerPlugin) OnShutdown() error {
 	c.state = StateClosed
 	c.failureCount = 0
 	return nil
+}
+
+func init() {
+	plugin.RegisterGlobal(&CircuitBreakerPlugin{})
 }

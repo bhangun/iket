@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/bhangun/iket/pkg/plugin"
 )
 
 type OAuth2Plugin struct {
@@ -310,4 +312,8 @@ func (o *OAuth2Plugin) OnStart() error {
 func (o *OAuth2Plugin) OnShutdown() error {
 	// Clean up any OAuth2-related resources if needed
 	return nil
+}
+
+func init() {
+	plugin.RegisterGlobal(&OAuth2Plugin{})
 }

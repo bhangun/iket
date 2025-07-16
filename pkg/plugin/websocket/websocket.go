@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bhangun/iket/pkg/plugin"
 	"github.com/gorilla/websocket"
 )
 
@@ -372,4 +373,8 @@ func (ws *WebSocketPlugin) OnStart() error {
 func (ws *WebSocketPlugin) OnShutdown() error {
 	// Clean up any WebSocket-related resources if needed
 	return nil
+}
+
+func init() {
+	plugin.RegisterGlobal(&WebSocketPlugin{})
 }

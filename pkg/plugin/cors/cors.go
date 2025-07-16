@@ -2,6 +2,8 @@ package plugin
 
 import (
 	"net/http"
+
+	"github.com/bhangun/iket/pkg/plugin"
 )
 
 type CORSPlugin struct {
@@ -25,6 +27,10 @@ func (c *CORSPlugin) Init(config map[string]interface{}) error {
 	return nil
 }
 
+func (c *CORSPlugin) Initialize(config map[string]interface{}) error {
+	return c.Init(config)
+}
+
 func (c *CORSPlugin) Middleware() func(next http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -38,4 +44,8 @@ func (c *CORSPlugin) Middleware() func(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+func init() {
+	plugin.RegisterGlobal(&CORSPlugin{})
 }

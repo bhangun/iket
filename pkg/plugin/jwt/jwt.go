@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/bhangun/iket/pkg/plugin"
 	"github.com/golang-jwt/jwt/v4"
 )
 
@@ -313,4 +314,8 @@ func (j *JWTPlugin) OnStart() error {
 func (j *JWTPlugin) OnShutdown() error {
 	// Clean up any JWT-related resources if needed
 	return nil
+}
+
+func init() {
+	plugin.RegisterGlobal(&JWTPlugin{})
 }

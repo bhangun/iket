@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+
+	"github.com/bhangun/iket/pkg/plugin"
 )
 
 type ValidationPlugin struct {
@@ -167,4 +169,8 @@ func (v *ValidationPlugin) Status() string {
 		return "Validation Plugin: Disabled"
 	}
 	return fmt.Sprintf("Validation Plugin: Enabled (strict: %t, skip paths: %d)", v.strictMode, len(v.skipPaths))
+}
+
+func init() {
+	plugin.RegisterGlobal(&ValidationPlugin{})
 }

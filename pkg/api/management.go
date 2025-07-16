@@ -314,6 +314,11 @@ func (api *ManagementAPI) getGatewayMetrics(w http.ResponseWriter, r *http.Reque
 	api.writeJSON(w, metrics)
 }
 
+// ListPlugins returns the list of registered plugin names.
+func (m *ManagementAPI) ListPlugins() []string {
+	return m.registry.List() // assuming Registry has a List() method
+}
+
 func (api *ManagementAPI) listPlugins(w http.ResponseWriter, r *http.Request) {
 	plugins := api.registry.List()
 	pluginInfos := make([]PluginInfo, 0, len(plugins))

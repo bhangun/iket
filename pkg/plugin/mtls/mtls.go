@@ -11,9 +11,11 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/bhangun/iket/pkg/plugin"
 )
 
-type mTLSPlugin struct {
+type MTLSPlugin struct {
 	enabled       bool
 	caFile        string
 	caPool        *x509.CertPool
@@ -35,15 +37,19 @@ type ClientCertInfo struct {
 	NotAfter  string   `json:"not_after"`
 }
 
-func (m *mTLSPlugin) Name() string {
+func init() {
+	plugin.RegisterGlobal(&MTLSPlugin{})
+}
+
+func (m *MTLSPlugin) Name() string {
 	return "mtls"
 }
 
-func (m *mTLSPlugin) Type() string {
+func (m *MTLSPlugin) Type() string {
 	return "mtls"
 }
 
-func (m *mTLSPlugin) Initialize(config map[string]interface{}) error {
+func (m *MTLSPlugin) Initialize(config map[string]interface{}) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -100,7 +106,7 @@ func (m *mTLSPlugin) Initialize(config map[string]interface{}) error {
 	return nil
 }
 
-func (m *mTLSPlugin) loadCACertPool() error {
+func (m *MTLSPlugin) loadCACertPool() error {
 	if m.caFile == "" {
 		return fmt.Errorf("ca_file is required for mTLS plugin")
 	}
@@ -118,7 +124,7 @@ func (m *mTLSPlugin) loadCACertPool() error {
 	return nil
 }
 
-func (m *mTLSPlugin) Middleware(next http.Handler) http.Handler {
+func (m *MTLSPlugin) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !m.enabled {
 			next.ServeHTTP(w, r)
@@ -144,7 +150,7 @@ func (m *mTLSPlugin) Middleware(next http.Handler) http.Handler {
 	})
 }
 
-func (m *mTLSPlugin) shouldSkipValidation(path string) bool {
+func (m *MTLSPlugin) shouldSkipValidation(path string) bool {
 	for _, skipPath := range m.skipPaths {
 		if strings.HasPrefix(path, skipPath) {
 			return true
@@ -153,7 +159,7 @@ func (m *mTLSPlugin) shouldSkipValidation(path string) bool {
 	return false
 }
 
-func (m *mTLSPlugin) validateClientCert(r *http.Request) (*ClientCertInfo, error) {
+func (m *MTLSPlugin) validateClientCert(r *http.Request) (*ClientCertInfo, error) {
 	// Check if TLS connection exists
 	if r.TLS == nil {
 		return nil, fmt.Errorf("no TLS connection")
@@ -232,7 +238,7 @@ func (m *mTLSPlugin) validateClientCert(r *http.Request) (*ClientCertInfo, error
 	return certInfo, nil
 }
 
-func (m *mTLSPlugin) writeError(w http.ResponseWriter, message string, statusCode int) {
+func (m *MTLSPlugin) writeError(w http.ResponseWriter, message string, statusCode int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	response := map[string]interface{}{
@@ -243,13 +249,13 @@ func (m *mTLSPlugin) writeError(w http.ResponseWriter, message string, statusCod
 }
 
 // GetClientCertFromContext extracts client certificate info from request context
-func (m *mTLSPlugin) GetClientCertFromContext(ctx context.Context) (*ClientCertInfo, bool) {
+func (m *MTLSPlugin) GetClientCertFromContext(ctx context.Context) (*ClientCertInfo, bool) {
 	certInfo, ok := ctx.Value(m.claimsContext).(*ClientCertInfo)
 	return certInfo, ok
 }
 
 // GetTLSConfig returns the TLS configuration for the server
-func (m *mTLSPlugin) GetTLSConfig() *tls.Config {
+func (m *MTLSPlugin) GetTLSConfig() *tls.Config {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -264,7 +270,7 @@ func (m *mTLSPlugin) GetTLSConfig() *tls.Config {
 }
 
 // Tags returns plugin tags for discovery
-func (m *mTLSPlugin) Tags() map[string]string {
+func (m *MTLSPlugin) Tags() map[string]string {
 	return map[string]string{
 		"type":        "mtls",
 		"category":    "security",
@@ -274,7 +280,7 @@ func (m *mTLSPlugin) Tags() map[string]string {
 }
 
 // Health checks if the mTLS plugin is healthy
-func (m *mTLSPlugin) Health() error {
+func (m *MTLSPlugin) Health() error {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -298,7 +304,7 @@ func (m *mTLSPlugin) Health() error {
 }
 
 // Status returns human-readable status
-func (m *mTLSPlugin) Status() string {
+func (m *MTLSPlugin) Status() string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -319,13 +325,13 @@ func (m *mTLSPlugin) Status() string {
 }
 
 // OnStart lifecycle hook
-func (m *mTLSPlugin) OnStart() error {
+func (m *MTLSPlugin) OnStart() error {
 	// Validate mTLS config on startup
 	return m.Health()
 }
 
 // OnShutdown lifecycle hook
-func (m *mTLSPlugin) OnShutdown() error {
+func (m *MTLSPlugin) OnShutdown() error {
 	// Clean up any mTLS-related resources if needed
 	return nil
 }
