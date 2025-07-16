@@ -60,6 +60,7 @@ type RouterConfig struct {
 	WebSocket      *WebSocketOptions `yaml:"websocket,omitempty"`
 	RequireJwt     bool              `yaml:"requireJwt"`
 	Enabled        bool              `yaml:"enabled"`
+	AuthPlugin     string            `yaml:"auth_plugin,omitempty" json:"auth_plugin,omitempty"`
 	// New fields for enhanced configuration
 	Name            string    `yaml:"name,omitempty" json:"name,omitempty"`
 	Description     string    `yaml:"description,omitempty" json:"description,omitempty"`
@@ -69,6 +70,7 @@ type RouterConfig struct {
 	ConcurrentCalls string    `yaml:"concurrent_calls,omitempty" json:"concurrent_calls,omitempty"`
 	MaxRate         string    `yaml:"max_rate,omitempty" json:"max_rate,omitempty"`
 	Backends        []Backend `yaml:"backend" json:"backend"`
+	Roles           []string  `yaml:"roles,omitempty" json:"roles,omitempty"`
 }
 
 // TLSConfig represents TLS configuration

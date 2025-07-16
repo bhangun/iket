@@ -288,20 +288,33 @@ func (g *Gateway) loadPlugins() error {
 func (g *Gateway) addProxyRoute(route config.RouterConfig) error {
 	var handler http.Handler = http.HandlerFunc(g.proxyHandler(route))
 
-	// (Optional: per-route plugin middleware can be added here if per-route plugins activated)
-	/* for pluginName, pluginConfig := range g.config.Plugins {
-	 	if p, ok := plugin.Get(pluginName); ok {
-	 		if err := p.Init(pluginConfig); err != nil {
-	 			g.logger.Warn("Failed to initialize plugin for route", logging.String("plugin", pluginName), logging.Error(err))
-	 			continue
-	 		}
-	 		handler = p.Middleware()(handler)
-	 	}
-	} */
-
-	// Apply route-specific middleware
+	// Hybrid global/local plugin auth
 	if route.RequireAuth {
-		handler = g.authMiddleware(handler)
+		if route.AuthPlugin != "" {
+			// Use only the specified plugin for this route
+			p, err := g.pluginRegistry.Get(route.AuthPlugin)
+			if err == nil {
+				if mp, ok := p.(plugin.MiddlewarePlugin); ok {
+					handler = mp.Middleware(handler)
+				}
+			}
+		} else {
+			// Use all global plugins as fallback
+			for pluginName, pluginConfig := range g.config.Plugins {
+				p, err := g.pluginRegistry.Get(pluginName)
+				if err == nil {
+					if err := p.Initialize(pluginConfig); err == nil {
+						if mp, ok := p.(plugin.MiddlewarePlugin); ok {
+							handler = mp.Middleware(handler)
+						}
+					}
+				}
+			}
+		}
+		// Per-route roles enforcement
+		if len(route.Roles) > 0 {
+			handler = requireRolesMiddleware(route.Roles)(handler)
+		}
 	}
 
 	// Apply route-specific timeout if configured
@@ -513,4 +526,28 @@ func (g *Gateway) adminAuthMiddleware(next http.Handler) http.Handler {
 func (g *Gateway) versionHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"version": g.version})
+}
+
+// requireRolesMiddleware returns a middleware that enforces at least one required role
+func requireRolesMiddleware(requiredRoles []string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			roles, ok := r.Context().Value("roles").([]string)
+			if !ok || len(roles) == 0 {
+				w.WriteHeader(http.StatusForbidden)
+				w.Write([]byte(`{"error":"Forbidden","message":"No roles found in token"}`))
+				return
+			}
+			for _, required := range requiredRoles {
+				for _, actual := range roles {
+					if required == actual {
+						next.ServeHTTP(w, r)
+						return
+					}
+				}
+			}
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"Forbidden","message":"Insufficient roles"}`))
+		})
+	}
 }
