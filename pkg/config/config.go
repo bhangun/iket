@@ -49,7 +49,6 @@ type SecurityConfig struct {
 // RouterConfig represents a route configuration
 type RouterConfig struct {
 	Path           string            `yaml:"path"`
-	Destination    string            `yaml:"destination"`
 	Methods        []string          `yaml:"methods"`
 	Method         string            `yaml:"method"` // Single method for new format
 	RequireAuth    bool              `yaml:"requireAuth"`
@@ -191,8 +190,9 @@ func (p *FileProvider) Load() (*Config, error) {
 	// After merging serviceConfig into config.Services, set default backend if missing
 	for si := range config.Services {
 		for sj := range config.Services[si].Services {
-			for rk := range config.Services[si].Services[sj].Routes {
-				route := &config.Services[si].Services[sj].Routes[rk]
+			service := &config.Services[si].Services[sj]
+			for rk := range service.Routes {
+				route := &service.Routes[rk]
 				// If no backends and not a plugin/internal route, set default backend
 				if len(route.Backends) == 0 && !isPluginOrInternalRoute(route.Path) {
 					route.Backends = []Backend{{URLPattern: route.Path}}
@@ -462,4 +462,27 @@ func (c *Config) RemoveService(name string) error {
 		}
 	}
 	return coreerrors.NewValidationError("service", "service not found")
+}
+
+// Add helper to find parent service for a route
+func (c *Config) FindServiceForRoute(path string, method string) *Service {
+	for _, serviceConfig := range c.Services {
+		for _, service := range serviceConfig.Services {
+			for _, route := range service.Routes {
+				if route.Path == path {
+					if route.Method != "" && route.Method == method {
+						return &service
+					}
+					if len(route.Methods) > 0 {
+						for _, m := range route.Methods {
+							if m == method {
+								return &service
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return nil
 }

@@ -165,7 +165,6 @@ func (g *Gateway) proxyHandler(route config.RouterConfig) http.HandlerFunc {
 		fmt.Printf("proxyHandler called for path: %s\n", r.URL.Path)
 		// Skip proxying for OpenAPI and Swagger UI plugin endpoints
 		if r.URL.Path == "/openapi" || r.URL.Path == "/swagger-ui" || r.URL.Path == "/swagger-ui/" || strings.HasPrefix(r.URL.Path, "/swagger-ui/") {
-			// If there's a next handler in the chain, call it; otherwise, return 404
 			if next := r.Context().Value("next"); next != nil {
 				h := next.(http.Handler)
 				h.ServeHTTP(w, r)
@@ -176,36 +175,19 @@ func (g *Gateway) proxyHandler(route config.RouterConfig) http.HandlerFunc {
 			return
 		}
 
-		destination := route.Destination
-		// If destination starts with service://, resolve using Consul plugin
-		if strings.HasPrefix(destination, "service://") {
-			p, err := g.pluginRegistry.Get("consul")
-			if err == nil {
-				if resolver, ok := p.(interface{ ResolveService(string) (string, error) }); ok {
-					addr, err := resolver.ResolveService(destination)
-					if err != nil {
-						g.logger.Error("Consul service resolution failed", err, logging.String("service", destination))
-						http.Error(w, "Service discovery failed", http.StatusBadGateway)
-						return
-					}
-					destination = addr
-				} else {
-					g.logger.Error("Consul plugin does not support ResolveService", nil)
-					http.Error(w, "Service discovery not supported", http.StatusBadGateway)
-					return
-				}
-			} else {
-				g.logger.Error("Consul plugin not loaded", nil)
-				http.Error(w, "Service discovery plugin not loaded", http.StatusBadGateway)
-				return
-			}
+		// Use parent service's host as destination
+		service := g.config.FindServiceForRoute(route.Path, r.Method)
+		if service == nil || service.Host == "" {
+			g.logger.Error("No parent service found for route", nil, logging.String("route_path", route.Path), logging.String("method", r.Method))
+			http.Error(w, "No backend service configured for this route", http.StatusBadGateway)
+			return
 		}
+		destination := service.Host
 
 		// Parse destination URL
 		destURL, err := url.Parse(destination)
 		if err != nil {
-			g.logger.Error("Failed to parse destination URL", err,
-				logging.String("destination", destination))
+			g.logger.Error("Failed to parse destination URL", err, logging.String("destination", destination))
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			return
 		}
@@ -214,10 +196,9 @@ func (g *Gateway) proxyHandler(route config.RouterConfig) http.HandlerFunc {
 		origPath := r.URL.Path
 		if route.StripPath {
 			prefix := route.Path
-			// Remove wildcards for prefix matching
 			if idx := len(prefix); idx > 0 {
 				if i := findWildcardIndex(prefix); i > 0 {
-					prefix = prefix[:i-1] // remove slash before wildcard
+					prefix = prefix[:i-1]
 				}
 			}
 			if prefix != "" && prefix != "/" && len(origPath) >= len(prefix) && origPath[:len(prefix)] == prefix {
@@ -236,16 +217,10 @@ func (g *Gateway) proxyHandler(route config.RouterConfig) http.HandlerFunc {
 			r.URL.Path = destURL.Path + r.URL.Path
 		}
 
-		// Log the proxying action for debugging
 		g.logger.Info("Proxying request", logging.String("original_path", origPath), logging.String("proxied_path", r.URL.Path), logging.String("destination", destURL.String()))
 
-		// --- WebSocket proxy support ---
 		if isWebSocketRequest(r) {
-			g.logger.Info("Initiating WebSocket proxy",
-				logging.String("path", r.URL.Path),
-				logging.String("destination", destURL.String()))
-
-			// Get WebSocket options (defaults if nil)
+			g.logger.Info("Initiating WebSocket proxy", logging.String("path", r.URL.Path), logging.String("destination", destURL.String()))
 			wsOpts := route.WebSocket
 			if wsOpts == nil {
 				wsOpts = &config.WebSocketOptions{
@@ -256,46 +231,30 @@ func (g *Gateway) proxyHandler(route config.RouterConfig) http.HandlerFunc {
 					CheckOrigin:       false,
 				}
 			}
-
 			proxyWebSocket(w, r, destURL, g.logger, wsOpts)
 			return
 		}
-		// --- End WebSocket proxy support ---
 
-		// Create reverse proxy
 		proxy := httputil.NewSingleHostReverseProxy(destURL)
-
-		// Customize proxy behavior
 		proxy.ModifyResponse = func(resp *http.Response) error {
-			// Add gateway headers
 			resp.Header.Set("X-Gateway", "Iket")
 			resp.Header.Set("X-Gateway-Route", route.Path)
 			return nil
 		}
-
 		proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-			g.logger.Error("Proxy error", err,
-				logging.String("destination", route.Destination),
-				logging.String("path", r.URL.Path))
-
+			g.logger.Error("Proxy error", err, logging.String("destination", destination), logging.String("path", r.URL.Path))
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadGateway)
 			w.Write([]byte(`{"error":"Bad Gateway","message":"Unable to reach the upstream service"}`))
 		}
-
-		// Update request URL
 		r.URL.Host = destURL.Host
 		r.URL.Scheme = destURL.Scheme
 		r.Header.Set("X-Forwarded-Host", r.Header.Get("Host"))
 		r.Host = destURL.Host
-
-		// Forward ALL headers from the client request to the backend
 		headers := http.Header{}
 		for k, v := range r.Header {
 			headers[k] = v
 		}
-
-		// Forward the request
 		proxy.ServeHTTP(w, r)
 	}
 }

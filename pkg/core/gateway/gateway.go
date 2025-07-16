@@ -312,21 +312,46 @@ func (g *Gateway) addProxyRoute(route config.RouterConfig) error {
 	// Wildcard support: if path contains {rest:.*} or ends with /*, use PathPrefix or regex
 	if route.Path == "/{rest:.*}" || route.Path == "/*" {
 		g.router.PathPrefix("/").Handler(handler).Methods(route.Methods...)
-		g.logger.Info("Added wildcard route (PathPrefix)", logging.String("path", route.Path), logging.String("destination", route.Destination))
+		service := g.config.FindServiceForRoute(route.Path, "")
+		backend := ""
+		if service != nil {
+			backend = service.Host
+		}
+		g.logger.Info("Added wildcard route (PathPrefix)", logging.String("path", route.Path), logging.String("backend", backend))
 	} else if len(route.Path) > 0 && route.Path[len(route.Path)-2:] == "/*" {
 		prefix := route.Path[:len(route.Path)-1] // remove the *
 		g.router.PathPrefix(prefix).Handler(handler).Methods(route.Methods...)
-		g.logger.Info("Added wildcard route (PathPrefix)", logging.String("path", route.Path), logging.String("destination", route.Destination))
+		service := g.config.FindServiceForRoute(route.Path, "")
+		backend := ""
+		if service != nil {
+			backend = service.Host
+		}
+		g.logger.Info("Added wildcard route (PathPrefix)", logging.String("path", route.Path), logging.String("backend", backend))
 	} else if route.Path == "/" {
 		g.router.Handle(route.Path, handler).Methods(route.Methods...)
-		g.logger.Info("Added root route", logging.String("path", route.Path), logging.String("destination", route.Destination))
+		service := g.config.FindServiceForRoute(route.Path, "")
+		backend := ""
+		if service != nil {
+			backend = service.Host
+		}
+		g.logger.Info("Added root route", logging.String("path", route.Path), logging.String("backend", backend))
 	} else if containsRestWildcard(route.Path) {
 		// Use regex for {rest:.*}
 		g.router.HandleFunc(route.Path, g.proxyHandler(route)).Methods(route.Methods...)
-		g.logger.Info("Added regex wildcard route", logging.String("path", route.Path), logging.String("destination", route.Destination))
+		service := g.config.FindServiceForRoute(route.Path, "")
+		backend := ""
+		if service != nil {
+			backend = service.Host
+		}
+		g.logger.Info("Added regex wildcard route", logging.String("path", route.Path), logging.String("backend", backend))
 	} else {
 		g.router.Handle(route.Path, handler).Methods(route.Methods...)
-		g.logger.Info("Added route", logging.String("path", route.Path), logging.String("destination", route.Destination))
+		service := g.config.FindServiceForRoute(route.Path, "")
+		backend := ""
+		if service != nil {
+			backend = service.Host
+		}
+		g.logger.Info("Added route", logging.String("path", route.Path), logging.String("backend", backend))
 	}
 
 	return nil

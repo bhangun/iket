@@ -31,7 +31,7 @@ services:
     host: "http://admin-api:8080"
     tags: ["admin"]
     routes:
-      - path: /stats
+      - path: /stats 
         method: GET
         name: "Fetch Stats"
         description: "Provides usage statistics"

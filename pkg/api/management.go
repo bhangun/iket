@@ -535,10 +535,16 @@ func (api *ManagementAPI) listRoutes(w http.ResponseWriter, r *http.Request) {
 			timeout = int(route.Timeout.Seconds())
 		}
 		enabled := route.Enabled != false
+		// Find parent service for this route
+		service := cfg.FindServiceForRoute(route.Path, "")
+		backend := ""
+		if service != nil {
+			backend = service.Host
+		}
 		routeInfo := RouteInfo{
 			ID:          fmt.Sprintf("route-%d", i+1),
 			Path:        route.Path,
-			Destination: route.Destination,
+			Destination: backend,
 			Methods:     route.Methods,
 			RequireAuth: route.RequireAuth,
 			Timeout:     timeout,
