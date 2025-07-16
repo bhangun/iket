@@ -534,7 +534,7 @@ func (api *ManagementAPI) listRoutes(w http.ResponseWriter, r *http.Request) {
 		if route.Timeout != nil {
 			timeout = int(route.Timeout.Seconds())
 		}
-		enabled := route.Enabled != false
+		enabled := !route.Enabled
 		// Find parent service for this route
 		service := cfg.FindServiceForRoute(route.Path, "")
 		backend := ""
