@@ -532,7 +532,7 @@ func (api *ManagementAPI) listRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	routes := cfg.GetAllRoutesFromServices()
+	routes := cfg.GetAllRoutesFromServices(api.logger)
 	routeInfos := make([]RouteInfo, 0, len(routes))
 	for i, route := range routes {
 		timeout := 0

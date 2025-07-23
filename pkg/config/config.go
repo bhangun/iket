@@ -460,11 +460,14 @@ func (c *Config) GetServiceByTag(tag string) []Service {
 }
 
 // GetAllRoutesFromServices returns all routes from all services
-func (c *Config) GetAllRoutesFromServices() []RouterConfig {
+func (c *Config) GetAllRoutesFromServices(logger *logging.Logger) []RouterConfig {
 	var allRoutes []RouterConfig
 	for _, serviceConfig := range c.Services {
 		for _, service := range serviceConfig.Services {
 			allRoutes = append(allRoutes, service.Routes...)
+			if logger != nil {
+				logger.Info("Loaded Services", logging.Any("service", service))
+			}
 		}
 	}
 	return allRoutes

@@ -96,8 +96,9 @@ func NewGateway(deps Dependencies, version string) (*Gateway, error) {
 // setupRoutes configures all the routes for the gateway
 func (g *Gateway) setupRoutes() error {
 	// DEBUG: Print all loaded routes
-	allRoutes := g.config.GetAllRoutesFromServices()
-	g.logger.Info("Loaded routes from config", logging.Int("count", len(allRoutes)), logging.Any("routes", allRoutes))
+	allRoutes := g.config.GetAllRoutesFromServices(g.logger)
+	g.logger.Info("Loaded routes from config", logging.Int("count", len(allRoutes)))
+
 	// Add health check endpoint
 	g.router.HandleFunc("/health", g.healthHandler).Methods(http.MethodGet)
 
@@ -111,9 +112,9 @@ func (g *Gateway) setupRoutes() error {
 	g.router.Handle("/admin/version", g.adminAuthMiddleware(http.HandlerFunc(g.versionHandler))).Methods(http.MethodGet)
 
 	// Setup proxy routes
-	for _, route := range g.config.GetAllRoutesFromServices() {
+	for _, route := range g.config.GetAllRoutesFromServices(g.logger) {
 		// Enabled by default unless explicitly set to false
-		if route.Enabled == false {
+		if !route.Enabled {
 			// Check if the field was explicitly set to false in YAML
 			// Since Go's YAML unmarshaler can't distinguish unset from false, treat all as enabled unless explicitly false
 			// We'll use a workaround: if the field is present in YAML, skip; otherwise, allow
@@ -202,7 +203,7 @@ func (g *Gateway) clientCredentialAuthMiddleware() func(http.Handler) http.Handl
 			// Find route config for this path
 			matched := false
 			var requireAuth bool = true
-			for _, route := range g.config.GetAllRoutesFromServices() {
+			for _, route := range g.config.GetAllRoutesFromServices(g.logger) {
 				// Routes are enabled by default (when Enabled field is not specified in YAML)
 				// Only skip if explicitly disabled
 				if !route.Enabled {

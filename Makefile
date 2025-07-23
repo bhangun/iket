@@ -13,7 +13,7 @@ VERSION := $(shell git describe --tags --abbrev=0)
 # Build targets
 build: ## Build the main gateway binary
 	@echo "Building Iket Gateway..."
-	go build -ldflags "-X 'github.com/bhangun/iket/pkg/app.Version=$(VERSION)'" -o bin/iket ./
+	go build -ldflags "-X 'github.com/bhangun/iket/pkg/app.Version=$(VERSION)'" -o bin/iket ./cmd/iket/main.go
 	@echo "Build complete: bin/iket"
 
 build-basic: ## Build with basic tags (no storage dependencies)

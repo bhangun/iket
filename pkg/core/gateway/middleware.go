@@ -564,7 +564,7 @@ func contains(arr []string, s string) bool {
 
 // matchRoute finds the route config for the current request
 func (g *Gateway) matchRoute(r *http.Request) (config.RouterConfig, bool) {
-	for _, route := range g.config.GetAllRoutesFromServices() {
+	for _, route := range g.config.GetAllRoutesFromServices(g.logger) {
 		// Routes are enabled by default (when Enabled field is not specified in YAML)
 		// Only skip if explicitly disabled
 		if !route.Enabled {
