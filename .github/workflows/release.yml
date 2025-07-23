@@ -39,7 +39,7 @@ jobs:
           if [ "${{ matrix.goos }}" = "windows" ]; then EXT=".exe"; fi
           GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
           go build -ldflags "-X 'github.com/bhangun/iket/pkg/app.Version=${VERSION}'" \
-            -o dist/iket-${{ matrix.goos }}-${{ matrix.goarch }}$EXT ./
+            -o dist/iket-${{ matrix.goos }}-${{ matrix.goarch }}$EXT ./cmd/iket/main.go
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
