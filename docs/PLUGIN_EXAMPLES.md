@@ -678,7 +678,7 @@ var Plugin plugin.Plugin
 ### 3. Build as shared library
 
 ```bash
-go build -buildmode=plugin -o my-plugin.so main.go
+go build -buildmode=plugin -o my-plugin.so cmd/iket/main.go
 ```
 
 ### 4. Place in plugins directory

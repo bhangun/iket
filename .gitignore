@@ -34,6 +34,8 @@ certs/
 plugins/consul/
 plugins/auth/
 plugins/storage/
+plugins/oauth2client/
+plugins/oidc/
 
-tester/
 iket
+

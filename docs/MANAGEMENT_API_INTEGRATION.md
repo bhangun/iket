@@ -465,7 +465,7 @@ security:
 FROM golang:1.21-alpine AS builder
 WORKDIR /app
 COPY . .
-RUN go build -o iket /main.go
+RUN go build -o iket cmd/iket/main.go
 
 FROM alpine:latest
 RUN apk --no-cache add ca-certificates

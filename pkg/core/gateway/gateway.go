@@ -41,9 +41,10 @@ type Gateway struct {
 
 // Dependencies contains all the dependencies required to create a Gateway
 type Dependencies struct {
-	Config  *config.Config
-	Logger  *logging.Logger
-	Metrics *metrics.Collector
+	Config   *config.Config
+	Logger   *logging.Logger
+	Metrics  *metrics.Collector
+	Registry *plugin.Registry // <-- Added Registry field
 }
 
 // NewGateway creates a new Gateway instance with the provided dependencies
@@ -68,7 +69,10 @@ func NewGateway(deps Dependencies, version string) (*Gateway, error) {
 		logger:         deps.Logger,
 		shutdown:       make(chan struct{}),
 		version:        version,
-		pluginRegistry: plugin.NewRegistry(),
+		pluginRegistry: deps.Registry, // <-- Use provided registry
+	}
+	if gateway.pluginRegistry == nil {
+		gateway.pluginRegistry = plugin.NewRegistry()
 	}
 
 	// Setup routes and middleware

@@ -73,7 +73,6 @@ var globalPluginsMu sync.RWMutex
 func RegisterGlobal(p Plugin) {
 	globalPluginsMu.Lock()
 	defer globalPluginsMu.Unlock()
-	fmt.Printf("[DEBUG] RegisterGlobal: registering plugin '%s'\n", p.Name())
 	globalPlugins[p.Name()] = p
 }
 
@@ -121,9 +120,10 @@ func (r *Registry) Get(name string) (Plugin, error) {
 
 	p, ok := r.plugins[name]
 	if !ok {
+		//fmt.Printf("[DEBUG] Registry.Get: plugin '%s' NOT FOUND. Registered plugins: %v\n", name, r.plugins)
 		return nil, fmt.Errorf("plugin %s not found", name)
 	}
-
+	//fmt.Printf("[DEBUG] Registry.Get: plugin '%s' found\n", name)
 	return p, nil
 }
 

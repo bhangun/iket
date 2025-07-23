@@ -304,7 +304,7 @@ plugins: {}
 ## Running the Gateway
 
 ```sh
-go run main.go --config=example/basic/config.yaml --services=example/basic/service.yaml --port=7110
+go run cmd/iket/main.go --config=example/basic/config.yaml --services=example/basic/service.yaml --port=7110
 ```
 
 ## Notes

@@ -15,10 +15,10 @@ security:
     required: false 
 
 plugins:
-  openapi:
-    enabled: true
-    spec_path: "./config/openapi.yaml"
-    path: "/openapi"
-    format: "json"
-    swagger_ui: true
+  #openapi:
+  #  enabled: true
+  #  spec_path: "./config/openapi.yaml"
+  #  path: "/openapi"
+  #  format: "json"
+  #  swagger_ui: true
 

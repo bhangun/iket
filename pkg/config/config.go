@@ -347,7 +347,26 @@ func (p *FileProvider) Close() error {
 // LoadConfig loads configuration from the specified path
 func LoadConfig(configPath, servicesPath string, logger *logging.Logger) (*Config, error) {
 	provider := NewFileProvider(configPath, servicesPath, logger)
-	return provider.Load()
+	cfg, err := provider.Load()
+	if err != nil {
+		return nil, err
+	}
+
+	// Expand env vars in plugin configs
+	if cfg != nil && cfg.Plugins != nil {
+		for _, pluginConfig := range cfg.Plugins {
+			expandEnvVarsInMap(pluginConfig)
+		}
+	}
+
+	// Validate configuration
+	validator := NewConfigValidator()
+	if err := validator.Validate(cfg); err != nil {
+		return nil, err
+	}
+
+	logger.LogConfigLoad(configPath, nil)
+	return cfg, nil
 }
 
 // LoadFromFile loads configuration from a single file
@@ -536,6 +555,25 @@ func expandEnvVarsInStruct(s interface{}) {
 				val := field.MapIndex(key)
 				if val.Kind() == reflect.String {
 					field.SetMapIndex(key, reflect.ValueOf(expandEnvVars(val.String())))
+				}
+			}
+		}
+	}
+}
+
+func expandEnvVarsInMap(m map[string]interface{}) {
+	for k, v := range m {
+		switch val := v.(type) {
+		case string:
+			m[k] = expandEnvVars(val)
+		case map[string]interface{}:
+			expandEnvVarsInMap(val)
+		case []interface{}:
+			for i, elem := range val {
+				if s, ok := elem.(string); ok {
+					val[i] = expandEnvVars(s)
+				} else if submap, ok := elem.(map[string]interface{}); ok {
+					expandEnvVarsInMap(submap)
 				}
 			}
 		}

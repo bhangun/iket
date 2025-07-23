@@ -2,7 +2,7 @@ version: 1
 services:
   - name: "User Service"
     description: "Handles user registration and authentication"
-    host: "http://user-service:8000"
+    host: "ws://chat:8000"
     base_path: "/user"
     tags: ["public", "auth"]
     group: "authentication"
@@ -28,7 +28,7 @@ services:
 
   - name: "Admin Dashboard"
     description: "Admin-level service for managing data"
-    host: "http://admin-api:8080"
+    host: "ws://admin-api"
     tags: ["admin"]
     routes:
       - path: /stats 
