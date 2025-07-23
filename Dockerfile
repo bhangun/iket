@@ -17,7 +17,7 @@ COPY . .
 ARG VERSION=dev
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build -ldflags="-w -s -X 'github.com/bhangun/iket/pkg/app.Version=${VERSION}'" \
-    -o /bin/iket ./
+    -o /bin/iket ./cmd/iket/main.go
 
 # Runtime stage
 FROM alpine:3.19
