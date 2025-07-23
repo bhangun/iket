@@ -1,0 +1,12 @@
+server:
+  port: 7100
+  readTimeout: "10s"
+  writeTimeout: "10s"
+  idleTimeout: "60s"
+  enableLogging: true
+  tls:
+    enabled: false
+
+
+plugins: {}
+
