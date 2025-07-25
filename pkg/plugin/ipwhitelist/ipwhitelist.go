@@ -92,5 +92,11 @@ func (p *IPWhitelistPlugin) Middleware() func(next http.Handler) http.Handler {
 }
 
 func init() {
-	plugin.RegisterGlobal(&IPWhitelistPlugin{})
+	plugin.RegisterFactory("ip_whitelist", func(config map[string]interface{}) (plugin.Plugin, error) {
+		p := &IPWhitelistPlugin{}
+		if err := p.Initialize(config); err != nil {
+			return nil, err
+		}
+		return p, nil
+	})
 }

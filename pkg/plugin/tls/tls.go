@@ -218,5 +218,11 @@ func (t *TLSPlugin) OnShutdown() error {
 }
 
 func init() {
-	plugin.RegisterGlobal(&TLSPlugin{})
+	plugin.RegisterFactory("tls", func(config map[string]interface{}) (plugin.Plugin, error) {
+		p := &TLSPlugin{}
+		if err := p.Initialize(config); err != nil {
+			return nil, err
+		}
+		return p, nil
+	})
 }

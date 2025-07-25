@@ -52,10 +52,13 @@ type MiddlewarePlugin interface {
 	Middleware(next http.Handler) http.Handler
 }
 
+type Factory func(config map[string]interface{}) (Plugin, error)
+
 // Registry manages all plugins
 type Registry struct {
-	plugins map[string]Plugin
-	mu      sync.RWMutex
+	plugins   map[string]Plugin
+	factories map[string]Factory
+	mu        sync.RWMutex
 }
 
 type HealthChecker interface {
@@ -95,8 +98,16 @@ func (r *Registry) RegisterAllGlobal() {
 // NewRegistry creates a new plugin registry
 func NewRegistry() *Registry {
 	return &Registry{
-		plugins: make(map[string]Plugin),
+		plugins:   make(map[string]Plugin),
+		factories: make(map[string]Factory),
 	}
+}
+
+// RegisterFactory registers a plugin factory for a given name
+func (r *Registry) RegisterFactory(name string, factory Factory) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.factories[name] = factory
 }
 
 // Register adds a plugin to the registry
@@ -113,17 +124,30 @@ func (r *Registry) Register(p Plugin) error {
 	return nil
 }
 
-// Get returns a plugin by name
+// Get returns a plugin by name, using a factory if available
 func (r *Registry) Get(name string) (Plugin, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// Prefer factory if available
+	if factory, ok := r.factories[name]; ok {
+		fmt.Println("[Registry] Using factory for", name)
+		if p, exists := r.plugins[name]; exists {
+			return p, nil
+		}
+		// Create, cache, and return
+		plugin, err := factory(nil) // Pass config if available
+		if err != nil {
+			return nil, err
+		}
+		r.plugins[name] = plugin
+		return plugin, nil
+	}
 
 	p, ok := r.plugins[name]
 	if !ok {
-		//fmt.Printf("[DEBUG] Registry.Get: plugin '%s' NOT FOUND. Registered plugins: %v\n", name, r.plugins)
 		return nil, fmt.Errorf("plugin %s not found", name)
 	}
-	//fmt.Printf("[DEBUG] Registry.Get: plugin '%s' found\n", name)
 	return p, nil
 }
 
@@ -265,8 +289,15 @@ func (r *Registry) List() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	var names []string
+	nameSet := make(map[string]struct{})
 	for name := range r.plugins {
+		nameSet[name] = struct{}{}
+	}
+	for name := range r.factories {
+		nameSet[name] = struct{}{}
+	}
+	var names []string
+	for name := range nameSet {
 		names = append(names, name)
 	}
 	return names
@@ -343,4 +374,10 @@ func (r *Registry) PluginStatuses() map[string]string {
 		}
 	}
 	return statuses
+}
+
+var DefaultRegistry = NewRegistry()
+
+func RegisterFactory(name string, factory Factory) {
+	DefaultRegistry.RegisterFactory(name, factory)
 }

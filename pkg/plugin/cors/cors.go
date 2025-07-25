@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"fmt"
 	"net/http"
 
 	"github.com/bhangun/iket/pkg/plugin"
@@ -28,6 +29,7 @@ func (c *CORSPlugin) Init(config map[string]interface{}) error {
 }
 
 func (c *CORSPlugin) Initialize(config map[string]interface{}) error {
+	fmt.Println("CORSPlugin Initialize--------------------------------")
 	return c.Init(config)
 }
 
@@ -47,5 +49,11 @@ func (c *CORSPlugin) Middleware() func(next http.Handler) http.Handler {
 }
 
 func init() {
-	plugin.RegisterGlobal(&CORSPlugin{})
+	plugin.RegisterFactory("cors", func(config map[string]interface{}) (plugin.Plugin, error) {
+		p := &CORSPlugin{}
+		if err := p.Initialize(config); err != nil {
+			return nil, err
+		}
+		return p, nil
+	})
 }

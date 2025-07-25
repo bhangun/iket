@@ -376,5 +376,11 @@ func (ws *WebSocketPlugin) OnShutdown() error {
 }
 
 func init() {
-	plugin.RegisterGlobal(&WebSocketPlugin{})
+	plugin.RegisterFactory("websocket", func(config map[string]interface{}) (plugin.Plugin, error) {
+		p := &WebSocketPlugin{}
+		if err := p.Initialize(config); err != nil {
+			return nil, err
+		}
+		return p, nil
+	})
 }

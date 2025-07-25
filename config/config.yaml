@@ -8,5 +8,19 @@ server:
     enabled: false
 
 
-plugins: {}
+plugins:
+  billing:
+    enabled: true
+    database_url: "postgres://user:pass@localhost:5432/yourdb?sslmode=disable"
+    redis_url: "redis://localhost:6379/0"
+    queue_size: 10000
+    workers: 10
+    plan_cache_ttl: 60
+    kafka_brokers:
+      - "localhost:9092"
+    topic_name: "billing-events"
+    worker_count: 1
+    retry_attempts: 3
+    batch_size: 1
+    flush_interval: 1s
 

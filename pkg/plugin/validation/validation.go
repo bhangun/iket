@@ -172,5 +172,11 @@ func (v *ValidationPlugin) Status() string {
 }
 
 func init() {
-	plugin.RegisterGlobal(&ValidationPlugin{})
+	plugin.RegisterFactory("validation", func(config map[string]interface{}) (plugin.Plugin, error) {
+		p := &ValidationPlugin{}
+		if err := p.Initialize(config); err != nil {
+			return nil, err
+		}
+		return p, nil
+	})
 }

@@ -1,4 +1,3 @@
-// plugins/rate/limiter.go
 package main
 
 import (

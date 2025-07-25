@@ -317,5 +317,11 @@ func (j *JWTPlugin) OnShutdown() error {
 }
 
 func init() {
-	plugin.RegisterGlobal(&JWTPlugin{})
+	plugin.RegisterFactory("jwt", func(config map[string]interface{}) (plugin.Plugin, error) {
+		p := &JWTPlugin{}
+		if err := p.Initialize(config); err != nil {
+			return nil, err
+		}
+		return p, nil
+	})
 }

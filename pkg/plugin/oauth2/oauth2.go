@@ -315,5 +315,11 @@ func (o *OAuth2Plugin) OnShutdown() error {
 }
 
 func init() {
-	plugin.RegisterGlobal(&OAuth2Plugin{})
+	plugin.RegisterFactory("oauth2", func(config map[string]interface{}) (plugin.Plugin, error) {
+		p := &OAuth2Plugin{}
+		if err := p.Initialize(config); err != nil {
+			return nil, err
+		}
+		return p, nil
+	})
 }

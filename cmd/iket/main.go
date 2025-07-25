@@ -29,6 +29,7 @@ import (
 	_ "github.com/bhangun/iket/pkg/plugin/tls"
 	_ "github.com/bhangun/iket/pkg/plugin/validation"
 	_ "github.com/bhangun/iket/pkg/plugin/websocket"
+	_ "github.com/bhangun/iket/plugins/billing"
 )
 
 var (
@@ -171,25 +172,23 @@ func main() {
 	// Initialize metrics collector
 	metricsCollector := metrics.NewCollector()
 
-	// Create plugin registry
-	registry := plugin.NewRegistry()
-
-	// Auto-register all plugins that self-register via init()
-	registry.RegisterAllGlobal()
+	// Use the global plugin registry
+	// registry := plugin.NewRegistry()
+	// registry.RegisterAllGlobal()
 
 	// Create gateway with dependencies
 	gw, err := gateway.NewGateway(gateway.Dependencies{
 		Config:   cfg,
 		Logger:   logger,
 		Metrics:  metricsCollector,
-		Registry: registry,
+		Registry: plugin.DefaultRegistry,
 	}, version)
 	if err != nil {
 		logger.Fatal("Failed to create gateway", logging.Error(err))
 	}
 
 	// Create and register management API
-	managementAPI := api.NewManagementAPI(gw, logger, registry)
+	managementAPI := api.NewManagementAPI(gw, logger, plugin.DefaultRegistry)
 	managementAPI.RegisterRoutes(gw.GetRouter())
 
 	logger.Info("Registered plugins", logging.Any("plugins", managementAPI.ListPlugins()))

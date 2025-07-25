@@ -38,7 +38,13 @@ type ClientCertInfo struct {
 }
 
 func init() {
-	plugin.RegisterGlobal(&MTLSPlugin{})
+	plugin.RegisterFactory("mtls", func(config map[string]interface{}) (plugin.Plugin, error) {
+		p := &MTLSPlugin{}
+		if err := p.Initialize(config); err != nil {
+			return nil, err
+		}
+		return p, nil
+	})
 }
 
 func (m *MTLSPlugin) Name() string {

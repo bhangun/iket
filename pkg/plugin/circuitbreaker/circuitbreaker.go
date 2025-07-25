@@ -253,5 +253,11 @@ func (c *CircuitBreakerPlugin) OnShutdown() error {
 }
 
 func init() {
-	plugin.RegisterGlobal(&CircuitBreakerPlugin{})
+	plugin.RegisterFactory("circuit_breaker", func(config map[string]interface{}) (plugin.Plugin, error) {
+		p := &CircuitBreakerPlugin{}
+		if err := p.Initialize(config); err != nil {
+			return nil, err
+		}
+		return p, nil
+	})
 }

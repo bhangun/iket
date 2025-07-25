@@ -49,5 +49,11 @@ func (p *RateLimitPlugin) Middleware() func(next http.Handler) http.Handler {
 }
 
 func init() {
-	plugin.RegisterGlobal(&RateLimitPlugin{})
+	plugin.RegisterFactory("rate_limit", func(config map[string]interface{}) (plugin.Plugin, error) {
+		p := &RateLimitPlugin{}
+		if err := p.Initialize(config); err != nil {
+			return nil, err
+		}
+		return p, nil
+	})
 }

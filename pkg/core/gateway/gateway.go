@@ -126,6 +126,15 @@ func (g *Gateway) setupRoutes() error {
 		}
 	}
 
+	// Mount billing plugin HTTP handler if available
+	if p, err := g.pluginRegistry.Get("billing"); err == nil {
+		if handlerProvider, ok := p.(interface{ Routes() http.Handler }); ok {
+			g.router.PathPrefix("/plugin/billing/").Handler(
+				http.StripPrefix("/plugin/billing", handlerProvider.Routes()),
+			)
+		}
+	}
+
 	// Register dummy handlers for plugin endpoints so middleware is invoked
 	for pluginName, pluginConfig := range g.config.Plugins {
 		if pluginName == "openapi" {
