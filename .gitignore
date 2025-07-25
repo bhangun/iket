@@ -41,4 +41,4 @@ iket
 
 plugins/billing/
 plugins/usage/
-plugins/apikey/
+billing_service/

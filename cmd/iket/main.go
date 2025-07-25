@@ -29,7 +29,6 @@ import (
 	_ "github.com/bhangun/iket/pkg/plugin/tls"
 	_ "github.com/bhangun/iket/pkg/plugin/validation"
 	_ "github.com/bhangun/iket/pkg/plugin/websocket"
-	_ "github.com/bhangun/iket/plugins/billing"
 )
 
 var (
