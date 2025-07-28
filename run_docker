@@ -4,4 +4,6 @@
 export IKET_VERSION=$(git describe --tags --always)
 
 echo "Building with version: $IKET_VERSION"
-make build
+
+# Run docker-compose with all arguments passed through
+docker-compose "$@" 

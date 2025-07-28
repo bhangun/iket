@@ -77,7 +77,9 @@ vet: ## Run go vet
 # Docker targets
 docker-build: ## Build Docker image
 	@echo "Building Docker image..."
-	docker build -f Dockerfile.prod -t iket:latest .
+	@export IKET_VERSION=$$(git describe --tags --always); \
+	echo "Building with version: $$IKET_VERSION"; \
+	docker build --build-arg VERSION=$$IKET_VERSION -f Dockerfile.prod -t iket:latest .
 
 docker-build-basic: ## Build basic Docker image
 	@echo "Building basic Docker image..."
@@ -85,7 +87,15 @@ docker-build-basic: ## Build basic Docker image
 
 docker-run: ## Run with docker-compose
 	@echo "Starting services with docker-compose..."
-	docker-compose -f docker-compose.prod.yaml up -d
+	@export IKET_VERSION=$$(git describe --tags --always); \
+	echo "Running with version: $$IKET_VERSION"; \
+	IKET_VERSION=$$IKET_VERSION docker-compose -f docker-compose.prod.yaml up -d
+
+docker-up: ## Run with docker-compose (auto version)
+	@echo "Starting services with docker-compose (auto version)..."
+	@export IKET_VERSION=$$(git describe --tags --always); \
+	echo "Running with version: $$IKET_VERSION"; \
+	IKET_VERSION=$$IKET_VERSION docker-compose up -d --build
 
 docker-run-basic: ## Run basic setup with docker-compose
 	@echo "Starting basic services..."

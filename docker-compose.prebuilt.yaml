@@ -1,0 +1,22 @@
+#version: '3.8'
+
+services:
+  iket:
+    image: bhangun/iket:latest
+    platform: linux/amd64  # Use x86_64 emulation on ARM64
+    
+    container_name: iket
+    ports:
+      - "7100:8080"
+      - "8443"  # Expose HTTPS port
+    volumes:
+      - ./config:/app/config:ro
+    environment:
+      - LOG_LEVEL=info
+    command: ["/app/iket", "--config", "/app/config/config.yaml", "--services", "/app/config/services.yaml"]
+    networks:
+      - iket-network
+
+networks:
+  iket-network:
+    driver: bridge

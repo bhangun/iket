@@ -240,7 +240,6 @@ func (p *FileProvider) Load() (*Config, error) {
 		return nil, err
 	}
 
-	p.logger.LogConfigLoad(p.configPath, nil)
 	return &config, nil
 }
 
@@ -365,7 +364,11 @@ func LoadConfig(configPath, servicesPath string, logger *logging.Logger) (*Confi
 		return nil, err
 	}
 
+	// Log successful loading of both config files
 	logger.LogConfigLoad(configPath, nil)
+	if servicesPath != "" && servicesPath != configPath {
+		logger.LogConfigLoad(servicesPath, nil)
+	}
 	return cfg, nil
 }
 
