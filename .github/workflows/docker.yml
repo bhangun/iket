@@ -19,9 +19,14 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Get version from git tag
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_ENV
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/iket:latest,${{ secrets.DOCKERHUB_USERNAME }}/iket:${{ github.ref_name }} 
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/iket:latest,${{ secrets.DOCKERHUB_USERNAME }}/iket:${{ github.ref_name }}
+          build-args: |
+            VERSION=${{ env.VERSION }} 
