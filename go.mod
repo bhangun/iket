@@ -1,8 +1,8 @@
 module github.com/bhangun/iket
 
-go 1.25.1
+go 1.23
 
-toolchain go1.24.3
+// toolchain go1.24.3
 
 require (
 	github.com/IBM/sarama v1.45.2
