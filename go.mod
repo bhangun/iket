@@ -1,6 +1,6 @@
 module github.com/bhangun/iket
 
-go 1.23.8
+go 1.25.1
 
 toolchain go1.24.3
 
