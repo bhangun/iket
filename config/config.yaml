@@ -1,5 +1,5 @@
 server:
-  port: 7100
+  port: 8080
   readTimeout: "10s"
   writeTimeout: "10s"
   idleTimeout: "60s"
@@ -7,6 +7,22 @@ server:
   tls:
     enabled: false
 
+services:
+  - version: 1
+    services:
+      - name: "Identity Service"
+        description: "Identity & registration services"
+        host: "http://127.0.0.1:7101"
+        tags: ["public", "auth"]
+        group: "miku"
+        routes:
+          - path: "/iam/{rest:.*}"
+            methods: ["GET"]
+            requireAuth: false
+            stripPath: true
+            enabled: true
+            backend:
+              - url_pattern: "/api/{rest:.*}"
 
 plugins:
   billing:

@@ -13,7 +13,7 @@ services:
       - ./config:/app/config:ro
     environment:
       - LOG_LEVEL=info
-    command: ["/app/iket", "--config", "/app/config/config.yaml", "--services", "/app/config/services.yaml"]
+    command: ["/app/iket", "--config", "/app/config/config.yaml", "--services", "/app/config/service.yaml"]
     networks:
       - iket-network
 
