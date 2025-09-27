@@ -78,9 +78,11 @@ func AccessLogMiddleware(g *Gateway, next http.Handler) http.Handler {
 		// Wrap ResponseWriter to capture status code & content length
 		rw := &responseWriter{ResponseWriter: w, statusCode: 200}
 
-		// Inject client IP
-		ip := getIP(r)
-		ctx := context.WithValue(r.Context(), clientIPKey, ip)
+		// Extract client IP from headers or RemoteAddr
+		clientIP := getIP(r)
+
+		// Store in context so handlers can reuse it
+		ctx := context.WithValue(r.Context(), clientIPKey, clientIP)
 
 		next.ServeHTTP(rw, r.WithContext(ctx))
 
@@ -89,7 +91,8 @@ func AccessLogMiddleware(g *Gateway, next http.Handler) http.Handler {
 		g.logger.Info("HTTP request",
 			logging.String("method", r.Method),
 			logging.String("path", r.URL.Path),
-			logging.String("remote_addr", ip),
+			logging.String("remote_addr", r.RemoteAddr), // raw TCP peer
+			logging.String("client_ip", clientIP),       // parsed from headers
 			logging.String("user_agent", r.UserAgent()),
 			logging.Int("status_code", rw.statusCode),
 			logging.Float64("duration", duration),
