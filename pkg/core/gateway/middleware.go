@@ -27,6 +27,59 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// context key for client IP
+type ctxKey string
+
+const clientIPKey ctxKey = "clientIP"
+
+// getIP extracts client IP from request headers or RemoteAddr
+func getIP(r *http.Request) string {
+	// Common proxy headers
+	hdrs := []string{
+		"X-Forwarded-For",
+		"X-Real-Ip",
+		"Proxy-Client-IP",
+		"WL-Proxy-Client-IP",
+	}
+
+	for _, h := range hdrs {
+		v := r.Header.Get(h)
+		if v == "" {
+			continue
+		}
+		parts := strings.Split(v, ",")
+		if len(parts) > 0 {
+			ip := strings.TrimSpace(parts[0])
+			if ip != "" {
+				return ip
+			}
+		}
+	}
+
+	// fallback to RemoteAddr
+	if host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr)); err == nil {
+		return host
+	}
+	return r.RemoteAddr
+}
+
+// ClientIPMiddleware injects client IP into request context
+func ClientIPMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ip := getIP(r)
+		ctx := context.WithValue(r.Context(), clientIPKey, ip)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// GetClientIP retrieves client IP from request context
+func GetClientIP(r *http.Request) string {
+	if ip, ok := r.Context().Value(clientIPKey).(string); ok {
+		return ip
+	}
+	return ""
+}
+
 type contextKey string
 
 const jwtClaimsKey contextKey = "jwtClaims"

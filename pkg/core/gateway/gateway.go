@@ -395,7 +395,7 @@ func (g *Gateway) Serve(ctx context.Context) error {
 
 	server := &http.Server{
 		Addr:    fmt.Sprintf(":%d", g.config.Server.Port),
-		Handler: g.router,
+		Handler: ClientIPMiddleware(g.router),
 	}
 
 	g.server = server
@@ -482,10 +482,12 @@ func (g *Gateway) metricsHandler(w http.ResponseWriter, r *http.Request) {
 // notFoundHandler handles 404 requests
 func (g *Gateway) notFoundHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Printf("notFoundHandler called for path: %s\n", r.URL.Path)
+	clientIP := GetClientIP(r)
 	g.logger.Warn("404 Not Found",
 		logging.String("method", r.Method),
 		logging.String("path", r.URL.Path),
 		logging.String("remote_addr", r.RemoteAddr),
+		logging.String("client_ip", clientIP),
 	)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusNotFound)

@@ -3,7 +3,9 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -206,7 +208,6 @@ type RouteInfo struct {
 }
 
 // Handler implementations
-
 func (api *ManagementAPI) getGatewayStatus(w http.ResponseWriter, r *http.Request) {
 	api.mu.RLock()
 	defer api.mu.RUnlock()
@@ -618,6 +619,36 @@ func (api *ManagementAPI) createRoute(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 	api.writeJSON(w, response)
+}
+
+func getIP(r *http.Request) string {
+	// Common proxy headers
+	hdrs := []string{
+		"X-Forwarded-For",
+		"X-Real-Ip",
+		"Proxy-Client-IP",
+		"WL-Proxy-Client-IP",
+	}
+
+	for _, h := range hdrs {
+		v := r.Header.Get(h)
+		if v == "" {
+			continue
+		}
+		parts := strings.Split(v, ",")
+		if len(parts) > 0 {
+			ip := strings.TrimSpace(parts[0])
+			if ip != "" {
+				return ip
+			}
+		}
+	}
+
+	// fallback
+	if host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr)); err == nil {
+		return host
+	}
+	return r.RemoteAddr
 }
 
 func (api *ManagementAPI) updateRoute(w http.ResponseWriter, r *http.Request) {
