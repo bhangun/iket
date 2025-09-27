@@ -111,6 +111,9 @@ func (g *Gateway) loggingMiddleware() func(http.Handler) http.Handler {
 			// Create a response writer wrapper to capture status code
 			wrapped := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 
+			// Get client IP
+			clientIP := GetClientIP(r)
+
 			// Process request
 			next.ServeHTTP(wrapped, r)
 
@@ -122,6 +125,7 @@ func (g *Gateway) loggingMiddleware() func(http.Handler) http.Handler {
 				logging.String("method", r.Method),
 				logging.String("path", r.URL.Path),
 				logging.String("remote_addr", r.RemoteAddr),
+				logging.String("client_ip", clientIP),
 				logging.String("user_agent", r.UserAgent()),
 				logging.Int("status_code", wrapped.statusCode),
 				logging.Duration("duration", duration),
@@ -172,12 +176,17 @@ func (g *Gateway) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if g.config.Security.EnableBasicAuth {
 			user, pass, ok := r.BasicAuth()
+
+			// Get client IP
+			clientIP := GetClientIP(r)
+
 			if !ok || user == "" || pass == "" {
 				g.logger.Warn("401 Unauthorized",
 					logging.String("reason", "Missing or invalid credentials"),
 					logging.String("method", r.Method),
 					logging.String("path", r.URL.Path),
 					logging.String("remote_addr", r.RemoteAddr),
+					logging.String("client_ip", clientIP),
 				)
 				w.Header().Set("WWW-Authenticate", "Basic realm=\"Iket Gateway\"")
 				w.WriteHeader(http.StatusUnauthorized)
@@ -190,6 +199,7 @@ func (g *Gateway) authMiddleware(next http.Handler) http.Handler {
 					logging.String("method", r.Method),
 					logging.String("path", r.URL.Path),
 					logging.String("remote_addr", r.RemoteAddr),
+					logging.String("client_ip", clientIP),
 				)
 				w.Header().Set("WWW-Authenticate", "Basic realm=\"Iket Gateway\"")
 				w.WriteHeader(http.StatusUnauthorized)
@@ -566,6 +576,8 @@ func (g *Gateway) jwtAuthMiddleware(cfg config.JWTConfig) func(http.Handler) htt
 	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Get client IP
+			clientIP := GetClientIP(r)
 			// Per-route override: if route disables JWT, skip
 			if route, ok := g.matchRoute(r); ok {
 				if !route.RequireJwt {
@@ -584,6 +596,7 @@ func (g *Gateway) jwtAuthMiddleware(cfg config.JWTConfig) func(http.Handler) htt
 					logging.String("method", r.Method),
 					logging.String("path", r.URL.Path),
 					logging.String("remote_addr", r.RemoteAddr),
+					logging.String("client_ip", clientIP),
 				)
 				w.WriteHeader(http.StatusUnauthorized)
 				w.Write([]byte("Missing or invalid JWT"))
@@ -613,6 +626,7 @@ func (g *Gateway) jwtAuthMiddleware(cfg config.JWTConfig) func(http.Handler) htt
 					logging.String("method", r.Method),
 					logging.String("path", r.URL.Path),
 					logging.String("remote_addr", r.RemoteAddr),
+					logging.String("client_ip", clientIP),
 				)
 				w.WriteHeader(http.StatusUnauthorized)
 				w.Write([]byte("Invalid JWT"))
@@ -678,12 +692,15 @@ func (g *Gateway) errorLoggingMiddleware() func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			rw := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 			next.ServeHTTP(rw, r)
+			// Get client IP
+			clientIP := GetClientIP(r)
 			if rw.statusCode >= 400 {
 				g.logger.Warn("HTTP error response",
 					logging.Int("status_code", rw.statusCode),
 					logging.String("method", r.Method),
 					logging.String("path", r.URL.Path),
 					logging.String("remote_addr", r.RemoteAddr),
+					logging.String("client_ip", clientIP),
 				)
 			}
 		})

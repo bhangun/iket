@@ -509,9 +509,9 @@ func (g *Gateway) configHandler(w http.ResponseWriter, r *http.Request) {
 // adminAuthMiddleware enforces Basic Auth for admin endpoints
 func (g *Gateway) adminAuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Get client IP
 		clientIP := GetClientIP(r)
 		g.logger.Debug("Admin request", logging.String("client_ip", clientIP))
-
 		user, pass, ok := r.BasicAuth()
 		if !ok || user == "" || pass == "" {
 			g.logger.Warn("401 Unauthorized (admin endpoint)",
@@ -519,6 +519,7 @@ func (g *Gateway) adminAuthMiddleware(next http.Handler) http.Handler {
 				logging.String("method", r.Method),
 				logging.String("path", r.URL.Path),
 				logging.String("remote_addr", r.RemoteAddr),
+				logging.String("client_ip", clientIP),
 			)
 			w.Header().Set("WWW-Authenticate", "Basic realm=\"Iket Admin\"")
 			w.WriteHeader(http.StatusUnauthorized)
@@ -531,6 +532,7 @@ func (g *Gateway) adminAuthMiddleware(next http.Handler) http.Handler {
 				logging.String("method", r.Method),
 				logging.String("path", r.URL.Path),
 				logging.String("remote_addr", r.RemoteAddr),
+				logging.String("client_ip", clientIP),
 			)
 			w.Header().Set("WWW-Authenticate", "Basic realm=\"Iket Admin\"")
 			w.WriteHeader(http.StatusUnauthorized)
