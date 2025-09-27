@@ -63,21 +63,39 @@ func getIP(r *http.Request) string {
 	return r.RemoteAddr
 }
 
-// ClientIPMiddleware injects client IP into request context
-func ClientIPMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip := getIP(r)
-		ctx := context.WithValue(r.Context(), clientIPKey, ip)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
-}
-
 // GetClientIP retrieves client IP from request context
 func GetClientIP(r *http.Request) string {
 	if ip, ok := r.Context().Value(clientIPKey).(string); ok {
 		return ip
 	}
 	return ""
+}
+
+func AccessLogMiddleware(g *Gateway, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+
+		// Wrap ResponseWriter to capture status code & content length
+		rw := &responseWriter{ResponseWriter: w, statusCode: 200}
+
+		// Inject client IP
+		ip := getIP(r)
+		ctx := context.WithValue(r.Context(), clientIPKey, ip)
+
+		next.ServeHTTP(rw, r.WithContext(ctx))
+
+		duration := time.Since(start).Seconds()
+
+		g.logger.Info("HTTP request",
+			logging.String("method", r.Method),
+			logging.String("path", r.URL.Path),
+			logging.String("remote_addr", ip),
+			logging.String("user_agent", r.UserAgent()),
+			logging.Int("status_code", rw.statusCode),
+			logging.Float64("duration", duration),
+			logging.Int("content_length", rw.length),
+		)
+	})
 }
 
 type contextKey string
@@ -511,6 +529,7 @@ func findWildcardIndex(path string) int {
 type responseWriter struct {
 	http.ResponseWriter
 	statusCode int
+	length     int
 }
 
 func (rw *responseWriter) WriteHeader(code int) {
@@ -519,7 +538,9 @@ func (rw *responseWriter) WriteHeader(code int) {
 }
 
 func (rw *responseWriter) Write(b []byte) (int, error) {
-	return rw.ResponseWriter.Write(b)
+	n, err := rw.ResponseWriter.Write(b)
+	rw.length += n
+	return n, err
 }
 
 // Add Hijack support for WebSocket proxying

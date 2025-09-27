@@ -395,7 +395,7 @@ func (g *Gateway) Serve(ctx context.Context) error {
 
 	server := &http.Server{
 		Addr:    fmt.Sprintf(":%d", g.config.Server.Port),
-		Handler: ClientIPMiddleware(g.router),
+		Handler: AccessLogMiddleware(g, g.router),
 	}
 
 	g.server = server
@@ -509,6 +509,9 @@ func (g *Gateway) configHandler(w http.ResponseWriter, r *http.Request) {
 // adminAuthMiddleware enforces Basic Auth for admin endpoints
 func (g *Gateway) adminAuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		clientIP := GetClientIP(r)
+		g.logger.Debug("Admin request", logging.String("client_ip", clientIP))
+
 		user, pass, ok := r.BasicAuth()
 		if !ok || user == "" || pass == "" {
 			g.logger.Warn("401 Unauthorized (admin endpoint)",

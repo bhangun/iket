@@ -209,6 +209,12 @@ type RouteInfo struct {
 
 // Handler implementations
 func (api *ManagementAPI) getGatewayStatus(w http.ResponseWriter, r *http.Request) {
+	clientIP := gateway.GetClientIP(r)
+	api.logger.Info("gateway/status requested",
+		logging.String("client_ip", clientIP),
+		logging.String("path", r.URL.Path),
+	)
+
 	api.mu.RLock()
 	defer api.mu.RUnlock()
 
