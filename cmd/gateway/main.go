@@ -114,14 +114,14 @@ func main() {
 	// Initialize metrics collector
 	metricsCollector := metrics.NewCollector()
 
-	// Create gateway with dependencies
-	gw, err := gateway.NewGateway(gateway.Dependencies{
+	// Create enhanced gateway with dependencies
+	gw, err := gateway.NewEnhancedGateway(gateway.EnhancedDependencies{
 		Config:  cfg,
 		Logger:  logger,
 		Metrics: metricsCollector,
 	}, version)
 	if err != nil {
-		logger.Fatal("Failed to create gateway", logging.Error(err))
+		logger.Fatal("Failed to create enhanced gateway", logging.Error(err))
 	}
 
 	startupDuration := time.Since(startTime)

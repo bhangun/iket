@@ -1,40 +1,41 @@
-# Binaries
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
-/bin/
-
-# Test binary
-*.test
-
-.DS_Store
-
-# Output directory
-/out/
-
-# Dependency directories
+```
+# Dependencies
 vendor/
 
-# IDE specific
-.idea/
+# Build artifacts
+*.o
+*.a
+*.so
+*.exe
+*.dll
+*.out
+
+# Go-specific
+*.test
+*.prof
+go.mod.lock
+
+# Logs and temp files
+*.log
+*.tmp
+
+# Editor/IDE
 .vscode/
+.idea/
 *.swp
+*.swo
 
-# Go workspace file
-go.work
-
-# Environment files
+# Environment
 .env
+.env.local
+*.env.*
 
-# Security
-certs/
+# Coverage
+coverage/
+htmlcov/
+.coverage
 
-plugins/consul/
-plugins/auth/
-plugins/storage/
-
-
-tester/basic/
-run_tester
+# OS
+.DS_Store
+Thumbs.db
+```
