@@ -1,8 +1,6 @@
 module iket
 
-go 1.23.8
-
-toolchain go1.24.3
+go 1.23
 
 require (
 	github.com/Nerzal/gocloak/v8 v8.6.0
