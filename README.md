@@ -29,13 +29,19 @@
 
 Get up and running in seconds with our ultimate installer:
 
+**Full Gateway Setup:**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/bhangun/iket/main/scripts/install.sh | bash
 ```
 
-This script automates platform detection, builds the latest binaries, generates mTLS certificates, and sets up your initial configuration.
+**CLI Only (for remote administration):**
+```bash
+curl -fsSL https://raw.githubusercontent.com/bhangun/iket/main/scripts/install.sh | bash -s -- --cli-only
+```
 
-For detailed instructions and manual installation, see [INSTALL.md](INSTALL.md).
+This script automates platform detection, builds the latest binaries, generates mTLS certificates (in full mode), and sets up your initial configuration.
+
+For detailed instructions and manual installation, see [docs/INSTALL.md](docs/INSTALL.md).
 
 ### Run the Gateway
 
@@ -143,7 +149,7 @@ docker-compose up --build
 
 ## 📚 Documentation
 
-- [Installation Guide](INSTALL.md)
+- [Installation Guide](docs/INSTALL.md)
 - [Plugin Quickstart](docs/PLUGIN_QUICKSTART.md)
 - [API Reference](docs/API.md)
 

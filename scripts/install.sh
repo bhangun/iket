@@ -48,6 +48,22 @@ REPO_URL="https://github.com/bhangun/iket.git"
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="$ORIGINAL_HOME/.iket"
 HAS_SYSTEMD=false
+CLI_ONLY=false
+
+# Parse arguments
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --cli-only)
+                CLI_ONLY=true
+                shift
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+}
 
 # 1. Detect Platform
 detect_platform() {
@@ -148,40 +164,51 @@ prepare_source() {
 build_and_install() {
     print_step "Building & Installing"
     
-    print_info "${BUILD} Building binaries (this may take a minute)..."
-    make build build-cli > /dev/null
-    
     SUDO_CMD=""
     if [ "$EUID" -ne 0 ] && command -v sudo &>/dev/null; then SUDO_CMD="sudo"; fi
 
-    print_info "Moving binaries to $INSTALL_DIR..."
-    $SUDO_CMD install -m 755 bin/iket "$INSTALL_DIR/iket"
-    $SUDO_CMD install -m 755 bin/iket-cli "$INSTALL_DIR/iket-cli"
+    if [ "$CLI_ONLY" = true ]; then
+        print_info "${BUILD} Building CLI binary..."
+        make build-cli > /dev/null
+        print_info "Moving iket-cli to $INSTALL_DIR..."
+        $SUDO_CMD install -m 755 bin/iket-cli "$INSTALL_DIR/iket-cli"
+    else
+        print_info "${BUILD} Building binaries (this may take a minute)..."
+        make build build-cli > /dev/null
+        print_info "Moving binaries to $INSTALL_DIR..."
+        $SUDO_CMD install -m 755 bin/iket "$INSTALL_DIR/iket"
+        $SUDO_CMD install -m 755 bin/iket-cli "$INSTALL_DIR/iket-cli"
+    fi
     
     print_success "Binaries installed successfully."
 }
 
 # 5. Security & Configuration
 setup_security() {
-    print_step "Configuring Security (mTLS)"
+    if [ "$CLI_ONLY" = true ]; then
+        print_step "Configuring CLI Security"
+    else
+        print_step "Configuring Security (mTLS)"
+    fi
     
     local cert_dir="$CONFIG_DIR/certs"
     mkdir -p "$cert_dir"
     chown -R "$ORIGINAL_USER" "$CONFIG_DIR"
     chmod 700 "$CONFIG_DIR" "$cert_dir"
 
-    if [ ! -f "$cert_dir/ca.crt" ]; then
-        print_info "${LOCK} Generating default mTLS certificates..."
-        # Use the freshly installed CLI
-        $INSTALL_DIR/iket-cli cert gen --cert-dir "$cert_dir" --server-hostname localhost --server-ip 127.0.0.1 > /dev/null
-        print_success "Certificates generated in $cert_dir"
-    else
-        print_info "Certificates already exist, keeping them."
-    fi
+    if [ "$CLI_ONLY" != true ]; then
+        if [ ! -f "$cert_dir/ca.crt" ]; then
+            print_info "${LOCK} Generating default mTLS certificates..."
+            # Use the freshly installed CLI
+            $INSTALL_DIR/iket-cli cert gen --cert-dir "$cert_dir" --server-hostname localhost --server-ip 127.0.0.1 > /dev/null
+            print_success "Certificates generated in $cert_dir"
+        else
+            print_info "Certificates already exist, keeping them."
+        fi
 
-    # Server Config
-    if [ ! -f "$CONFIG_DIR/config.yaml" ]; then
-        cat > "$CONFIG_DIR/config.yaml" <<EOF
+        # Server Config
+        if [ ! -f "$CONFIG_DIR/config.yaml" ]; then
+            cat > "$CONFIG_DIR/config.yaml" <<EOF
 server:
   port: 8080
   enableLogging: true
@@ -196,7 +223,8 @@ security:
   basicAuthUsers:
     admin: admin123
 EOF
-        print_success "Server configuration created."
+            print_success "Server configuration created."
+        fi
     fi
 
     # CLI Config
@@ -216,7 +244,7 @@ EOF
 
 # 6. Service Configuration
 setup_service() {
-    if [ "$HAS_SYSTEMD" != "true" ]; then return 0; fi
+    if [ "$HAS_SYSTEMD" != "true" ] || [ "$CLI_ONLY" = true ]; then return 0; fi
     
     print_step "Configuring System Service"
     local SUDO_CMD=""
@@ -246,8 +274,13 @@ EOF
 
 # Main
 main() {
+    parse_args "$@"
+
     echo -e "${CYAN}"
     echo "  🧶  IKET GATEWAY INSTALLER"
+    if [ "$CLI_ONLY" = true ]; then
+        echo "  (CLI ONLY MODE)"
+    fi
     echo "  ──────────────────────────"
     echo -e "${NC}"
 
@@ -261,17 +294,23 @@ main() {
     print_step "Installation Summary"
     print_success "Done! Iket is ready to go."
     echo ""
-    echo -e "  ${BLUE}Server Bin:${NC}    $INSTALL_DIR/iket"
+    if [ "$CLI_ONLY" != true ]; then
+        echo -e "  ${BLUE}Server Bin:${NC}    $INSTALL_DIR/iket"
+    fi
     echo -e "  ${BLUE}CLI Bin:${NC}       $INSTALL_DIR/iket-cli"
     echo -e "  ${BLUE}Config Dir:${NC}    $CONFIG_DIR"
     echo ""
-    print_info "To start the gateway:"
-    if [ "$HAS_SYSTEMD" == "true" ]; then
-        echo -e "  ${YELLOW}sudo systemctl start iket${NC}"
-    else
-        echo -e "  ${YELLOW}iket --config ~/.iket/config.yaml${NC}"
+    
+    if [ "$CLI_ONLY" != true ]; then
+        print_info "To start the gateway:"
+        if [ "$HAS_SYSTEMD" == "true" ]; then
+            echo -e "  ${YELLOW}sudo systemctl start iket${NC}"
+        else
+            echo -e "  ${YELLOW}iket --config ~/.iket/config.yaml${NC}"
+        fi
+        echo ""
     fi
-    echo ""
+    
     print_info "To check status with CLI:"
     echo -e "  ${YELLOW}iket-cli --config ~/.iket/cli-config.yaml gateway status${NC}"
     echo ""

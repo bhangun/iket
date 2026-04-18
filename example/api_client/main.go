@@ -331,7 +331,7 @@ func main() {
 	// Create API client
 	client := NewAPIClient("http://localhost:8080/api/v1", "admin", "admin123")
 
-	fmt.Println("=== Iket Management API Client Example ===\n")
+	fmt.Println("=== Iket Management API Client Example ===")
 
 	// Get gateway status
 	fmt.Println("1. Getting gateway status...")

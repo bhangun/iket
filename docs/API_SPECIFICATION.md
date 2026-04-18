@@ -4,17 +4,21 @@ This document defines the REST API for the Iket API Gateway management console.
 
 ## Base URL
 ```
-http://localhost:8080/api/v1
+https://localhost:8080/api/v1
 ```
+*Note: HTTPS is required when mTLS is enabled.*
 
 ## Authentication
-All endpoints require authentication using HTTP Basic Auth or JWT Bearer token.
+All endpoints are secured by a two-layer authentication mechanism:
 
-### Headers
-```
+### 1. Transport Layer (mTLS)
+The client must provide a valid X.509 certificate signed by the CA trusted by the gateway.
+
+### 2. Application Layer (Basic Auth)
+All requests must include standard Basic Authentication headers.
+
+```http
 Authorization: Basic <base64(username:password)>
-# OR
-Authorization: Bearer <jwt_token>
 ```
 
 ## API Endpoints
@@ -29,15 +33,8 @@ GET /gateway/status
 **Response:**
 ```json
 {
-  "status": "running",
-  "uptime": "2h 15m 30s",
-  "version": "1.0.0",
-  "start_time": "2024-01-15T10:30:00Z",
-  "config_loaded": true,
-  "last_reload": "2024-01-15T12:45:00Z",
-  "active_connections": 42,
-  "total_requests": 15420,
-  "error_count": 5
+  "status": "UP",
+  "timestamp": "2026-04-18T15:30:00Z"
 }
 ```
 
@@ -51,35 +48,42 @@ GET /gateway/config
 {
   "server": {
     "port": 8080,
-    "host": "0.0.0.0",
-    "plugins_dir": "./plugins"
+    "readTimeout": "10s",
+    "writeTimeout": "10s",
+    "idleTimeout": "60s",
+    "enableLogging": true
   },
   "security": {
-    "jwt": {
+    "tls": {
       "enabled": true,
-      "secret": "REDACTED",
-      "algorithms": ["HS256"]
+      "certFile": "/app/certs/server.crt",
+      "keyFile": "/app/certs/server.key",
+      "clientCAFile": "/app/certs/ca.crt",
+      "clientAuthType": "RequireAndVerifyClientCert"
     },
-    "clients": {
-      "client1": "REDACTED"
+    "enableBasicAuth": true,
+    "basicAuthUsers": null,
+    "ipWhitelist": [],
+    "headers": {},
+    "clients": {},
+    "jwt": {
+      "enabled": false,
+      "secret": "REDACTED"
     }
   },
-  "routes": [
+  "services": [
     {
-      "id": "route-1",
-      "path": "/api/*",
-      "destination": "http://backend:3000",
-      "methods": ["GET", "POST"],
-      "require_auth": true,
-      "timeout": 30
+      "version": 1,
+      "services": [
+        {
+          "name": "User Service",
+          "host": "http://user-service:8000",
+          "routes": []
+        }
+      ]
     }
   ],
-  "plugins": {
-    "rate_limiter": {
-      "enabled": true,
-      "requests_per_second": 100
-    }
-  }
+  "plugins": {}
 }
 ```
 

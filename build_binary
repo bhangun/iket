@@ -1,3 +1,0 @@
-#!/bin/bash
-VERSION=$(git describe --tags --always)
-GOOS=linux GOARCH=amd64 go build -ldflags="-X 'github.com/bhangun/iket/pkg/app.Version=$VERSION'" -o bin/iket ./cmd/iket/main.go

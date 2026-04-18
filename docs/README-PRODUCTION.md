@@ -1,442 +1,165 @@
 # Iket Gateway - Production Deployment
 
-This guide explains how to deploy Iket Gateway in production using Docker with custom configuration paths.
+This guide explains how to deploy Iket Gateway in production using Docker with full security features enabled, including TLS and mTLS for remote administration.
 
 ## Overview
 
-The production setup includes:
+A production Iket setup includes:
 - **Iket Gateway** - Main API gateway service
-- **PostgreSQL** - Database for configuration storage
-- **Redis** - Caching and session storage
-- **Keycloak** - Identity and access management
-- **Custom config paths** - Flexible configuration management
+- **mTLS Security** - Mutual TLS for secure remote administration via `iket-cli`
+- **Identity & Access** - Integrated with JWT and Basic Auth
+- **Observability** - Prometheus metrics and structured logging
+- **Containerization** - Multi-stage Docker builds and secure non-root execution
 
-## Files Structure
+## Directory Structure
+
+After a standard installation, your production environment should look like this:
 
 ```
-iket/
-├── Dockerfile.prod                    # Production Dockerfile
-├── docker-compose.prod.yaml           # Production compose file
-├── docker-compose.prod.override.yaml  # Development override
-├── env.prod.example                   # Environment variables template
-├── scripts/deploy-prod.sh             # Deployment script
-├── config/                            # Configuration directory
-│   ├── config.yaml                    # Main configuration
-│   ├── routes.yaml                    # Routes configuration
-│   └── keycloak.yaml                  # Keycloak configuration
-├── certs/                             # SSL certificates
-└── plugins/                           # Custom plugins
+~/.iket/
+├── config.yaml          # Gateway Server configuration
+├── cli-config.yaml      # Iket CLI configuration
+└── certs/               # mTLS certificates
+    ├── ca.crt           # Root CA certificate
+    ├── ca.key           # Root CA private key (KEEP SECURE)
+    ├── server.crt       # Gateway server certificate
+    ├── server.key       # Gateway server private key
+    ├── client.crt       # Admin client certificate
+    └── client.key       # Admin client private key
 ```
 
-## Quick Start
+## Quick Start (Automated)
 
-### 1. Setup Environment
+The easiest way to set up a production-ready environment is using the ultimate installer:
 
 ```bash
-# Copy environment template
-cp env.prod.example .env.prod
-
-# Edit environment variables
-nano .env.prod
+curl -fsSL https://raw.githubusercontent.com/bhangun/iket/main/scripts/install.sh | bash
 ```
 
-### 2. Configure Custom Paths
+This script will:
+1. Detect your platform and install dependencies.
+2. Build the latest `iket` and `iket-cli` binaries.
+3. Move binaries to `/usr/local/bin`.
+4. Generate a full mTLS certificate chain in `~/.iket/certs`.
+5. Create default production configurations.
+6. Configure and enable a systemd service (`iket.service`).
 
-You can customize the configuration paths using environment variables:
+---
+
+## 🔒 Security Configuration
+
+### TLS & mTLS Setup
+
+To secure the gateway and its management API, enable TLS and mTLS in `config.yaml`:
+
+```yaml
+security:
+  tls:
+    enabled: true
+    certFile: "/home/user/.iket/certs/server.crt"
+    keyFile: "/home/user/.iket/certs/server.key"
+    clientCAFile: "/home/user/.iket/certs/ca.crt"
+    clientAuthType: "RequireAndVerifyClientCert" # Enables mTLS
+```
+
+### Admin Authentication
+
+In addition to mTLS, admin endpoints are protected by Basic Auth:
+
+```yaml
+security:
+  enableBasicAuth: true
+  basicAuthUsers:
+    admin: "${ADMIN_PASSWORD}" # Use env vars for secrets
+```
+
+---
+
+## 🚀 Remote Administration with `iket-cli`
+
+Production environments should be managed remotely using `iket-cli`. 
+
+### Initial Setup on Admin Machine (Client)
+
+1. **Install CLI**: Run the installer on your admin machine.
+2. **Copy Certs**: Transfer `ca.crt`, `client.crt`, and `client.key` from the server to your admin machine.
+3. **Configure**: Update `~/.iket/cli-config.yaml`:
+
+```yaml
+server_url: "https://<your-server-ip>:8080"
+ca_file: "/path/to/ca.crt"
+cert_file: "/path/to/client.crt"
+key_file: "/path/to/client.key"
+skip_verify: false
+```
+
+### Common Admin Tasks
 
 ```bash
-# In .env.prod
-CONFIG_PATH=/app/config/config.yaml
-ROUTES_PATH=/app/config/routes.yaml
-PLUGINS_DIR=/app/plugins
+# Check status
+iket-cli gateway status
 
-# Volume paths (relative to docker-compose location)
-CONFIG_VOLUME=./config
-CERT_VOLUME=./certs
-PLUGINS_VOLUME=./plugins
+# Discovery & update config
+iket-cli gateway config
+iket-cli gateway reload
+
+# Manage services
+iket-cli service list
+iket-cli route disable <route-id>
 ```
 
-### 3. Deploy
+---
+
+## 📦 Docker Deployment
+
+### Building the Image
+```bash
+make docker-build
+```
+
+### Running with Docker Compose
+Use the provided `docker-compose.yaml` which sets up volume mounts for persistence:
 
 ```bash
-# Run deployment script
-./scripts/deploy-prod.sh
+# Start the gateway
+make docker-run
 
-# Or manually
-docker-compose -f docker-compose.prod.yaml up -d
+# Run CLI commands via Docker
+docker-compose run cli gateway status
 ```
 
-## Configuration
-
-### Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `CONFIG_PATH` | `/app/config/config.yaml` | Path to main config file |
-| `ROUTES_PATH` | `/app/config/routes.yaml` | Path to routes config file |
-| `PLUGINS_DIR` | `/app/plugins` | Directory for plugins |
-| `LOG_LEVEL` | `info` | Logging level |
-| `CONFIG_VOLUME` | `./config` | Host path for config directory |
-| `CERT_VOLUME` | `./certs` | Host path for certificates |
-| `PLUGINS_VOLUME` | `./plugins` | Host path for plugins |
-
-### Custom Config Paths
-
-You can mount custom configuration directories:
-
-```bash
-# Example: Use different config paths
-CONFIG_VOLUME=/opt/iket/config
-CERT_VOLUME=/opt/iket/certs
-PLUGINS_VOLUME=/opt/iket/plugins
-```
-
-### Command Line Arguments
-
-The application supports command-line arguments for config paths:
-
-```bash
-# Default command in Dockerfile
-/app/iket --config /app/config/config.yaml --routes /app/config/routes.yaml
-
-# Custom paths
-/app/iket --config /custom/path/config.yaml --routes /custom/path/routes.yaml
-```
+---
 
 ## Production Features
 
 ### Security
-- Non-root user execution
-- Read-only config mounts
-- Secure certificate permissions
-- Network isolation
+- **Non-root user**: The Docker image runs as `iketuser`.
+- **mTLS**: Every administrative request requires a valid client certificate.
+- **Resource Limits**: Configured in `docker-compose.yaml` to prevent exhaustion.
 
 ### Monitoring
-- Health checks for all services
-- Prometheus metrics endpoint
-- Structured logging
-- Graceful shutdown
+- **Prometheus**: Metrics available at `:8080/metrics`.
+- **Structured Logging**: JSON logs for easy ingestion by ELK or Loki.
+- **Health Checks**: Integrated Docker health checks.
 
-### Scalability
-- Stateless application design
-- External database storage
-- Redis caching
-- Load balancer ready
-
-## Services
-
-### Iket Gateway
-- **Ports**: 8080 (HTTP), 8443 (HTTPS)
-- **Health**: `http://localhost:8080/health`
-- **Metrics**: `http://localhost:8080/metrics`
-
-### PostgreSQL
-- **Port**: 5432
-- **Database**: iket_db
-- **Purpose**: Configuration storage
-
-### Redis
-- **Port**: 6379
-- **Purpose**: Caching and sessions
-
-### Keycloak
-- **Port**: 8180
-- **Admin**: `http://localhost:8180/auth`
-- **Purpose**: Authentication and authorization
-
-## Development Override
-
-For development/testing, use the override file:
-
-```bash
-# Development mode with debug logging
-docker-compose -f docker-compose.prod.yaml -f docker-compose.prod.override.yaml up
-```
+---
 
 ## Troubleshooting
 
-### Check Service Status
+### Connectivity Issues
+1. Verify the gateway is listening: `sudo lsof -i :8080` (or 8443).
+2. Check logs: `sudo journalctl -u iket -f` or `docker-compose logs -f`.
+3. Check certificate expiry: `iket-cli cert status`.
+
+### Permission Issues
+Ensure the user running the gateway has read access to certificates and config:
 ```bash
-docker-compose -f docker-compose.prod.yaml ps
+sudo chown -R $USER:$USER ~/.iket
+chmod 700 ~/.iket/certs
 ```
-
-### View Logs
-```bash
-# All services
-docker-compose -f docker-compose.prod.yaml logs
-
-# Specific service
-docker-compose -f docker-compose.prod.yaml logs iket
-```
-
-### Health Checks
-```bash
-# Gateway health
-curl http://localhost:8080/health
-
-# Keycloak health
-curl http://localhost:8180/auth/health
-```
-
-### Common Issues
-
-1. **Config not found**: Ensure config files exist in mounted volumes
-2. **Permission denied**: Check file permissions on mounted directories
-3. **Port conflicts**: Verify ports are not in use by other services
-4. **Database connection**: Ensure PostgreSQL is running and accessible
-
-## Backup and Recovery
-
-### Backup Configuration
-```bash
-# Backup configs
-tar -czf iket-config-backup-$(date +%Y%m%d).tar.gz config/ certs/ plugins/
-
-# Backup databases
-docker-compose -f docker-compose.prod.yaml exec postgres pg_dump -U iket_user iket_db > backup.sql
-```
-
-### Restore Configuration
-```bash
-# Restore configs
-tar -xzf iket-config-backup-YYYYMMDD.tar.gz
-
-# Restart services
-docker-compose -f docker-compose.prod.yaml restart
-```
-
-## Security Considerations
-
-1. **Change default passwords** in `.env.prod`
-2. **Use strong SSL certificates** in production
-3. **Restrict network access** to database ports
-4. **Regular security updates** for base images
-5. **Monitor logs** for suspicious activity
-6. **Backup regularly** and test recovery procedures
 
 ## Performance Tuning
 
-1. **Database connection pooling** in config
-2. **Redis caching** for frequently accessed data
-3. **Load balancer** for high availability
-4. **Resource limits** in docker-compose
-5. **Monitoring and alerting** setup
-
-
-
-
-## 1. **DNS Configuration**
-
-- **Domain Name:**  
-  Register a domain (e.g., `api.example.com`) and point it to the public IP address of your server (where Iket is running).
-- **DNS Record:**  
-  Create an `A` record (for IPv4) or `AAAA` record (for IPv6) in your DNS provider’s dashboard:
-  ```
-  api.example.com  ->  <your-server-ip>
-  ```
-
----
-
-## 2. **TLS/SSL Configuration**
-
-You need a TLS certificate (and private key) for your domain.  
-**Options:**
-- **Let’s Encrypt (Recommended, Free):** Use [certbot](https://certbot.eff.org/) or similar to generate a certificate.
-- **Commercial CA:** Buy a certificate from a provider (e.g., DigiCert, Sectigo).
-
-**You will get:**
-- `fullchain.pem` or `cert.pem` (certificate)
-- `privkey.pem` or `key.pem` (private key)
-
----
-
-## 3. **Iket Gateway TLS Setup**
-
-### **A. Place Certificates**
-- Place your certificate and key in a directory, e.g.:
-  ```
-  certs/server.crt
-  certs/server.key
-  ```
-
-### **B. Update Config**
-Edit your `config/config.yaml` to enable TLS:
-
-```yaml
-server:
-  port: 8080
-  tls:
-    enabled: true
-    certFile: "/app/certs/server.crt"
-    keyFile: "/app/certs/server.key"
-    # (Optional) minVersion: "TLS12"
-    # (Optional) clientCA: "/app/certs/ca.crt"  # for mTLS
-  # ...other settings...
-```
-
-- Make sure the `certFile` and `keyFile` paths match where you mount/copy them in your Docker container.
-
-### **C. Update Docker Compose (if using Docker)**
-Mount the certs directory:
-```yaml
-services:
-  iket:
-    # ...
-    volumes:
-      - ./config:/app/config:ro
-      - ./certs:/app/certs:ro
-    ports:
-      - "8080:8080"
-      - "8443:8443"  # Expose HTTPS port
-```
-- Iket will listen on 8443 for HTTPS if configured.
-
----
-
-## 4. **Firewall/Cloud Configuration**
-
-- Open port **443** (or **8443** if you use that) on your server/cloud firewall.
-- Make sure your DNS points to the correct public IP.
-
----
-
-## 5. **Test**
-
-- Access your gateway via `https://api.example.com` (or your chosen domain).
-- You should see a valid certificate in your browser.
-
----
-
-## 6. **(Optional) Redirect HTTP to HTTPS**
-
-- You can configure Iket or a reverse proxy (like Nginx) to redirect all HTTP traffic to HTTPS for better security.
-
----
-
-## **Summary Table**
-
-| Step                | What to do                                      |
-|---------------------|-------------------------------------------------|
-| DNS                 | Point domain to server IP                       |
-| TLS                 | Obtain cert/key, place in `certs/`              |
-| Iket config         | Enable TLS in `config.yaml`                     |
-| Docker              | Mount `certs/` and expose 8443                  |
-| Firewall            | Open port 443/8443                              |
-| Test                | Visit `https://your-domain`                     |
-
----
-
-
-
-Great! Here’s a concise guide for setting up JWT authentication for both the **gateway** (server) and the **client**:
-
----
-
-## 1. Gateway Side (Server) Setup
-
-**A. For HS256 (symmetric secret):**
-
-In your `config.yaml` (or equivalent), set:
-
-```yaml
-security:
-  jwt:
-    enabled: true
-    secret: "your_hs256_secret"         # Shared secret for HS256
-    algorithms: ["HS256"]               # or ["HS256", "RS256"] if you want both
-    required: true                      # Set to true to require JWT on all routes (unless overridden per route)
-```
-
-**B. For RS256 (asymmetric public/private key):**
-
-1. Generate a key pair (if you don’t have one):
-   ```sh
-   openssl genrsa -out private.pem 2048
-   openssl rsa -in private.pem -pubout -out public.pem
-   ```
-
-2. In your `config.yaml`:
-   ```yaml
-   security:
-     jwt:
-       enabled: true
-       publicKeyFile: "/app/certs/public.pem"  # Path inside the container or host
-       algorithms: ["RS256"]
-       required: true
-   ```
-
-3. Make sure the public key file is accessible to the gateway (mount it in Docker if needed).
-
----
-
-## 2. Client Side (How to Call the Gateway)
-
-**A. For HS256:**
-- The client must send a valid JWT signed with the shared secret (`your_hs256_secret`).
-- Example (using a JWT library, e.g., [jwt.io](https://jwt.io/) or a language-specific library):
-
-```sh
-curl -H "Authorization: Bearer <your_jwt_token>" http://localhost:8080/your/route
-```
-
-- **Note:** `<your_jwt_token>` is a JWT signed with the secret. Do **not** use the secret itself as the token.
-
-**B. For RS256:**
-- The client must send a JWT signed with the **private key** corresponding to the public key the gateway has.
-- Example (using a JWT library):
-
-```sh
-curl -H "Authorization: Bearer <your_jwt_token>" http://localhost:8080/your/route
-```
-
-- **Note:** `<your_jwt_token>` is a JWT signed with the private key.
-
----
-
-## 3. Generating JWTs
-
-- Use a JWT library in your language (e.g., `jsonwebtoken` for Node.js, `pyjwt` for Python, `golang-jwt/jwt` for Go).
-- For HS256, sign with the shared secret.
-- For RS256, sign with the private key.
-
-**Example (HS256, using jwt.io):**
-- Header: `{ "alg": "HS256", "typ": "JWT" }`
-- Payload: `{ "sub": "user1", "exp": <timestamp> }`
-- Sign with: `your_hs256_secret`
-
-**Example (RS256, using jwt.io):**
-- Header: `{ "alg": "RS256", "typ": "JWT" }`
-- Payload: `{ "sub": "user1", "exp": <timestamp> }`
-- Sign with: your private key
-
----
-
-## 4. Per-Route JWT
-
-- In your `routes.yaml` or config, you can override JWT requirements per route:
-  ```yaml
-  routes:
-    - path: "/public"
-      requireJwt: false
-    - path: "/private"
-      requireJwt: true
-  ```
-
----
-
-**Summary:**  
-- Set up JWT config in the gateway (`config.yaml`).
-- For HS256: use a shared secret; for RS256: use a public/private key pair.
-- Clients must send a valid JWT in the `Authorization: Bearer ...` header.
-- Use a JWT library to generate tokens.
-
-If you want a code example for generating a JWT in a specific language, let me know!
-
-
-## Support
-
-For issues and questions:
-1. Check the logs: `docker-compose -f docker-compose.prod.yaml logs`
-2. Verify configuration files
-3. Test connectivity between services
-4. Review environment variables 
+1. Adjust `readTimeout` and `writeTimeout` in `config.yaml` based on your backend latency.
+2. Enable `GOGC` tuning for memory-intensive workloads.
+3. Use `iket-prod` binary (built via `make build-prod`) for optimized static linking.

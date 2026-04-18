@@ -1,597 +1,157 @@
 # Iket Management API Integration Guide
 
-This guide explains how to integrate the management API with the Iket API Gateway to provide a comprehensive management console.
+This guide explains how to integrate and secure the management API of the Iket API Gateway, including the use of `iket-cli` for secure remote administration via mTLS.
 
 ## Overview
 
-The management API provides REST endpoints and WebSocket connections for:
+The Iket Management API provides REST endpoints and WebSocket connections for:
 - Gateway status monitoring
-- Plugin management
-- Route configuration
+- Plugin management (enable/disable/config)
+- Service and Route configuration
 - Real-time metrics and logs
-- Certificate management
-- Backup and restore operations
+- Configuration reloading
 
-## Integration Steps
+All management operations are secured by default using **mTLS (Mutual TLS)** and **HTTP Basic Authentication**.
 
-### 1. Add Management API to Gateway
+---
 
-Update the main gateway application to include the management API:
+## 🔒 Security Configuration
 
-```go
-// In main.go or your main application file
-package main
+### 1. Enable mTLS in Gateway
 
-import (
-    "iket/internal/api"
-    "iket/internal/core/gateway"
-    "iket/internal/logging"
-    "iket/pkg/plugin"
-    // ... other imports
-)
-
-func main() {
-    // ... existing gateway setup ...
-    
-    // Create plugin registry
-    registry := plugin.NewRegistry()
-    
-    // Register built-in plugins
-    // ... plugin registration code ...
-    
-    // Create management API
-    managementAPI := api.NewManagementAPI(gateway, logger, registry)
-    
-    // Register management API routes with the gateway router
-    managementAPI.RegisterRoutes(gateway.GetRouter())
-    
-    // ... start gateway ...
-}
-```
-
-### 2. Update Gateway Router Access
-
-Add a method to the Gateway struct to expose the router for management API registration:
-
-```go
-// In internal/core/gateway/gateway.go
-func (g *Gateway) GetRouter() *mux.Router {
-    return g.router
-}
-```
-
-### 3. Configure Authentication
-
-Set up authentication for the management API endpoints:
+To secure the management endpoints, you must configure TLS and client certificate verification in your `config.yaml`:
 
 ```yaml
-# In config.yaml
 security:
-  basic_auth_users:
-    admin: "admin123"
-    operator: "operator123"
-  
-  jwt:
+  tls:
     enabled: true
-    secret: "your-jwt-secret"
-    algorithms: ["HS256"]
+    certFile: "/app/certs/server.crt"
+    keyFile: "/app/certs/server.key"
+    clientCAFile: "/app/certs/ca.crt"
+    clientAuthType: "RequireAndVerifyClientCert" # MANDATORY for secure admin
+  
+  enableBasicAuth: true
+  basicAuthUsers:
+    admin: "your-secure-password"
 ```
 
-### 4. Enable CORS for Web Dashboard
+### 2. Management Authentication Flow
 
-Add CORS middleware for the management API:
+1. **Transport Layer**: The client must provide a certificate signed by the `clientCAFile` configured on the server.
+2. **Application Layer**: The client must provide valid Basic Auth credentials (username/password) defined in `basicAuthUsers`.
 
-```go
-// In internal/api/management.go
-func (api *ManagementAPI) RegisterRoutes(router *mux.Router) {
-    // Add CORS middleware for management API
-    router.Use(func(next http.Handler) http.Handler {
-        return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-            w.Header().Set("Access-Control-Allow-Origin", "*")
-            w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-            w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-            
-            if r.Method == "OPTIONS" {
-                w.WriteHeader(http.StatusOK)
-                return
-            }
-            
-            next.ServeHTTP(w, r)
-        })
-    })
-    
-    // ... existing route registration ...
-}
+---
+
+## 🛠️ Administrative Tool: `iket-cli`
+
+The `iket-cli` is the recommended way to interact with the Management API. It handles the mTLS handshake and credential management automatically.
+
+### Installation
+```bash
+# Using the ultimate installer
+curl -fsSL https://raw.githubusercontent.com/bhangun/iket/main/scripts/install.sh | bash
 ```
+
+### Configuration (`cli-config.yaml`)
+```yaml
+server_url: "https://localhost:8080"
+ca_file: "/home/user/.iket/certs/ca.crt"
+cert_file: "/home/user/.iket/certs/client.crt"
+key_file: "/home/user/.iket/certs/client.key"
+skip_verify: false
+```
+
+---
 
 ## API Endpoints
+
+All Management API endpoints are prefixed with `/api/v1`.
 
 ### Gateway Management
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/v1/gateway/status` | Get gateway status |
-| GET | `/api/v1/gateway/config` | Get gateway configuration |
+| GET | `/api/v1/gateway/status` | Get gateway health, uptime, and request stats |
+| GET | `/api/v1/gateway/config` | Get current configuration (secrets redacted) |
 | PUT | `/api/v1/gateway/config` | Update gateway configuration |
-| POST | `/api/v1/gateway/reload` | Reload configuration |
-| GET | `/api/v1/gateway/metrics` | Get gateway metrics |
+| POST | `/api/v1/gateway/reload` | Trigger a hot-reload of services and routes |
+
+### Service & Route Management
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/v1/services` | List all services and their defined routes |
+| POST | `/api/v1/services` | Register a new service definition |
+| PUT | `/api/v1/services/{id}` | Update an existing service |
+| DELETE | `/api/v1/services/{id}` | Remove a service |
+| POST | `/api/v1/routes/{id}/enable` | Enable a specific route |
+| POST | `/api/v1/routes/{id}/disable` | Disable a specific route |
 
 ### Plugin Management
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/v1/plugins` | List all plugins |
-| GET | `/api/v1/plugins/{name}` | Get plugin details |
-| PUT | `/api/v1/plugins/{name}/config` | Update plugin config |
-| POST | `/api/v1/plugins/{name}/enable` | Enable plugin |
-| POST | `/api/v1/plugins/{name}/disable` | Disable plugin |
-| GET | `/api/v1/plugins/{name}/health` | Get plugin health |
-| GET | `/api/v1/plugins/{name}/status` | Get plugin status |
-
-### Route Management
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/v1/routes` | List all routes |
-| POST | `/api/v1/routes` | Create new route |
-| GET | `/api/v1/routes/{id}` | Get route details |
-| PUT | `/api/v1/routes/{id}` | Update route |
-| DELETE | `/api/v1/routes/{id}` | Delete route |
-| POST | `/api/v1/routes/{id}/enable` | Enable route |
-| POST | `/api/v1/routes/{id}/disable` | Disable route |
-
-### Monitoring & Logs
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/v1/logs` | Get recent logs |
-| GET | `/api/v1/logs/stream` | Stream logs (SSE) |
-| GET | `/api/v1/metrics/system` | Get system metrics |
-
-### WebSocket Endpoints
-
-| Endpoint | Description |
-|----------|-------------|
-| `/api/v1/ws/status` | Real-time status updates |
-| `/api/v1/ws/metrics` | Real-time metrics updates |
-| `/api/v1/ws/logs` | Real-time log updates |
+| GET | `/api/v1/plugins` | List all active and available plugins |
+| PUT | `/api/v1/plugins/{name}/config` | Update a plugin's global configuration |
+| POST | `/api/v1/plugins/{name}/enable` | Enable a plugin globally |
+| POST | `/api/v1/plugins/{name}/disable` | Disable a plugin globally |
 
 ---
 
-## Service Management API
+## Programmatic Integration (Go)
 
-### `/api/v1/services`
-
-#### Supported Methods
-- `GET /api/v1/services` — List all services and their routes (non-sensitive info)
-- `POST /api/v1/services` — (Planned) Create a new service
-- `PUT /api/v1/services/{id}` — (Planned) Update a service
-- `DELETE /api/v1/services/{id}` — (Planned) Delete a service
-
-#### **GET /api/v1/services**
-Returns all service definitions currently loaded by the gateway, including their routes, but omits sensitive information (such as backend URLs and secrets).
-
-**Request:**
-```http
-GET /api/v1/services
-Authorization: Basic <base64(username:password)>
-```
-
-**Response:**
-- Status: 200 OK
-- Content-Type: application/json
-
-```json
-{
-  "services": [
-    {
-      "name": "User Service",
-      "description": "Handles user registration and authentication",
-      "host": "http://user-service:8000",
-      "base_path": "/user",
-      "tags": ["public", "auth"],
-      "group": "authentication",
-      "routes": [
-        {
-          "path": "/register",
-          "method": "POST",
-          "name": "User Registration",
-          "description": "Registers a new user",
-          "tags": ["public"],
-          "group": null,
-          "priority": 1,
-          "enabled": true
-        }
-      ]
-    }
-  ]
-}
-```
-
-**Service Object Fields:**
-- `name` (string): Service name
-- `description` (string): Service description
-- `host` (string): Upstream host for the service
-- `base_path` (string|null): Base path for the service
-- `tags` (array of string): Tags for the service
-- `group` (string|null): Service group
-- `routes` (array of Route): List of route definitions
-
----
-
-### Service BasePath vs. Route StripPath
-
-- **Service `base_path`:**
-  - Defines a common prefix for all routes in a service (e.g., `/api/v1/users`).
-  - Used for grouping and matching incoming requests to the correct service.
-
-- **Route `stripPath`:**
-  - If `true`, the gateway removes the route's path prefix before forwarding the request to the backend.
-  - Useful when your backend expects the path to start after the prefix (e.g., `/api/v1/users/profile` → `/profile`).
-  - If `false`, the full path is forwarded to the backend.
-
-**Example:**
-- Gateway route: `/api/v1/users/profile`
-- Service base path: `/api/v1/users`
-- Backend expects: `/profile`
-- Set `stripPath: true` in the route config.
-
----
-
-**Route Object Fields:**
-- `path` (string): Route path
-- `method` (string): HTTP method (e.g., GET, POST)
-- `name` (string): Route name
-- `description` (string): Route description
-- `tags` (array of string): Tags for the route
-- `group` (string|null): Route group
-- `priority` (integer): Route priority
-- `enabled` (boolean): Whether the route is enabled
-- `stripPath` (boolean): Whether to remove the route's prefix before proxying to the backend
-
-> **Note:** Use `stripPath: true` if your backend does not expect the full route prefix.
-
----
-
-## Client Examples
-
-### Go Client
+If you are building a custom management dashboard in Go, use the `APIClient` provided in the Iket package.
 
 ```go
 package main
 
 import (
     "fmt"
-    "iket/example/api_client"
+    "github.com/bhangun/iket/pkg/api_client" // Use the provided client
 )
 
 func main() {
-    client := api_client.NewAPIClient("http://localhost:8080/api/v1", "admin", "admin123")
-    
-    // Get gateway status
-    status, err := client.GetGatewayStatus()
+    // Initialize secure client
+    client, err := api_client.NewAPIClient(
+        "https://iket-server:8080",
+        false,                      // skipVerify
+        "/path/to/ca.crt",
+        "/path/to/client.crt",
+        "/path/to/client.key",
+    )
     if err != nil {
-        fmt.Printf("Error: %v\n", err)
-        return
+        panic(err)
     }
-    
-    fmt.Printf("Gateway Status: %s\n", status.Status)
+
+    // Call management endpoints
+    status, err := client.Do("GET", "/api/v1/gateway/status", nil)
+    fmt.Println(string(status))
 }
 ```
 
-### Flutter Client
+---
 
-```dart
-import 'package:http/http.dart' as http;
-import 'dart:convert';
+## WebSocket for Real-time Monitoring
 
-class IketAPIClient {
-  final String baseUrl;
-  final String username;
-  final String password;
-  
-  IketAPIClient(this.baseUrl, this.username, this.password);
-  
-  Map<String, String> get _authHeaders {
-    final credentials = base64Encode(utf8.encode('$username:$password'));
-    return {
-      'Authorization': 'Basic $credentials',
-      'Content-Type': 'application/json',
-    };
-  }
-  
-  Future<Map<String, dynamic>> getGatewayStatus() async {
-    final response = await http.get(
-      Uri.parse('$baseUrl/gateway/status'),
-      headers: _authHeaders,
-    );
-    
-    if (response.statusCode == 200) {
-      return json.decode(response.body);
-    } else {
-      throw Exception('Failed to get gateway status');
-    }
-  }
-}
-```
+Iket provides WebSockets for real-time streaming of events and metrics.
 
-### JavaScript/TypeScript Client
+| Endpoint | Description |
+|----------|-------------|
+| `/api/v1/logs/stream` | Stream server logs in real-time |
+| `/api/v1/metrics/system` | Get live system resource usage (CPU/Mem) |
 
-```typescript
-class IketAPIClient {
-  private baseUrl: string;
-  private username: string;
-  private password: string;
-  
-  constructor(baseUrl: string, username: string, password: string) {
-    this.baseUrl = baseUrl;
-    this.username = username;
-    this.password = password;
-  }
-  
-  private getAuthHeaders(): Record<string, string> {
-    const credentials = btoa(`${this.username}:${this.password}`);
-    return {
-      'Authorization': `Basic ${credentials}`,
-      'Content-Type': 'application/json',
-    };
-  }
-  
-  async getGatewayStatus(): Promise<any> {
-    const response = await fetch(`${this.baseUrl}/gateway/status`, {
-      headers: this.getAuthHeaders(),
-    });
-    
-    if (response.ok) {
-      return response.json();
-    } else {
-      throw new Error('Failed to get gateway status');
-    }
-  }
-}
-```
-
-## WebSocket Integration
-
-### Connect to Real-time Updates
-
-```javascript
-// Status updates
-const statusWs = new WebSocket('ws://localhost:8080/api/v1/ws/status');
-statusWs.onmessage = (event) => {
-  const data = JSON.parse(event.data);
-  if (data.type === 'status_update') {
-    updateGatewayStatus(data.data);
-  }
-};
-
-// Metrics updates
-const metricsWs = new WebSocket('ws://localhost:8080/api/v1/ws/metrics');
-metricsWs.onmessage = (event) => {
-  const data = JSON.parse(event.data);
-  if (data.type === 'metrics_update') {
-    updateMetrics(data.data);
-  }
-};
-
-// Log updates
-const logsWs = new WebSocket('ws://localhost:8080/api/v1/ws/logs');
-logsWs.onmessage = (event) => {
-  const data = JSON.parse(event.data);
-  if (data.type === 'log_entry') {
-    addLogEntry(data.data);
-  }
-};
-```
-
-## Security Considerations
-
-### 1. Authentication
-
-- Use strong passwords for admin accounts
-- Consider implementing JWT tokens for better security
-- Use HTTPS in production environments
-
-### 2. Authorization
-
-- Implement role-based access control (RBAC)
-- Differentiate between admin and operator roles
-- Restrict sensitive operations to admin users only
-
-### 3. Network Security
-
-- Use firewall rules to restrict access to management API
-- Consider VPN access for remote management
-- Implement IP whitelisting for admin access
-
-### 4. Rate Limiting
-
-- Apply rate limiting to management API endpoints
-- Different limits for read vs write operations
-- Monitor for suspicious activity
-
-## Monitoring and Alerting
-
-### 1. Health Checks
-
-```bash
-# Check management API health
-curl -u admin:admin123 http://localhost:8080/api/v1/gateway/status
-```
-
-### 2. Metrics Collection
-
-The management API provides metrics that can be collected by monitoring systems:
-
-- Request rates and response times
-- Plugin health status
-- Route performance metrics
-- System resource usage
-
-### 3. Logging
-
-All management API operations are logged for audit purposes:
-
-- Configuration changes
-- Plugin enable/disable operations
-- Route modifications
-- Authentication attempts
-
-## Deployment Considerations
-
-### 1. Production Configuration
-
-```yaml
-# Production config.yaml
-server:
-  port: 8080
-  management_port: 8081  # Separate port for management API
-  
-security:
-  basic_auth_users:
-    admin: "${ADMIN_PASSWORD}"  # Use environment variables
-    operator: "${OPERATOR_PASSWORD}"
-  
-  jwt:
-    enabled: true
-    secret: "${JWT_SECRET}"
-    algorithms: ["HS256"]
-```
-
-### 2. Docker Deployment
-
-```dockerfile
-# Dockerfile
-FROM golang:1.21-alpine AS builder
-WORKDIR /app
-COPY . .
-RUN go build -o iket cmd/iket/main.go
-
-FROM alpine:latest
-RUN apk --no-cache add ca-certificates
-WORKDIR /root/
-COPY --from=builder /app/iket .
-COPY config.yaml .
-EXPOSE 8080 8081
-CMD ["./iket"]
-```
-
-### 3. Kubernetes Deployment
-
-```yaml
-# k8s-deployment.yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: iket-gateway
-spec:
-  replicas: 3
-  selector:
-    matchLabels:
-      app: iket-gateway
-  template:
-    metadata:
-      labels:
-        app: iket-gateway
-    spec:
-      containers:
-      - name: iket-gateway
-        image: iket-gateway:latest
-        ports:
-        - containerPort: 8080
-        - containerPort: 8081
-        env:
-        - name: ADMIN_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: iket-secrets
-              key: admin-password
-        - name: JWT_SECRET
-          valueFrom:
-            secretKeyRef:
-              name: iket-secrets
-              key: jwt-secret
-```
+---
 
 ## Troubleshooting
 
-### Common Issues
+### 1. "TLS handshake error: remote error: tls: bad certificate"
+- **Cause**: The client did not provide a certificate, or the certificate is not signed by the CA configured in `clientCAFile`.
+- **Solution**: Ensure your `cli-config.yaml` points to the correct `cert_file` and `key_file`.
 
-1. **Authentication Failures**
-   - Verify username/password in configuration
-   - Check that Basic Auth is properly configured
-   - Ensure JWT tokens are valid (if using JWT)
+### 2. "401 Unauthorized"
+- **Cause**: mTLS succeeded, but the Basic Auth credentials provided in the header are invalid.
+- **Solution**: Check your `basicAuthUsers` in the server `config.yaml`.
 
-2. **CORS Errors**
-   - Verify CORS headers are set correctly
-   - Check that the web dashboard origin is allowed
-   - Ensure preflight requests are handled
-
-3. **WebSocket Connection Issues**
-   - Verify WebSocket endpoints are accessible
-   - Check for proxy/firewall blocking WebSocket connections
-   - Ensure proper WebSocket upgrade handling
-
-4. **Plugin Management Issues**
-   - Verify plugin registry is properly initialized
-   - Check plugin configuration format
-   - Ensure plugins implement required interfaces
-
-### Debug Mode
-
-Enable debug logging for the management API:
-
-```go
-// In your main application
-logger.SetLevel(logging.DebugLevel)
-```
-
-### Health Check Endpoint
-
-Use the built-in health check endpoint:
-
-```bash
-curl http://localhost:8080/health
-```
-
-## Next Steps
-
-1. **Implement Role-Based Access Control (RBAC)**
-2. **Add Audit Logging**
-3. **Implement Configuration Validation**
-4. **Add Metrics Export (Prometheus)**
-5. **Create Custom Dashboard Themes**
-6. **Implement Multi-Tenant Support**
-7. **Add API Documentation (Swagger/OpenAPI)** 
-
-
-
-
-```
-curl -X POST -u admin:admin123 http://localhost:7110/api/v1/services \
-  -H "Content-Type: application/json" \
-  -d '{
-    "services": [
-      {
-        "name": "E-commerce",
-        "description": "Online shop",
-        "host": "http://olshop-service:8000",
-        "base_path": "/olshop",
-        "tags": ["public", "product"],
-        "group": "olshop",
-        "routes": [
-          {
-            "path": "/product",
-            "method": "POST",
-            "name": "Product",
-            "description": "Create new product",
-            "tags": ["public"],
-            "group": null,
-            "priority": 1,
-            "enabled": true
-          }
-        ]
-      }
-    ]
-  }'
-```
+### 3. "Connection refused"
+- **Cause**: The server is not listening on the expected port or TLS is not enabled.
+- **Solution**: Verify the `port` and `security.tls.enabled` settings in `config.yaml`.

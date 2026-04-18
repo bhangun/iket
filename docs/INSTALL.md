@@ -6,19 +6,35 @@
 
 Get up and running in seconds with our ultimate installer:
 
+**Full Gateway Setup:**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/bhangun/iket/main/scripts/install.sh | bash
+```
+
+**CLI Only (for remote administration):**
+```bash
+curl -fsSL https://raw.githubusercontent.com/bhangun/iket/main/scripts/install.sh | bash -s -- --cli-only
 ```
 
 This script automates everything for you:
 *   **Auto-Dependency Check**: Detects and installs missing tools (`git`, `go`, `make`, `openssl`).
 *   **Platform Detection**: Auto-detects Linux (Debian, Ubuntu, Fedora, RHEL, CentOS, Arch) or macOS.
 *   **Source Preparation**: Clones the latest code from GitHub.
-*   **Building**: Compiles `iket` and `iket-cli` using Go.
+*   **Building**: Compiles `iket` and `iket-cli` (or just `iket-cli` in CLI mode).
 *   **Installation**: Moves binaries to `/usr/local/bin`.
-*   **Security (mTLS)**: Generates CA, Server, and Client certificates in `~/.iket/certs`.
+*   **Security (mTLS)**: Generates CA, Server, and Client certificates in `~/.iket/certs` (Full mode only).
 *   **Configuration**: Creates default `config.yaml` and `cli-config.yaml`.
-*   **Persistence**: Configures and enables a systemd service (Linux only).
+*   **Persistence**: Configures and enables a systemd service (Full mode, Linux only).
+
+---
+
+## Installation Modes
+
+### 1. Full Gateway Setup (Default)
+Installs the Iket Gateway server, the CLI tool, generates certificates, and sets up a system service. Use this on the machine that will act as your API Gateway.
+
+### 2. CLI-Only Setup (`--cli-only`)
+Installs only the `iket-cli` binary and creates the configuration directory. Use this on your local machine or admin workstation to manage a remote Iket Gateway.
 
 ---
 
@@ -153,9 +169,9 @@ iket-cli --config ~/.iket/cli-config.yaml gateway config
 To manage an Iket Gateway from your local computer or a different admin machine, follow these steps:
 
 ### 1. Install `iket-cli` on Client Machine
-Run the ultimate installer on your client machine to get the CLI binary:
+Run the ultimate installer with the `--cli-only` flag to get just the CLI binary:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/bhangun/iket/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/bhangun/iket/main/scripts/install.sh | bash -s -- --cli-only
 ```
 
 ### 2. Copy Certificates from Server
