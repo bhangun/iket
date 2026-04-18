@@ -79,11 +79,13 @@ type RouterConfig struct {
 
 // TLSConfig represents TLS configuration
 type TLSConfig struct {
-	Enabled    bool     `yaml:"enabled"`
-	CertFile   string   `yaml:"certFile"`
-	KeyFile    string   `yaml:"keyFile"`
-	MinVersion string   `yaml:"minVersion"`
-	Ciphers    []string `yaml:"ciphers"`
+	Enabled        bool     `yaml:"enabled"`
+	CertFile       string   `yaml:"certFile"`
+	KeyFile        string   `yaml:"keyFile"`
+	ClientCAFile   string   `yaml:"clientCAFile"`
+	ClientAuthType string   `yaml:"clientAuthType"` // NoClientCert, RequestClientCert, RequireAnyClientCert, VerifyClientCertIfGiven, RequireAndVerifyClientCert
+	MinVersion     string   `yaml:"minVersion"`
+	Ciphers        []string `yaml:"ciphers"`
 }
 
 type WebSocketOptions struct {

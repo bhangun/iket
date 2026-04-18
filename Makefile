@@ -16,6 +16,11 @@ build: ## Build the main gateway binary
 	go build -ldflags "-X 'github.com/bhangun/iket/pkg/app.Version=$(VERSION)'" -o bin/iket ./cmd/iket/main.go
 	@echo "Build complete: bin/iket"
 
+build-cli: ## Build the CLI binary
+	@echo "Building Iket CLI..."
+	go build -o bin/iket-cli ./cmd/iket-cli/*.go
+	@echo "Build complete: bin/iket-cli"
+
 build-basic: ## Build with basic tags (no storage dependencies)
 	@echo "Building Iket Gateway (basic mode)..."
 	go build -tags="basic" -ldflags="-w -s" -o bin/iket-basic ./

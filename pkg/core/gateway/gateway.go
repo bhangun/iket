@@ -2,6 +2,8 @@ package gateway
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -400,12 +402,70 @@ func (g *Gateway) Serve(ctx context.Context) error {
 
 	g.server = server
 
-	// Start server in goroutine
-	go func() {
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			g.logger.Error("Server error", err)
+	// Setup TLS if enabled
+	if g.config.Security.TLS.Enabled {
+		tlsConfig := &tls.Config{
+			MinVersion: tls.VersionTLS12,
 		}
-	}()
+
+		// Set minimum TLS version if configured
+		switch g.config.Security.TLS.MinVersion {
+		case "TLS1.0":
+			tlsConfig.MinVersion = tls.VersionTLS10
+		case "TLS1.1":
+			tlsConfig.MinVersion = tls.VersionTLS11
+		case "TLS1.2":
+			tlsConfig.MinVersion = tls.VersionTLS12
+		case "TLS1.3":
+			tlsConfig.MinVersion = tls.VersionTLS13
+		}
+
+		// Setup mTLS if configured
+		if g.config.Security.TLS.ClientCAFile != "" {
+			caCert, err := os.ReadFile(g.config.Security.TLS.ClientCAFile)
+			if err != nil {
+				return fmt.Errorf("failed to read client CA file: %w", err)
+			}
+
+			caPool := x509.NewCertPool()
+			if !caPool.AppendCertsFromPEM(caCert) {
+				return fmt.Errorf("failed to append client CA certificate to pool")
+			}
+
+			tlsConfig.ClientCAs = caPool
+
+			// Set client auth type
+			switch g.config.Security.TLS.ClientAuthType {
+			case "RequestClientCert":
+				tlsConfig.ClientAuth = tls.RequestClientCert
+			case "RequireAnyClientCert":
+				tlsConfig.ClientAuth = tls.RequireAnyClientCert
+			case "VerifyClientCertIfGiven":
+				tlsConfig.ClientAuth = tls.VerifyClientCertIfGiven
+			case "RequireAndVerifyClientCert":
+				tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
+			default:
+				tlsConfig.ClientAuth = tls.NoClientCert
+			}
+		}
+
+		server.TLSConfig = tlsConfig
+
+		// Start server in goroutine
+		go func() {
+			g.logger.Info("Starting TLS server", logging.String("cert", g.config.Security.TLS.CertFile))
+			if err := server.ListenAndServeTLS(g.config.Security.TLS.CertFile, g.config.Security.TLS.KeyFile); err != nil && err != http.ErrServerClosed {
+				g.logger.Error("TLS Server error", err)
+			}
+		}()
+	} else {
+		// Start server in goroutine (Plain HTTP)
+		go func() {
+			if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				g.logger.Error("Server error", err)
+			}
+		}()
+	}
 
 	// Wait for shutdown signal
 	<-g.shutdown
