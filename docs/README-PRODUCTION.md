@@ -48,65 +48,59 @@ This script will:
 
 ## 🔒 Security Configuration
 
-### TLS & mTLS Setup
+### TLS & mTLS Setup (Production)
 
-To secure the gateway and its management API, enable TLS and mTLS in `config.yaml`:
+For production, it is **mandatory** to use TLS 1.3 and mTLS for the management API.
 
-```yaml
-security:
-  tls:
-    enabled: true
-    certFile: "/home/user/.iket/certs/server.crt"
-    keyFile: "/home/user/.iket/certs/server.key"
-    clientCAFile: "/home/user/.iket/certs/ca.crt"
-    clientAuthType: "RequireAndVerifyClientCert" # Enables mTLS
-```
+1.  **Configure Gateway (`config.yaml`)**:
+    Ensure your server configuration points to valid production certificates:
+    ```yaml
+    security:
+      tls:
+        enabled: true
+        certFile: "/etc/iket/certs/server.crt"
+        keyFile: "/etc/iket/certs/server.key"
+        clientCAFile: "/etc/iket/certs/ca.crt"
+        clientAuthType: "RequireAndVerifyClientCert" # Mandatory for mTLS
+    ```
 
-### Admin Authentication
+2.  **Configure Admin CLI**:
+    Use the guided setup to securely link your local CLI to the remote production instance:
+    ```bash
+    iket-cli setup
+    ```
+    *   **URL**: Use `https://api.yourdomain.com:8443`
+    *   **mTLS**: `y`
+    *   **Certs**: Point to your local copies of `ca.crt`, `client.crt`, and `client.key`.
 
-In addition to mTLS, admin endpoints are protected by Basic Auth:
-
-```yaml
-security:
-  enableBasicAuth: true
-  basicAuthUsers:
-    admin: "${ADMIN_PASSWORD}" # Use env vars for secrets
-```
+### Production Hardening
+- **Firewall**: Only expose port `443` (public traffic) and `8443` (management traffic) if necessary. Ideally, keep `8443` behind a VPN.
+- **Certificate Rotation**: Regularly rotate client certificates and the Server TLS certificate.
+- **Non-root**: Always run the gateway as a non-privileged user (the default Docker image uses `iketuser`).
 
 ---
 
 ## 🚀 Remote Administration with `iket-cli`
 
-Production environments should be managed remotely using `iket-cli`. 
+Production environments are managed via **Contexts**. This prevents accidentally running commands against the wrong environment.
 
-### Initial Setup on Admin Machine (Client)
-
-1. **Install CLI**: Run the installer on your admin machine.
-2. **Copy Certs**: Transfer `ca.crt`, `client.crt`, and `client.key` from the server to your admin machine.
-3. **Configure**: Update `~/.iket/cli-config.yaml`:
-
-```yaml
-server_url: "https://<your-server-ip>:8080"
-ca_file: "/path/to/ca.crt"
-cert_file: "/path/to/client.crt"
-key_file: "/path/to/client.key"
-skip_verify: false
-```
-
-### Common Admin Tasks
-
+### Managing Production
 ```bash
-# Check status
+# 1. Switch to production context
+iket-cli context use prod
+
+# 2. Verify connectivity
 iket-cli gateway status
 
-# Discovery & update config
-iket-cli gateway config
+# 3. Safe reloads after config changes
 iket-cli gateway reload
-
-# Manage services
-iket-cli service list
-iket-cli route disable <route-id>
 ```
+
+### Automatic Configuration Persistence
+Iket Gateway now features **Automatic File Persistence**. When you make changes via `iket-cli` (e.g., adding a service or updating a route), the gateway automatically saves these changes back to your `config.yaml` or `service.yaml`.
+
+- **Atomic Writes**: Changes are written to a temporary file and then moved to the final destination. This prevents file corruption even if the system crashes during a write.
+- **Sticky Changes**: All remote modifications survive gateway restarts, making the CLI a reliable tool for long-term administration.
 
 ---
 

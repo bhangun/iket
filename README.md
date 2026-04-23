@@ -54,27 +54,35 @@ iket --config ~/.iket/config.yaml
 
 ## 🛠️ Remote Administration with `iket-cli`
 
-Iket provides a powerful CLI for remote administration. All communication is secured via mTLS.
+Iket provides a powerful CLI for remote administration. It supports multiple environment profiles (contexts) and secure mTLS communication.
+
+### Getting Started
+
+```bash
+# Guided setup to connect to a local or remote gateway
+iket-cli setup
+
+# List all configured contexts (environments)
+iket-cli context list
+
+# Switch between environments (e.g., local, docker, prod)
+iket-cli context use <context-name>
+```
 
 ### Basic Commands
 
 ```bash
-# Check gateway status
+# Check gateway status of the active context
 iket-cli gateway status
-
-# View current configuration
-iket-cli gateway config
-
-# Manage services and routes
-iket-cli service list
-iket-cli route disable <route-id>
-
-# Plugin management
-iket-cli plugin list
-iket-cli plugin enable <plugin-name>
-
+...
 # Certificate management
 iket-cli cert status
+```
+
+### Environment Overrides
+You can override the active context using environment variables:
+```bash
+IKET_SERVER_URL=http://localhost:7100 iket-cli gateway status
 ```
 
 ---
@@ -150,6 +158,8 @@ docker-compose up --build
 ## 📚 Documentation
 
 - [Installation Guide](docs/INSTALL.md)
+- [CLI Command Reference](docs/CLI_COMMANDS.md)
+- [API Key Management](docs/API_KEY_MANAGEMENT.md)
 - [Plugin Quickstart](docs/PLUGIN_QUICKSTART.md)
 - [API Reference](docs/API.md)
 

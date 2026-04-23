@@ -53,12 +53,19 @@ curl -fsSL https://raw.githubusercontent.com/bhangun/iket/main/scripts/install.s
 ```
 
 ### Configuration (`cli-config.yaml`)
-```yaml
-server_url: "https://localhost:8080"
-ca_file: "/home/user/.iket/certs/ca.crt"
-cert_file: "/home/user/.iket/certs/client.crt"
-key_file: "/home/user/.iket/certs/client.key"
-skip_verify: false
+`iket-cli` manages its settings in `~/.iket/cli-config.yaml`. The easiest way to configure it is via the guided setup:
+```bash
+iket-cli setup
+```
+
+Alternatively, you can manage multiple **Contexts** manually:
+```bash
+# Add a remote production context
+iket-cli context add prod \
+  --url https://api.yourdomain.com:8443 \
+  --ca ~/.iket/certs/ca.crt \
+  --cert ~/.iket/certs/client.crt \
+  --key ~/.iket/certs/client.key
 ```
 
 ---

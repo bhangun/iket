@@ -17,6 +17,8 @@ import (
 	"github.com/bhangun/iket/pkg/logging"
 	"github.com/bhangun/iket/pkg/metrics"
 	"github.com/bhangun/iket/pkg/plugin"
+	_ "github.com/bhangun/iket/pkg/plugin/apikey"
+	_ "github.com/bhangun/iket/pkg/plugin/jwt"
 
 	pluginlib "plugin"
 
@@ -26,11 +28,12 @@ import (
 // Gateway represents the main API gateway instance.
 // It handles request routing, middleware execution, and plugin management.
 type Gateway struct {
-	config  *config.Config
-	router  *mux.Router
-	metrics *metrics.Collector
-	logger  *logging.Logger
-	server  *http.Server
+	config         *config.Config
+	configProvider config.Provider
+	router         *mux.Router
+	metrics        *metrics.Collector
+	logger         *logging.Logger
+	server         *http.Server
 
 	// State management
 	mu       sync.RWMutex
@@ -43,10 +46,11 @@ type Gateway struct {
 
 // Dependencies contains all the dependencies required to create a Gateway
 type Dependencies struct {
-	Config   *config.Config
-	Logger   *logging.Logger
-	Metrics  *metrics.Collector
-	Registry *plugin.Registry // <-- Added Registry field
+	Config         *config.Config
+	ConfigProvider config.Provider
+	Logger         *logging.Logger
+	Metrics        *metrics.Collector
+	Registry       *plugin.Registry // <-- Added Registry field
 }
 
 // NewGateway creates a new Gateway instance with the provided dependencies
@@ -66,6 +70,7 @@ func NewGateway(deps Dependencies, version string) (*Gateway, error) {
 
 	gateway := &Gateway{
 		config:         deps.Config,
+		configProvider: deps.ConfigProvider,
 		router:         mux.NewRouter(),
 		metrics:        deps.Metrics,
 		logger:         deps.Logger,
@@ -77,22 +82,29 @@ func NewGateway(deps Dependencies, version string) (*Gateway, error) {
 		gateway.pluginRegistry = plugin.NewRegistry()
 	}
 
+	return gateway, nil
+}
+
+// Initialize performs the actual setup of routes, middleware and plugins.
+// This should be called after external handlers (like Management API) have been registered
+// to the router, ensuring they are not shadowed by wildcard proxy routes.
+func (g *Gateway) Initialize() error {
 	// Setup routes and middleware
-	if err := gateway.setupRoutes(); err != nil {
-		return nil, fmt.Errorf("failed to setup routes: %w", err)
+	if err := g.setupRoutes(); err != nil {
+		return fmt.Errorf("failed to setup routes: %w", err)
 	}
 
-	if err := gateway.setupMiddleware(); err != nil {
-		return nil, fmt.Errorf("failed to setup middleware: %w", err)
+	if err := g.setupMiddleware(); err != nil {
+		return fmt.Errorf("failed to setup middleware: %w", err)
 	}
 
 	// Load built-in and external plugins
-	if err := gateway.loadPlugins(); err != nil {
-		return nil, fmt.Errorf("failed to load plugins: %w", err)
+	if err := g.loadPlugins(); err != nil {
+		return fmt.Errorf("failed to load plugins: %w", err)
 	}
 
-	gateway.logger.Info("Gateway initialized successfully")
-	return gateway, nil
+	g.logger.Info("Gateway initialized successfully")
+	return nil
 }
 
 // setupRoutes configures all the routes for the gateway
@@ -331,6 +343,25 @@ func (g *Gateway) addProxyRoute(route config.RouterConfig) error {
 		if len(route.Roles) > 0 {
 			handler = requireRolesMiddleware(route.Roles)(handler)
 		}
+
+		// Scope and Group enforcement
+		service := g.config.FindServiceForRoute(route.Path, "")
+		if service != nil {
+			// Enforce service-level grouping
+			if service.Group != "" {
+				handler = requireGroupMiddleware(service.Group)(handler)
+			}
+
+			// Enforce scopes (merge service and route level)
+			allRequiredScopes := append([]string{}, service.Scopes...)
+			allRequiredScopes = append(allRequiredScopes, route.Scopes...)
+			if len(allRequiredScopes) > 0 {
+				handler = requireScopesMiddleware(allRequiredScopes)(handler)
+			}
+		} else if len(route.Scopes) > 0 {
+			// Only route-level scopes if no parent service found
+			handler = requireScopesMiddleware(route.Scopes)(handler)
+		}
 	}
 
 	// Apply route-specific timeout if configured
@@ -511,6 +542,14 @@ func (g *Gateway) UpdateConfig(cfg *config.Config) error {
 		return errors.NewConfigError("invalid configuration", err)
 	}
 
+	// Persist configuration if provider is available
+	if g.configProvider != nil {
+		if err := g.configProvider.Save(cfg); err != nil {
+			g.logger.Error("Failed to persist configuration changes", err)
+			return fmt.Errorf("failed to persist configuration: %w", err)
+		}
+	}
+
 	g.config = cfg
 
 	// Rebuild routes
@@ -629,6 +668,45 @@ func requireRolesMiddleware(requiredRoles []string) func(http.Handler) http.Hand
 			}
 			w.WriteHeader(http.StatusForbidden)
 			w.Write([]byte(`{"error":"Forbidden","message":"Insufficient roles"}`))
+		})
+	}
+}
+
+// requireScopesMiddleware returns a middleware that enforces at least one required scope
+func requireScopesMiddleware(requiredScopes []string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			scopes, ok := r.Context().Value("apikey_scopes").([]string)
+			if !ok || len(scopes) == 0 {
+				w.WriteHeader(http.StatusForbidden)
+				w.Write([]byte(`{"error":"Forbidden","message":"No scopes found for client"}`))
+				return
+			}
+			for _, required := range requiredScopes {
+				for _, actual := range scopes {
+					if required == actual {
+						next.ServeHTTP(w, r)
+						return
+					}
+				}
+			}
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"Forbidden","message":"Insufficient scopes"}`))
+		})
+	}
+}
+
+// requireGroupMiddleware returns a middleware that enforces the required client group
+func requireGroupMiddleware(requiredGroup string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			clientGroup, ok := r.Context().Value("apikey_group").(string)
+			if !ok || clientGroup != requiredGroup {
+				w.WriteHeader(http.StatusForbidden)
+				w.Write([]byte(`{"error":"Forbidden","message":"Client group mismatch"}`))
+				return
+			}
+			next.ServeHTTP(w, r)
 		})
 	}
 }

@@ -19,6 +19,7 @@ import (
 	"github.com/bhangun/iket/pkg/logging"
 	"github.com/bhangun/iket/pkg/metrics"
 	"github.com/bhangun/iket/pkg/plugin"
+	_ "github.com/bhangun/iket/pkg/plugin/apikey"
 	_ "github.com/bhangun/iket/pkg/plugin/circuitbreaker"
 	_ "github.com/bhangun/iket/pkg/plugin/cors"
 	_ "github.com/bhangun/iket/pkg/plugin/ipwhitelist"
@@ -137,35 +138,38 @@ func main() {
 	logger.Info("Iket Gateway version", logging.String("version", version))
 	logger.Info("Starting Iket Gateway")
 
+	// Initialize configuration provider
+	provider := config.NewFileProvider(*configPath, *servicesPath, logger)
+
 	// Load configuration
-	cfg, err := config.LoadConfig(*configPath, *servicesPath, logger)
+	cfg, err := provider.Load()
 	if err != nil {
-		logger.Fatal("Failed to load configuration", logging.Error(err))
+	        logger.Fatal("Failed to load configuration", logging.Error(err))
 	}
 
 	if *printConfig {
-		if cfg.Security.Jwt.Secret != "" {
-			cfg.Security.Jwt.Secret = "REDACTED"
-		}
-		cfg.Security.BasicAuthUsers = nil
-		b, _ := json.MarshalIndent(cfg, "", "  ")
-		fmt.Println(string(b))
-		os.Exit(0)
+	        if cfg.Security.Jwt.Secret != "" {
+	                cfg.Security.Jwt.Secret = "REDACTED"
+	        }
+	        cfg.Security.BasicAuthUsers = nil
+	        b, _ := json.MarshalIndent(cfg, "", "  ")
+	        fmt.Println(string(b))
+	        os.Exit(0)
 	}
 
 	// Allow port override: --port > IKET_PORT env > config file
 	if *portFlag > 0 {
-		cfg.Server.Port = *portFlag
-		logger.Info("Overriding port from --port flag", logging.Int("port", cfg.Server.Port))
+	        cfg.Server.Port = *portFlag
+	        logger.Info("Overriding port from --port flag", logging.Int("port", cfg.Server.Port))
 	} else if portEnv := os.Getenv("IKET_PORT"); portEnv != "" {
-		var port int
-		_, err := fmt.Sscanf(portEnv, "%d", &port)
-		if err == nil && port > 0 {
-			cfg.Server.Port = port
-			logger.Info("Overriding port from IKET_PORT env var", logging.Int("port", cfg.Server.Port))
-		} else if err != nil {
-			logger.Warn("Invalid IKET_PORT env var, using config file port", logging.String("value", portEnv), logging.Error(err))
-		}
+	        var port int
+	        _, err := fmt.Sscanf(portEnv, "%d", &port)
+	        if err == nil && port > 0 {
+	                cfg.Server.Port = port
+	                logger.Info("Overriding port from IKET_PORT env var", logging.Int("port", cfg.Server.Port))
+	        } else if err != nil {
+	                logger.Warn("Invalid IKET_PORT env var, using config file port", logging.String("value", portEnv), logging.Error(err))
+	        }
 	}
 
 	// Initialize metrics collector
@@ -177,22 +181,29 @@ func main() {
 
 	// Create gateway with dependencies
 	gw, err := gateway.NewGateway(gateway.Dependencies{
-		Config:   cfg,
-		Logger:   logger,
-		Metrics:  metricsCollector,
-		Registry: plugin.DefaultRegistry,
+	        Config:         cfg,
+	        ConfigProvider: provider,
+	        Logger:         logger,
+	        Metrics:        metricsCollector,
+	        Registry:       plugin.DefaultRegistry,
 	}, version)
 	if err != nil {
-		logger.Fatal("Failed to create gateway", logging.Error(err))
+	        logger.Fatal("Failed to create gateway", logging.Error(err))
 	}
 
 	// Create and register management API
 	managementAPI := api.NewManagementAPI(gw, logger, plugin.DefaultRegistry)
 	managementAPI.RegisterRoutes(gw.GetRouter())
 
+	// Initialize the gateway (sets up proxy routes, middleware, etc.)
+	// Calling this AFTER RegisterRoutes ensures management API routes are registered first
+	// in the router and thus take precedence over wildcard proxy routes.
+	if err := gw.Initialize(); err != nil {
+	        logger.Fatal("Failed to initialize gateway", logging.Error(err))
+	}
+
 	logger.Info("Registered plugins", logging.Any("plugins", managementAPI.ListPlugins()))
 	logger.Info("Management API registered", logging.String("base_path", "/api/v1"))
-
 	startupDuration := time.Since(startTime)
 
 	logger.Info("Gateway startup complete", logging.Duration("startup_time", startupDuration))

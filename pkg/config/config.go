@@ -75,6 +75,7 @@ type RouterConfig struct {
 	MaxRate         string    `yaml:"max_rate,omitempty" json:"max_rate,omitempty"`
 	Backends        []Backend `yaml:"backend" json:"backend"`
 	Roles           []string  `yaml:"roles,omitempty" json:"roles,omitempty"`
+	Scopes          []string  `yaml:"scopes,omitempty" json:"scopes,omitempty"`
 }
 
 // TLSConfig represents TLS configuration
@@ -129,6 +130,7 @@ type Service struct {
 	BasePath    string         `yaml:"base_path,omitempty" json:"base_path,omitempty"`
 	Tags        []string       `yaml:"tags,omitempty" json:"tags,omitempty"`
 	Group       string         `yaml:"group,omitempty" json:"group,omitempty"`
+	Scopes      []string       `yaml:"scopes,omitempty" json:"scopes,omitempty"`
 	Routes      []RouterConfig `yaml:"routes" json:"routes"`
 }
 
@@ -245,7 +247,7 @@ func (p *FileProvider) Load() (*Config, error) {
 	return &config, nil
 }
 
-// Save saves configuration to files
+// Save saves configuration to files atomically
 func (p *FileProvider) Save(cfg *Config) error {
 	// Validate before saving
 	validator := NewConfigValidator()
@@ -254,29 +256,61 @@ func (p *FileProvider) Save(cfg *Config) error {
 	}
 
 	// Save main config
-	configData, err := yaml.Marshal(cfg)
-	if err != nil {
-		return coreerrors.NewConfigError("failed to marshal config", err)
-	}
-
-	if err := os.WriteFile(p.configPath, configData, 0644); err != nil {
-		return coreerrors.NewConfigError("failed to write config file", err)
+	if err := p.saveAtomic(p.configPath, cfg); err != nil {
+		return err
 	}
 
 	// Save service config to separate file if needed
 	if p.servicesPath != "" && p.servicesPath != p.configPath {
 		if len(cfg.Services) > 0 {
-			serviceData, err := yaml.Marshal(cfg.Services[0])
-			if err != nil {
-				return coreerrors.NewConfigError("failed to marshal service config", err)
-			}
-			if err := os.WriteFile(p.servicesPath, serviceData, 0644); err != nil {
-				return coreerrors.NewConfigError("failed to write service config file", err)
+			if err := p.saveServicesAtomic(p.servicesPath, &cfg.Services[0]); err != nil {
+				return err
 			}
 		}
 	}
 
-	p.logger.Info("Configuration saved successfully")
+	p.logger.Info("Configuration saved successfully",
+		logging.String("config_path", p.configPath),
+		logging.String("services_path", p.servicesPath),
+	)
+	return nil
+}
+
+func (p *FileProvider) saveAtomic(path string, cfg *Config) error {
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return coreerrors.NewConfigError("failed to marshal config", err)
+	}
+
+	tempFile := path + ".tmp"
+	if err := os.WriteFile(tempFile, data, 0644); err != nil {
+		return coreerrors.NewConfigError("failed to write temp config file", err)
+	}
+
+	if err := os.Rename(tempFile, path); err != nil {
+		os.Remove(tempFile) // clean up
+		return coreerrors.NewConfigError("failed to commit config file change", err)
+	}
+
+	return nil
+}
+
+func (p *FileProvider) saveServicesAtomic(path string, svcCfg *ServiceConfig) error {
+	data, err := yaml.Marshal(svcCfg)
+	if err != nil {
+		return coreerrors.NewConfigError("failed to marshal service config", err)
+	}
+
+	tempFile := path + ".tmp"
+	if err := os.WriteFile(tempFile, data, 0644); err != nil {
+		return coreerrors.NewConfigError("failed to write temp service config file", err)
+	}
+
+	if err := os.Rename(tempFile, path); err != nil {
+		os.Remove(tempFile) // clean up
+		return coreerrors.NewConfigError("failed to commit service config file change", err)
+	}
+
 	return nil
 }
 

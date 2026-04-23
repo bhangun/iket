@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -130,6 +131,11 @@ func (api *ManagementAPI) RegisterRoutes(router *mux.Router) {
 	v1.HandleFunc("/services", api.createService).Methods("POST")
 	v1.HandleFunc("/services/{name}", api.updateService).Methods("PUT")
 	v1.HandleFunc("/services/{name}", api.deleteService).Methods("DELETE")
+
+	// Client management
+	v1.HandleFunc("/clients", api.listClients).Methods("GET")
+	v1.HandleFunc("/clients", api.addClient).Methods("POST")
+	v1.HandleFunc("/clients/{key}", api.removeClient).Methods("DELETE")
 }
 
 // Response structures
@@ -257,32 +263,90 @@ func (api *ManagementAPI) getGatewayConfig(w http.ResponseWriter, r *http.Reques
 }
 
 func (api *ManagementAPI) updateGatewayConfig(w http.ResponseWriter, r *http.Request) {
-	var newConfig config.Config
-	if err := json.NewDecoder(r.Body).Decode(&newConfig); err != nil {
+	strategy := r.URL.Query().Get("strategy")
+	if strategy == "" {
+		strategy = "replace"
+	}
+	dryRun := r.URL.Query().Get("dry_run") == "true"
+
+	var input map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		api.writeError(w, "Invalid configuration format", http.StatusBadRequest)
 		return
 	}
 
+	api.mu.Lock()
+	defer api.mu.Unlock()
+
+	currentCfg := api.gateway.GetConfig()
+	// Create a copy for simulation to avoid modifying the live config if it's a dry run
+	simCfg := *currentCfg
+
+	if strategy == "merge" {
+		currentMap := make(map[string]interface{})
+		currentJSON, _ := json.Marshal(simCfg)
+		json.Unmarshal(currentJSON, &currentMap)
+
+		api.deepMerge(currentMap, input)
+
+		mergedJSON, _ := json.Marshal(currentMap)
+		if err := json.Unmarshal(mergedJSON, &simCfg); err != nil {
+			api.writeError(w, "Failed to merge configuration", http.StatusInternalServerError)
+			return
+		}
+	} else {
+		newJSON, _ := json.Marshal(input)
+		if err := json.Unmarshal(newJSON, &simCfg); err != nil {
+			api.writeError(w, "Invalid configuration", http.StatusBadRequest)
+			return
+		}
+	}
+
 	// Validate configuration
-	if err := newConfig.Validate(); err != nil {
-		api.writeError(w, "Invalid configuration", http.StatusBadRequest)
+	if err := simCfg.Validate(); err != nil {
+		api.writeError(w, fmt.Sprintf("Invalid configuration: %v", err), http.StatusBadRequest)
 		return
 	}
 
-	// Update gateway configuration
-	if err := api.gateway.UpdateConfig(&newConfig); err != nil {
+	if dryRun {
+		response := APIResponse{
+			Success: true,
+			Message: "[DRY RUN] Configuration is valid and merge-ready",
+			Data: map[string]interface{}{
+				"strategy": strategy,
+				"dry_run":  true,
+			},
+		}
+		api.writeJSON(w, response)
+		return
+	}
+
+	// Update gateway configuration (Live)
+	if err := api.gateway.UpdateConfig(&simCfg); err != nil {
 		api.writeError(w, "Failed to update configuration", http.StatusInternalServerError)
 		return
 	}
 
 	response := APIResponse{
 		Success: true,
-		Message: "Configuration updated successfully",
+		Message: fmt.Sprintf("Configuration updated successfully using %s strategy", strategy),
 		Data: map[string]interface{}{
 			"reload_required": true,
 		},
 	}
 	api.writeJSON(w, response)
+}
+
+func (api *ManagementAPI) deepMerge(dst, src map[string]interface{}) {
+	for k, v := range src {
+		if srcMap, ok := v.(map[string]interface{}); ok {
+			if dstMap, ok := dst[k].(map[string]interface{}); ok {
+				api.deepMerge(dstMap, srcMap)
+				continue
+			}
+		}
+		dst[k] = v
+	}
 }
 
 func (api *ManagementAPI) reloadGateway(w http.ResponseWriter, r *http.Request) {
@@ -1145,6 +1209,12 @@ func (api *ManagementAPI) getServices(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/v1/services
 func (api *ManagementAPI) createService(w http.ResponseWriter, r *http.Request) {
+	strategy := r.URL.Query().Get("strategy")
+	if strategy == "" {
+		strategy = "merge"
+	}
+	dryRun := r.URL.Query().Get("dry_run") == "true"
+
 	cfg := api.gateway.GetConfig()
 	if cfg == nil {
 		api.writeError(w, "Configuration not available", http.StatusInternalServerError)
@@ -1157,58 +1227,86 @@ func (api *ManagementAPI) createService(w http.ResponseWriter, r *http.Request) 
 		api.writeError(w, "Invalid service definition", http.StatusBadRequest)
 		return
 	}
-	if len(req.Services) == 0 {
-		api.writeError(w, "No services provided", http.StatusBadRequest)
-		return
+
+	// Create a working copy for simulation
+	simCfg := *cfg
+	// Deep copy services slice to avoid mutating live state during merge simulation
+	simServices := make([]config.ServiceConfig, len(cfg.Services))
+	copy(simServices, cfg.Services)
+	simCfg.Services = simServices
+
+	if strategy == "replace" {
+		simCfg.Services = []config.ServiceConfig{{Version: 1, Services: []config.Service{}}}
+	} else if len(simCfg.Services) == 0 {
+		simCfg.Services = []config.ServiceConfig{{Version: 1, Services: []config.Service{}}}
 	}
-	if len(cfg.Services) == 0 {
-		cfg.Services = []config.ServiceConfig{{Version: 1, Services: []config.Service{}}}
-	}
+
 	addedRoutes := []map[string]interface{}{}
-	skippedRoutes := []map[string]interface{}{}
+	updatedRoutes := []map[string]interface{}{}
+	addedServices := 0
+
 	for _, newSvc := range req.Services {
 		found := false
-		for i, svc := range cfg.Services[0].Services {
-			if svc.Host == newSvc.Host { // merge by host
+		for i, svc := range simCfg.Services[0].Services {
+			if (newSvc.Name != "" && svc.Name == newSvc.Name) || (newSvc.Name == "" && svc.Host == newSvc.Host) {
 				found = true
-				existingRoutes := svc.Routes
 				for _, newRoute := range newSvc.Routes {
-					dup := false
-					for _, existRoute := range existingRoutes {
+					routeFound := false
+					for k, existRoute := range svc.Routes {
 						if existRoute.Path == newRoute.Path && existRoute.Method == newRoute.Method {
-							dup = true
+							simCfg.Services[0].Services[i].Routes[k] = newRoute
+							updatedRoutes = append(updatedRoutes, map[string]interface{}{"path": newRoute.Path, "method": newRoute.Method, "service": svc.Name})
+							routeFound = true
 							break
 						}
 					}
-					if dup {
-						skippedRoutes = append(skippedRoutes, map[string]interface{}{"path": newRoute.Path, "method": newRoute.Method, "reason": "duplicate"})
-						continue
+					if !routeFound {
+						simCfg.Services[0].Services[i].Routes = append(simCfg.Services[0].Services[i].Routes, newRoute)
+						addedRoutes = append(addedRoutes, map[string]interface{}{"path": newRoute.Path, "method": newRoute.Method, "service": svc.Name})
 					}
-					cfg.Services[0].Services[i].Routes = append(cfg.Services[0].Services[i].Routes, newRoute)
-					addedRoutes = append(addedRoutes, map[string]interface{}{"path": newRoute.Path, "method": newRoute.Method})
+				}
+				if newSvc.Host != "" {
+					simCfg.Services[0].Services[i].Host = newSvc.Host
 				}
 				break
 			}
 		}
 		if !found {
-			cfg.Services[0].Services = append(cfg.Services[0].Services, newSvc)
+			simCfg.Services[0].Services = append(simCfg.Services[0].Services, newSvc)
+			addedServices++
 			for _, newRoute := range newSvc.Routes {
-				addedRoutes = append(addedRoutes, map[string]interface{}{"path": newRoute.Path, "method": newRoute.Method})
+				addedRoutes = append(addedRoutes, map[string]interface{}{"path": newRoute.Path, "method": newRoute.Method, "service": newSvc.Name})
 			}
 		}
 	}
-	api.gateway.UpdateConfig(cfg)
-	msg := fmt.Sprintf("%d route(s) added, %d skipped due to duplication", len(addedRoutes), len(skippedRoutes))
+
+	if dryRun {
+		msg := fmt.Sprintf("[DRY RUN] %d service(s) would be added, %d route(s) would be added, %d route(s) would be updated", addedServices, len(addedRoutes), len(updatedRoutes))
+		api.writeJSON(w, map[string]interface{}{
+			"success":         true,
+			"dry_run":         true,
+			"added_services":  addedServices,
+			"added_routes":    addedRoutes,
+			"updated_routes":  updatedRoutes,
+			"message":         msg,
+		})
+		return
+	}
+
+	api.gateway.UpdateConfig(&simCfg)
+	msg := fmt.Sprintf("%d service(s) added, %d route(s) added, %d route(s) updated", addedServices, len(addedRoutes), len(updatedRoutes))
 	api.writeJSON(w, map[string]interface{}{
-		"success":        true,
-		"added_routes":   addedRoutes,
-		"skipped_routes": skippedRoutes,
-		"message":        msg,
+		"success":         true,
+		"added_services":  addedServices,
+		"added_routes":    addedRoutes,
+		"updated_routes":  updatedRoutes,
+		"message":         msg,
 	})
 }
 
 // PUT /api/v1/services/{name}
 func (api *ManagementAPI) updateService(w http.ResponseWriter, r *http.Request) {
+	dryRun := r.URL.Query().Get("dry_run") == "true"
 	cfg := api.gateway.GetConfig()
 	if cfg == nil {
 		api.writeError(w, "Configuration not available", http.StatusInternalServerError)
@@ -1220,10 +1318,23 @@ func (api *ManagementAPI) updateService(w http.ResponseWriter, r *http.Request) 
 		api.writeError(w, "Invalid service definition", http.StatusBadRequest)
 		return
 	}
+
+	// Create a working copy for simulation
+	simCfg := *cfg
+	// Deep copy services slice to avoid mutating live state
+	simServices := make([]config.ServiceConfig, len(cfg.Services))
+	for i := range cfg.Services {
+		simServices[i] = cfg.Services[i]
+		// Deep copy the services within each ServiceConfig
+		simServices[i].Services = make([]config.Service, len(cfg.Services[i].Services))
+		copy(simServices[i].Services, cfg.Services[i].Services)
+	}
+	simCfg.Services = simServices
+
 	updated := false
 	addedRoutes := []map[string]interface{}{}
 	updatedRoutes := []map[string]interface{}{}
-	for i, svcConfig := range cfg.Services {
+	for i, svcConfig := range simCfg.Services {
 		for j, svc := range svcConfig.Services {
 			if svc.Name == name {
 				existingRoutes := svc.Routes
@@ -1231,23 +1342,23 @@ func (api *ManagementAPI) updateService(w http.ResponseWriter, r *http.Request) 
 					found := false
 					for k, existRoute := range existingRoutes {
 						if existRoute.Path == newRoute.Path && existRoute.Method == newRoute.Method {
-							cfg.Services[i].Services[j].Routes[k] = newRoute
+							simCfg.Services[i].Services[j].Routes[k] = newRoute
 							updatedRoutes = append(updatedRoutes, map[string]interface{}{"path": newRoute.Path, "method": newRoute.Method})
 							found = true
 							break
 						}
 					}
 					if !found {
-						cfg.Services[i].Services[j].Routes = append(cfg.Services[i].Services[j].Routes, newRoute)
+						simCfg.Services[i].Services[j].Routes = append(simCfg.Services[i].Services[j].Routes, newRoute)
 						addedRoutes = append(addedRoutes, map[string]interface{}{"path": newRoute.Path, "method": newRoute.Method})
 					}
 				}
 				// Optionally update other service fields
-				cfg.Services[i].Services[j].Description = update.Description
-				cfg.Services[i].Services[j].Host = update.Host
-				cfg.Services[i].Services[j].BasePath = update.BasePath
-				cfg.Services[i].Services[j].Tags = update.Tags
-				cfg.Services[i].Services[j].Group = update.Group
+				simCfg.Services[i].Services[j].Description = update.Description
+				simCfg.Services[i].Services[j].Host = update.Host
+				simCfg.Services[i].Services[j].BasePath = update.BasePath
+				simCfg.Services[i].Services[j].Tags = update.Tags
+				simCfg.Services[i].Services[j].Group = update.Group
 				updated = true
 				break
 			}
@@ -1257,8 +1368,21 @@ func (api *ManagementAPI) updateService(w http.ResponseWriter, r *http.Request) 
 		api.writeError(w, "Service not found", http.StatusNotFound)
 		return
 	}
-	api.gateway.UpdateConfig(cfg)
-	msg := fmt.Sprintf("%d route(s) updated, %d added", len(updatedRoutes), len(addedRoutes))
+
+	if dryRun {
+		msg := fmt.Sprintf("[DRY RUN] %d route(s) would be updated, %d would be added for service %q", len(updatedRoutes), len(addedRoutes), name)
+		api.writeJSON(w, map[string]interface{}{
+			"success":        true,
+			"dry_run":        true,
+			"updated_routes": updatedRoutes,
+			"added_routes":   addedRoutes,
+			"message":        msg,
+		})
+		return
+	}
+
+	api.gateway.UpdateConfig(&simCfg)
+	msg := fmt.Sprintf("%d route(s) updated, %d added for service %q", len(updatedRoutes), len(addedRoutes), name)
 	api.writeJSON(w, map[string]interface{}{
 		"success":        true,
 		"updated_routes": updatedRoutes,
@@ -1292,3 +1416,143 @@ func (api *ManagementAPI) deleteService(w http.ResponseWriter, r *http.Request) 
 	api.gateway.UpdateConfig(cfg)
 	api.writeJSON(w, APIResponse{Success: true, Message: "Service deleted successfully"})
 }
+
+func (api *ManagementAPI) listClients(w http.ResponseWriter, r *http.Request) {
+	p, err := api.registry.Get("apikey")
+	if err != nil {
+		api.writeJSON(w, map[string]interface{}{"clients": []interface{}{}})
+		return
+	}
+
+	// Use reflection to call ListClients if it exists
+	val := reflect.ValueOf(p)
+	method := val.MethodByName("ListClients")
+	if !method.IsValid() {
+		api.writeError(w, "Plugin does not support client listing", http.StatusNotImplemented)
+		return
+	}
+
+	results := method.Call(nil)
+	api.writeJSON(w, map[string]interface{}{"clients": results[0].Interface()})
+}
+
+func (api *ManagementAPI) addClient(w http.ResponseWriter, r *http.Request) {
+	var client struct {
+		ID     string   `json:"id"`
+		Name   string   `json:"name"`
+		Key    string   `json:"key"`
+		Group  string   `json:"group"`
+		Scopes []string `json:"scopes"`
+		Tags   []string `json:"tags"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&client); err != nil {
+		api.writeError(w, "Invalid client data", http.StatusBadRequest)
+		return
+	}
+
+	p, err := api.registry.Get("apikey")
+	if err != nil {
+		api.writeError(w, "API Key plugin not found or not enabled", http.StatusNotFound)
+		return
+	}
+
+	// Actually, easier if we just update config and re-initialize plugin
+	cfg := api.gateway.GetConfig()
+	pluginCfg, ok := cfg.GetPluginConfig("apikey")
+	if !ok {
+		pluginCfg = make(map[string]interface{})
+	}
+
+	clients, _ := pluginCfg["clients"].([]interface{})
+	// Check if key already exists
+	for _, c := range clients {
+		if m, ok := c.(map[string]interface{}); ok {
+			if m["key"] == client.Key {
+				api.writeError(w, "Client with this key already exists", http.StatusConflict)
+				return
+			}
+		}
+	}
+
+	clients = append(clients, map[string]interface{}{
+		"id":     client.ID,
+		"name":   client.Name,
+		"key":    client.Key,
+		"group":  client.Group,
+		"scopes": client.Scopes,
+		"tags":   client.Tags,
+	})
+	pluginCfg["clients"] = clients
+	cfg.SetPluginConfig("apikey", pluginCfg)
+
+	if err := api.gateway.UpdateConfig(cfg); err != nil {
+		api.writeError(w, "Failed to save configuration", http.StatusInternalServerError)
+		return
+	}
+
+	// Re-initialize plugin
+	if err := p.Initialize(pluginCfg); err != nil {
+		api.writeError(w, "Failed to re-initialize plugin", http.StatusInternalServerError)
+		return
+	}
+
+	api.writeJSON(w, APIResponse{Success: true, Message: "Client added successfully"})
+}
+
+func (api *ManagementAPI) removeClient(w http.ResponseWriter, r *http.Request) {
+	key := mux.Vars(r)["key"]
+
+	p, err := api.registry.Get("apikey")
+	if err != nil {
+		api.writeError(w, "API Key plugin not found", http.StatusNotFound)
+		return
+	}
+
+	cfg := api.gateway.GetConfig()
+	pluginCfg, ok := cfg.GetPluginConfig("apikey")
+	if !ok {
+		api.writeError(w, "Plugin configuration not found", http.StatusNotFound)
+		return
+	}
+
+	clients, ok := pluginCfg["clients"].([]interface{})
+	if !ok {
+		api.writeError(w, "No clients configured", http.StatusNotFound)
+		return
+	}
+
+	newClients := []interface{}{}
+	found := false
+	for _, c := range clients {
+		if m, ok := c.(map[string]interface{}); ok {
+			if m["key"] == key {
+				found = true
+				continue
+			}
+		}
+		newClients = append(newClients, c)
+	}
+
+	if !found {
+		api.writeError(w, "Client not found", http.StatusNotFound)
+		return
+	}
+
+	pluginCfg["clients"] = newClients
+	cfg.SetPluginConfig("apikey", pluginCfg)
+
+	if err := api.gateway.UpdateConfig(cfg); err != nil {
+		api.writeError(w, "Failed to save configuration", http.StatusInternalServerError)
+		return
+	}
+
+	// Re-initialize plugin
+	if err := p.Initialize(pluginCfg); err != nil {
+		api.writeError(w, "Failed to re-initialize plugin", http.StatusInternalServerError)
+		return
+	}
+
+	api.writeJSON(w, APIResponse{Success: true, Message: "Client removed successfully"})
+}
+
