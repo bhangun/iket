@@ -1,11 +1,25 @@
 package api
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha1"
+	"crypto/sha256"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
+	"errors"
 	"fmt"
+	"io/fs"
+	"math/big"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -22,10 +36,12 @@ import (
 
 // ManagementAPI provides REST endpoints for gateway management
 type ManagementAPI struct {
-	gateway  *gateway.Gateway
-	logger   *logging.Logger
-	registry *plugin.Registry
-	mu       sync.RWMutex
+	gateway    *gateway.Gateway
+	logger     *logging.Logger
+	registry   *plugin.Registry
+	mu         sync.RWMutex
+	startedAt  time.Time
+	lastReload time.Time
 
 	// WebSocket upgrader
 	upgrader websocket.Upgrader
@@ -40,9 +56,11 @@ type ManagementAPI struct {
 // NewManagementAPI creates a new management API instance
 func NewManagementAPI(gateway *gateway.Gateway, logger *logging.Logger, registry *plugin.Registry) *ManagementAPI {
 	api := &ManagementAPI{
-		gateway:  gateway,
-		logger:   logger,
-		registry: registry,
+		gateway:    gateway,
+		logger:     logger,
+		registry:   registry,
+		startedAt:  time.Now(),
+		lastReload: time.Now(),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				return true // Allow all origins for now
@@ -85,6 +103,7 @@ func (api *ManagementAPI) RegisterRoutes(router *mux.Router) {
 	v1.HandleFunc("/gateway/status", api.getGatewayStatus).Methods("GET")
 	v1.HandleFunc("/gateway/config", api.getGatewayConfig).Methods("GET")
 	v1.HandleFunc("/gateway/config", api.updateGatewayConfig).Methods("PUT")
+	v1.HandleFunc("/gateway/config/self-test", api.selfTestGatewayConfig).Methods("GET")
 	v1.HandleFunc("/gateway/reload", api.reloadGateway).Methods("POST")
 	v1.HandleFunc("/gateway/metrics", api.getGatewayMetrics).Methods("GET")
 
@@ -120,6 +139,9 @@ func (api *ManagementAPI) RegisterRoutes(router *mux.Router) {
 	v1.HandleFunc("/certificates", api.listCertificates).Methods("GET")
 	v1.HandleFunc("/certificates", api.uploadCertificate).Methods("POST")
 	v1.HandleFunc("/certificates/{id}", api.deleteCertificate).Methods("DELETE")
+	v1.HandleFunc("/enrollment/tokens", api.createEnrollmentToken).Methods("POST")
+	v1.HandleFunc("/enrollment/tokens", api.listEnrollmentTokens).Methods("GET")
+	v1.HandleFunc("/enrollment/tokens/{id}", api.revokeEnrollmentToken).Methods("DELETE")
 
 	// Backup & restore
 	v1.HandleFunc("/backup", api.createBackup).Methods("POST")
@@ -136,6 +158,23 @@ func (api *ManagementAPI) RegisterRoutes(router *mux.Router) {
 	v1.HandleFunc("/clients", api.listClients).Methods("GET")
 	v1.HandleFunc("/clients", api.addClient).Methods("POST")
 	v1.HandleFunc("/clients/{key}", api.removeClient).Methods("DELETE")
+}
+
+func (api *ManagementAPI) RegisterEnrollmentRoutes(router *mux.Router) {
+	v1 := router.PathPrefix("/api/v1").Subrouter()
+	v1.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+			if r.Method == "OPTIONS" {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+	v1.HandleFunc("/enroll", api.enrollClientCertificate).Methods("POST")
 }
 
 // Response structures
@@ -191,6 +230,20 @@ type GatewayMetrics struct {
 	} `json:"connections"`
 }
 
+type ConfigSelfTestRoute struct {
+	RouteName   string            `json:"route_name"`
+	ServiceName string            `json:"service_name"`
+	RoutePath   string            `json:"route_path"`
+	RequestPath string            `json:"request_path"`
+	Matched     bool              `json:"matched"`
+	RouteVars   map[string]string `json:"route_vars,omitempty"`
+	ProxiedPath string            `json:"proxied_path,omitempty"`
+	Destination string            `json:"destination,omitempty"`
+	StripPath   bool              `json:"strip_path"`
+	URLPattern  string            `json:"url_pattern,omitempty"`
+	Enabled     bool              `json:"enabled"`
+}
+
 // Plugin Response
 type PluginInfo struct {
 	Name    string            `json:"name"`
@@ -229,14 +282,14 @@ func (api *ManagementAPI) getGatewayStatus(w http.ResponseWriter, r *http.Reques
 
 	status := GatewayStatus{
 		Status:            "running",
-		Uptime:            "2h 15m 30s", // Calculate from start time
-		Version:           "0.1.12",     // Get from gateway
-		StartTime:         time.Now().Add(-2*time.Hour - 15*time.Minute - 30*time.Second),
-		ConfigLoaded:      true,
-		LastReload:        time.Now().Add(-30 * time.Minute),
-		ActiveConnections: 42,
-		TotalRequests:     15420,
-		ErrorCount:        5,
+		Uptime:            time.Since(api.startedAt).Round(time.Second).String(),
+		Version:           api.gateway.Version(),
+		StartTime:         api.startedAt,
+		ConfigLoaded:      api.gateway.GetConfig() != nil,
+		LastReload:        api.lastReload,
+		ActiveConnections: 0,
+		TotalRequests:     int64(len(api.logger.RecentLogs(2000, ""))),
+		ErrorCount:        len(api.logger.RecentLogs(2000, "error")),
 	}
 
 	api.writeJSON(w, status)
@@ -260,6 +313,73 @@ func (api *ManagementAPI) getGatewayConfig(w http.ResponseWriter, r *http.Reques
 	redactedConfig.Security.BasicAuthUsers = nil
 
 	api.writeJSON(w, redactedConfig)
+}
+
+func (api *ManagementAPI) selfTestGatewayConfig(w http.ResponseWriter, r *http.Request) {
+	api.mu.RLock()
+	defer api.mu.RUnlock()
+
+	cfg := api.gateway.GetConfig()
+	if cfg == nil {
+		api.writeError(w, "Configuration not available", http.StatusInternalServerError)
+		return
+	}
+
+	samplePath := r.URL.Query().Get("path")
+	if samplePath == "" {
+		samplePath = "/example"
+	}
+	sampleMethod := strings.ToUpper(r.URL.Query().Get("method"))
+	if sampleMethod == "" {
+		sampleMethod = http.MethodGet
+	}
+
+	results := make([]ConfigSelfTestRoute, 0)
+	for _, serviceConfig := range cfg.Services {
+		for _, service := range serviceConfig.Services {
+			for _, rawRoute := range service.Routes {
+				route := rawRoute
+				route.Path = service.EffectiveRoutePath(rawRoute)
+				route.Methods = rawRoute.EffectiveMethods()
+
+				result := ConfigSelfTestRoute{
+					RouteName:   route.Name,
+					ServiceName: service.Name,
+					RoutePath:   route.Path,
+					RequestPath: samplePath,
+					StripPath:   route.StripPath,
+					Enabled:     route.IsEnabled(),
+					Destination: service.Host,
+				}
+				if result.RouteName == "" {
+					result.RouteName = route.Path
+				}
+				if len(route.Backends) > 0 {
+					result.URLPattern = route.Backends[0].URLPattern
+				}
+
+				vars, matched := gateway.MatchRouteTemplate(route, sampleMethod, samplePath)
+				result.Matched = matched
+				if matched {
+					result.RouteVars = vars
+					proxiedPath, err := gateway.ComputeProxiedPath(&service, route, samplePath, vars)
+					if err != nil {
+						api.writeError(w, fmt.Sprintf("Failed to compute proxied path for route %s: %v", route.Path, err), http.StatusInternalServerError)
+						return
+					}
+					result.ProxiedPath = proxiedPath
+				}
+
+				results = append(results, result)
+			}
+		}
+	}
+
+	api.writeJSON(w, map[string]interface{}{
+		"sample_method": sampleMethod,
+		"sample_path":   samplePath,
+		"routes":        results,
+	})
 }
 
 func (api *ManagementAPI) updateGatewayConfig(w http.ResponseWriter, r *http.Request) {
@@ -350,8 +470,11 @@ func (api *ManagementAPI) deepMerge(dst, src map[string]interface{}) {
 }
 
 func (api *ManagementAPI) reloadGateway(w http.ResponseWriter, r *http.Request) {
-	// This would trigger a configuration reload
-	// For now, just return success
+	if err := api.gateway.ReloadConfig(); err != nil {
+		api.writeError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	api.lastReload = time.Now()
 
 	response := APIResponse{
 		Success: true,
@@ -365,22 +488,24 @@ func (api *ManagementAPI) reloadGateway(w http.ResponseWriter, r *http.Request) 
 
 func (api *ManagementAPI) getGatewayMetrics(w http.ResponseWriter, r *http.Request) {
 	metrics := GatewayMetrics{}
+	allLogs := api.logger.RecentLogs(2000, "")
+	errorLogs := api.logger.RecentLogs(2000, "error")
+	warnLogs := api.logger.RecentLogs(2000, "warn")
 
-	// Populate with mock data for now
-	metrics.Requests.Total = 15420
-	metrics.Requests.Successful = 15380
-	metrics.Requests.Failed = 40
-	metrics.Requests.RatePerMinute = 120.0
+	metrics.Requests.Total = int64(len(allLogs))
+	metrics.Requests.Successful = metrics.Requests.Total - int64(len(errorLogs))
+	metrics.Requests.Failed = int64(len(errorLogs))
+	metrics.Requests.RatePerMinute = float64(len(allLogs))
 
-	metrics.ResponseTimes.Average = 45.2
-	metrics.ResponseTimes.P95 = 120.5
-	metrics.ResponseTimes.P99 = 250.1
+	metrics.ResponseTimes.Average = 0
+	metrics.ResponseTimes.P95 = 0
+	metrics.ResponseTimes.P99 = 0
 
-	metrics.Errors.FourXX = 25
-	metrics.Errors.FiveXX = 15
+	metrics.Errors.FourXX = len(warnLogs)
+	metrics.Errors.FiveXX = len(errorLogs)
 
-	metrics.Connections.Active = 42
-	metrics.Connections.Total = 15420
+	metrics.Connections.Active = 0
+	metrics.Connections.Total = metrics.Requests.Total
 
 	api.writeJSON(w, metrics)
 }
@@ -403,7 +528,7 @@ func (api *ManagementAPI) listPlugins(w http.ResponseWriter, r *http.Request) {
 		info := PluginInfo{
 			Name:    name,
 			Type:    "unknown",
-			Enabled: true,
+			Enabled: api.pluginEnabled(name),
 			Status:  "healthy",
 			Tags:    make(map[string]string),
 		}
@@ -447,7 +572,7 @@ func (api *ManagementAPI) getPluginDetails(w http.ResponseWriter, r *http.Reques
 	details := map[string]interface{}{
 		"name":    pluginName,
 		"type":    "unknown",
-		"enabled": true,
+		"enabled": api.pluginEnabled(pluginName),
 		"status":  "healthy",
 	}
 
@@ -501,9 +626,25 @@ func (api *ManagementAPI) updatePluginConfig(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	cfg := api.gateway.GetConfig()
+	if cfg == nil {
+		api.writeError(w, "Configuration not available", http.StatusInternalServerError)
+		return
+	}
+	simCfg, err := cloneConfig(cfg)
+	if err != nil {
+		api.writeError(w, "Failed to prepare configuration update", http.StatusInternalServerError)
+		return
+	}
+	simCfg.SetPluginConfig(pluginName, config)
+
 	// Reload plugin with new configuration
 	if err := plugin.Initialize(config); err != nil {
 		api.writeError(w, "Failed to update plugin configuration", http.StatusInternalServerError)
+		return
+	}
+	if err := api.gateway.UpdateConfig(simCfg); err != nil {
+		api.writeError(w, "Failed to persist plugin configuration", http.StatusInternalServerError)
 		return
 	}
 
@@ -515,10 +656,11 @@ func (api *ManagementAPI) updatePluginConfig(w http.ResponseWriter, r *http.Requ
 }
 
 func (api *ManagementAPI) enablePlugin(w http.ResponseWriter, r *http.Request) {
-	_ = mux.Vars(r)["name"] // Extract but don't use for now
-
-	// This would enable the plugin
-	// For now, just return success
+	pluginName := mux.Vars(r)["name"]
+	if err := api.setPluginEnabled(pluginName, true); err != nil {
+		api.writeError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	response := APIResponse{
 		Success: true,
@@ -528,10 +670,11 @@ func (api *ManagementAPI) enablePlugin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *ManagementAPI) disablePlugin(w http.ResponseWriter, r *http.Request) {
-	_ = mux.Vars(r)["name"] // Extract but don't use for now
-
-	// This would disable the plugin
-	// For now, just return success
+	pluginName := mux.Vars(r)["name"]
+	if err := api.setPluginEnabled(pluginName, false); err != nil {
+		api.writeError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	response := APIResponse{
 		Success: true,
@@ -589,7 +732,7 @@ func (api *ManagementAPI) getPluginStatus(w http.ResponseWriter, r *http.Request
 
 	status := map[string]interface{}{
 		"status":      statusReporter.Status(),
-		"enabled":     true,
+		"enabled":     api.pluginEnabled(pluginName),
 		"last_update": time.Now(),
 	}
 
@@ -603,36 +746,10 @@ func (api *ManagementAPI) listRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	routes := cfg.GetAllRoutesFromServices(api.logger)
-	routeInfos := make([]RouteInfo, 0, len(routes))
-	for i, route := range routes {
-		timeout := 0
-		if route.Timeout != nil {
-			timeout = int(route.Timeout.Seconds())
-		}
-		enabled := !route.Enabled
-		// Find parent service for this route
-		service := cfg.FindServiceForRoute(route.Path, "")
-		backend := ""
-		if service != nil {
-			backend = service.Host
-		}
-		routeInfo := RouteInfo{
-			ID:          fmt.Sprintf("route-%d", i+1),
-			Path:        route.Path,
-			Destination: backend,
-			Methods:     route.Methods,
-			RequireAuth: route.RequireAuth,
-			Timeout:     timeout,
-			StripPath:   route.StripPath,
-			Enabled:     enabled,
-			Stats: map[string]interface{}{
-				"requests":          15420,
-				"errors":            5,
-				"avg_response_time": 45.2,
-			},
-		}
-		routeInfos = append(routeInfos, routeInfo)
+	records := api.routeRecords(cfg)
+	routeInfos := make([]RouteInfo, 0, len(records))
+	for _, record := range records {
+		routeInfos = append(routeInfos, api.routeInfoFromRecord(record))
 	}
 	response := map[string]interface{}{
 		"routes": routeInfos,
@@ -641,51 +758,93 @@ func (api *ManagementAPI) listRoutes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *ManagementAPI) getRouteDetails(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	routeID := vars["id"]
-
-	// This would get route details by ID
-	// For now, return mock data
-
-	routeDetails := map[string]interface{}{
-		"id":           routeID,
-		"path":         "/api/*",
-		"destination":  "http://backend:3000",
-		"methods":      []string{"GET", "POST", "PUT", "DELETE"},
-		"require_auth": true,
-		"timeout":      30,
-		"strip_path":   false,
-		"active":       true,
-		"created_at":   time.Now().Add(-2 * time.Hour),
-		"updated_at":   time.Now().Add(-30 * time.Minute),
-		"stats": map[string]interface{}{
-			"requests":          15420,
-			"successful":        15380,
-			"failed":            40,
-			"avg_response_time": 45.2,
-			"p95_response_time": 120.5,
-			"error_rate":        0.26,
-		},
+	record, err := api.findRouteRecord(api.gateway.GetConfig(), mux.Vars(r)["id"])
+	if err != nil {
+		api.writeError(w, err.Error(), http.StatusNotFound)
+		return
 	}
-
-	api.writeJSON(w, routeDetails)
+	api.writeJSON(w, map[string]interface{}{
+		"id":           record.ID,
+		"service_name": record.Service.Name,
+		"path":         record.EffectivePath,
+		"raw_path":     record.Route.Path,
+		"destination":  record.Service.Host,
+		"methods":      record.Route.EffectiveMethods(),
+		"require_auth": record.Route.RequireAuth,
+		"require_jwt":  record.Route.RequireJwt,
+		"strip_path":   record.Route.StripPath,
+		"enabled":      record.Route.IsEnabled(),
+		"backend":      record.Route.Backends,
+		"scopes":       record.Route.Scopes,
+		"roles":        record.Route.Roles,
+		"headers":      record.Route.Headers,
+	})
 }
 
 func (api *ManagementAPI) createRoute(w http.ResponseWriter, r *http.Request) {
-	var routeConfig config.RouterConfig
-	if err := json.NewDecoder(r.Body).Decode(&routeConfig); err != nil {
+	var req struct {
+		ServiceName string              `json:"service_name"`
+		Route       config.RouterConfig `json:"route"`
+		Path        string              `json:"path"`
+		Method      string              `json:"method"`
+		Methods     []string            `json:"methods"`
+		RequireAuth bool                `json:"requireAuth"`
+		StripPath   bool                `json:"stripPath"`
+		RequireJwt  bool                `json:"requireJwt"`
+		Enabled     *bool               `json:"enabled"`
+		Backends    []config.Backend    `json:"backend"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.writeError(w, "Invalid route configuration", http.StatusBadRequest)
 		return
 	}
-
-	// This would create a new route
-	// For now, return success
+	cfg := api.gateway.GetConfig()
+	simCfg, err := cloneConfig(cfg)
+	if err != nil {
+		api.writeError(w, "Failed to prepare configuration update", http.StatusInternalServerError)
+		return
+	}
+	routeConfig := req.Route
+	if routeConfig.Path == "" {
+		routeConfig.Path = req.Path
+		routeConfig.Method = req.Method
+		routeConfig.Methods = req.Methods
+		routeConfig.RequireAuth = req.RequireAuth
+		routeConfig.StripPath = req.StripPath
+		routeConfig.RequireJwt = req.RequireJwt
+		routeConfig.Enabled = req.Enabled
+		routeConfig.Backends = req.Backends
+	}
+	if routeConfig.Enabled == nil {
+		routeConfig.Enabled = config.NewBool(true)
+	}
+	if routeConfig.Path == "" || req.ServiceName == "" {
+		api.writeError(w, "service_name and route.path are required", http.StatusBadRequest)
+		return
+	}
+	service, err := findServiceByName(simCfg, req.ServiceName)
+	if err != nil {
+		api.writeError(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	for _, existing := range service.Routes {
+		if existing.Path == routeConfig.Path && sameMethods(existing.EffectiveMethods(), routeConfig.EffectiveMethods()) {
+			api.writeError(w, "Route already exists", http.StatusConflict)
+			return
+		}
+	}
+	service.Routes = append(service.Routes, routeConfig)
+	if err := api.gateway.UpdateConfig(simCfg); err != nil {
+		api.writeError(w, "Failed to create route", http.StatusInternalServerError)
+		return
+	}
+	record, _ := api.findRouteByServicePathMethod(api.gateway.GetConfig(), req.ServiceName, routeConfig.Path, routeConfig.EffectiveMethods())
 
 	response := APIResponse{
 		Success: true,
 		Message: "Route created successfully",
 		Data: map[string]interface{}{
-			"route_id": "route-new",
+			"route_id": record.ID,
 		},
 	}
 	api.writeJSON(w, response)
@@ -722,16 +881,37 @@ func getIP(r *http.Request) string {
 }
 
 func (api *ManagementAPI) updateRoute(w http.ResponseWriter, r *http.Request) {
-	_ = mux.Vars(r)["id"] // Extract but don't use for now
-
-	var updates map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
+	var raw map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
 		api.writeError(w, "Invalid update data", http.StatusBadRequest)
 		return
 	}
-
-	// This would update the route
-	// For now, return success
+	updateBytes, _ := json.Marshal(raw)
+	var updates config.RouterConfig
+	if err := json.Unmarshal(updateBytes, &updates); err != nil {
+		api.writeError(w, "Invalid update data", http.StatusBadRequest)
+		return
+	}
+	cfg := api.gateway.GetConfig()
+	record, err := api.findRouteRecord(cfg, mux.Vars(r)["id"])
+	if err != nil {
+		api.writeError(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	simCfg, err := cloneConfig(cfg)
+	if err != nil {
+		api.writeError(w, "Failed to prepare configuration update", http.StatusInternalServerError)
+		return
+	}
+	svc := &simCfg.Services[record.ServiceConfigIndex].Services[record.ServiceIndex]
+	updatedRoute := svc.Routes[record.RouteIndex]
+	mergeRouteUpdate(&updatedRoute, updates)
+	applyRouteRawUpdate(&updatedRoute, raw)
+	svc.Routes[record.RouteIndex] = updatedRoute
+	if err := api.gateway.UpdateConfig(simCfg); err != nil {
+		api.writeError(w, "Failed to update route", http.StatusInternalServerError)
+		return
+	}
 
 	response := APIResponse{
 		Success: true,
@@ -741,10 +921,23 @@ func (api *ManagementAPI) updateRoute(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *ManagementAPI) deleteRoute(w http.ResponseWriter, r *http.Request) {
-	_ = mux.Vars(r)["id"] // Extract but don't use for now
-
-	// This would delete the route
-	// For now, return success
+	cfg := api.gateway.GetConfig()
+	record, err := api.findRouteRecord(cfg, mux.Vars(r)["id"])
+	if err != nil {
+		api.writeError(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	simCfg, err := cloneConfig(cfg)
+	if err != nil {
+		api.writeError(w, "Failed to prepare configuration update", http.StatusInternalServerError)
+		return
+	}
+	svc := &simCfg.Services[record.ServiceConfigIndex].Services[record.ServiceIndex]
+	svc.Routes = append(svc.Routes[:record.RouteIndex], svc.Routes[record.RouteIndex+1:]...)
+	if err := api.gateway.UpdateConfig(simCfg); err != nil {
+		api.writeError(w, "Failed to delete route", http.StatusInternalServerError)
+		return
+	}
 
 	response := APIResponse{
 		Success: true,
@@ -754,10 +947,10 @@ func (api *ManagementAPI) deleteRoute(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *ManagementAPI) enableRoute(w http.ResponseWriter, r *http.Request) {
-	_ = mux.Vars(r)["id"] // Extract but don't use for now
-
-	// This would enable the route
-	// For now, return success
+	if err := api.setRouteEnabled(mux.Vars(r)["id"], true); err != nil {
+		api.writeError(w, err.Error(), http.StatusNotFound)
+		return
+	}
 
 	response := APIResponse{
 		Success: true,
@@ -767,10 +960,10 @@ func (api *ManagementAPI) enableRoute(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *ManagementAPI) disableRoute(w http.ResponseWriter, r *http.Request) {
-	_ = mux.Vars(r)["id"] // Extract but don't use for now
-
-	// This would disable the route
-	// For now, return success
+	if err := api.setRouteEnabled(mux.Vars(r)["id"], false); err != nil {
+		api.writeError(w, err.Error(), http.StatusNotFound)
+		return
+	}
 
 	response := APIResponse{
 		Success: true,
@@ -780,33 +973,13 @@ func (api *ManagementAPI) disableRoute(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *ManagementAPI) getLogs(w http.ResponseWriter, r *http.Request) {
-	// Parse query parameters (not used in placeholder implementation)
-	_ = r.URL.Query().Get("limit")
-	_ = r.URL.Query().Get("level")
-	_ = r.URL.Query().Get("since")
-
-	// This would fetch logs based on parameters
-	// For now, return mock data
-
-	logs := []map[string]interface{}{
-		{
-			"timestamp":  time.Now().Add(-5 * time.Minute),
-			"level":      "info",
-			"message":    "Request processed successfully",
-			"route_id":   "route-1",
-			"client_ip":  "192.168.1.100",
-			"request_id": "req-12345",
-		},
-		{
-			"timestamp":  time.Now().Add(-3 * time.Minute),
-			"level":      "error",
-			"message":    "Backend service unavailable",
-			"route_id":   "route-1",
-			"client_ip":  "192.168.1.101",
-			"request_id": "req-12346",
-		},
+	limit := 100
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		fmt.Sscanf(raw, "%d", &limit)
 	}
+	level := r.URL.Query().Get("level")
 
+	logs := api.logger.RecentLogs(limit, level)
 	response := map[string]interface{}{
 		"logs":     logs,
 		"total":    len(logs),
@@ -816,63 +989,64 @@ func (api *ManagementAPI) getLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *ManagementAPI) streamLogs(w http.ResponseWriter, r *http.Request) {
-	// Set headers for Server-Sent Events
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
-	// Create a channel to signal client disconnect
-	notify := w.(http.CloseNotifier).CloseNotify()
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		api.writeError(w, "Streaming not supported", http.StatusInternalServerError)
+		return
+	}
 
-	// Send initial connection message
 	fmt.Fprintf(w, "event: connected\ndata: {\"message\":\"Connected to log stream\"}\n\n")
-	w.(http.Flusher).Flush()
+	flusher.Flush()
 
-	// Simulate log streaming
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
+	level := r.URL.Query().Get("level")
+	backlog := 20
+	if raw := r.URL.Query().Get("backlog"); raw != "" {
+		fmt.Sscanf(raw, "%d", &backlog)
+	}
+	for _, entry := range api.logger.RecentLogs(backlog, level) {
+		data, _ := json.Marshal(entry)
+		fmt.Fprintf(w, "event: log\ndata: %s\n\n", data)
+	}
+	flusher.Flush()
+
+	ch := api.logger.SubscribeLogs()
+	defer api.logger.UnsubscribeLogs(ch)
 
 	for {
 		select {
-		case <-notify:
+		case <-r.Context().Done():
 			return
-		case <-ticker.C:
-			logEntry := map[string]interface{}{
-				"timestamp": time.Now(),
-				"level":     "info",
-				"message":   "Log entry from stream",
+		case entry := <-ch:
+			if level != "" && !strings.EqualFold(entry.Level, level) {
+				continue
 			}
-
-			data, _ := json.Marshal(logEntry)
+			data, _ := json.Marshal(entry)
 			fmt.Fprintf(w, "event: log\ndata: %s\n\n", data)
-			w.(http.Flusher).Flush()
+			flusher.Flush()
 		}
 	}
 }
 
 func (api *ManagementAPI) getSystemMetrics(w http.ResponseWriter, r *http.Request) {
-	// This would get actual system metrics
-	// For now, return mock data
-
+	var mem runtime.MemStats
+	runtime.ReadMemStats(&mem)
 	metrics := map[string]interface{}{
-		"cpu": map[string]interface{}{
-			"usage_percent": 25.5,
-			"cores":         8,
+		"process": map[string]interface{}{
+			"goroutines": runtime.NumGoroutine(),
+			"cpus":       runtime.NumCPU(),
 		},
 		"memory": map[string]interface{}{
-			"total_mb":      16384,
-			"used_mb":       8192,
-			"usage_percent": 50.0,
+			"alloc_mb":      mem.Alloc / 1024 / 1024,
+			"sys_mb":        mem.Sys / 1024 / 1024,
+			"heap_alloc_mb": mem.HeapAlloc / 1024 / 1024,
 		},
-		"disk": map[string]interface{}{
-			"total_gb":      500,
-			"used_gb":       250,
-			"usage_percent": 50.0,
-		},
-		"network": map[string]interface{}{
-			"bytes_in":  1048576,
-			"bytes_out": 2097152,
+		"storage": map[string]interface{}{
+			"admin_dir": adminDataDir(),
 		},
 	}
 
@@ -947,23 +1121,37 @@ func (api *ManagementAPI) wsLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	// Register subscriber
-	api.subscriberMu.Lock()
-	api.logsSubscribers[conn] = true
-	api.subscriberMu.Unlock()
+	level := r.URL.Query().Get("level")
+	ch := api.logger.SubscribeLogs()
+	defer api.logger.UnsubscribeLogs(ch)
 
-	// Remove subscriber when connection closes
-	defer func() {
-		api.subscriberMu.Lock()
-		delete(api.logsSubscribers, conn)
-		api.subscriberMu.Unlock()
+	for _, entry := range api.logger.RecentLogs(20, level) {
+		if err := conn.WriteJSON(entry); err != nil {
+			return
+		}
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
 	}()
 
-	// Keep connection alive
 	for {
-		_, _, err := conn.ReadMessage()
-		if err != nil {
-			break
+		select {
+		case <-done:
+			return
+		case entry := <-ch:
+			if level != "" && !strings.EqualFold(entry.Level, level) {
+				continue
+			}
+			if err := conn.WriteJSON(entry); err != nil {
+				return
+			}
 		}
 	}
 }
@@ -1030,17 +1218,10 @@ func (api *ManagementAPI) broadcastToSubscribers(subscribers map[*websocket.Conn
 // Certificate management (placeholder implementations)
 
 func (api *ManagementAPI) listCertificates(w http.ResponseWriter, r *http.Request) {
-	certificates := []map[string]interface{}{
-		{
-			"id":          "cert-1",
-			"name":        "main-cert",
-			"type":        "tls",
-			"subject":     "CN=example.com",
-			"issuer":      "CN=Let's Encrypt",
-			"valid_from":  time.Now().AddDate(0, -1, 0),
-			"valid_until": time.Now().AddDate(0, 2, 0),
-			"status":      "valid",
-		},
+	certificates, err := loadManagedCertificates()
+	if err != nil {
+		api.writeError(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 
 	response := map[string]interface{}{
@@ -1050,24 +1231,287 @@ func (api *ManagementAPI) listCertificates(w http.ResponseWriter, r *http.Reques
 }
 
 func (api *ManagementAPI) uploadCertificate(w http.ResponseWriter, r *http.Request) {
-	// This would handle certificate upload
-	// For now, return success
+	var req struct {
+		Name    string `json:"name"`
+		Type    string `json:"type"`
+		CertPEM string `json:"cert_pem"`
+		KeyPEM  string `json:"key_pem"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		api.writeError(w, "Invalid certificate payload", http.StatusBadRequest)
+		return
+	}
+	meta, err := saveManagedCertificate(req.Name, req.Type, req.CertPEM, req.KeyPEM)
+	if err != nil {
+		api.writeError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	response := APIResponse{
 		Success: true,
 		Message: "Certificate uploaded successfully",
 		Data: map[string]interface{}{
-			"certificate_id": "cert-2",
+			"certificate_id": meta["id"],
 		},
 	}
 	api.writeJSON(w, response)
 }
 
-func (api *ManagementAPI) deleteCertificate(w http.ResponseWriter, r *http.Request) {
-	_ = mux.Vars(r)["id"] // Extract but don't use for now
+func (api *ManagementAPI) createEnrollmentToken(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name      string `json:"name"`
+		TTLMinute int    `json:"ttl_minutes"`
+		ServerURL string `json:"server_url"`
+		EnrollURL string `json:"enroll_url"`
+		ClientCN  string `json:"client_cn"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		api.writeError(w, "Invalid enrollment token payload", http.StatusBadRequest)
+		return
+	}
 
-	// This would delete the certificate
-	// For now, return success
+	if strings.TrimSpace(req.Name) == "" {
+		req.Name = "iket-cli"
+	}
+	if req.TTLMinute <= 0 {
+		req.TTLMinute = 15
+	}
+	if req.TTLMinute > 1440 {
+		api.writeError(w, "ttl_minutes must be between 1 and 1440", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.ClientCN) == "" {
+		req.ClientCN = sanitizedClientCommonName(req.Name)
+	}
+
+	existing, err := listEnrollmentTokenRecords()
+	if err != nil {
+		api.writeError(w, "Failed to inspect enrollment tokens", http.StatusInternalServerError)
+		return
+	}
+	activeCount := 0
+	now := time.Now().UTC()
+	for _, record := range existing {
+		if isActiveEnrollmentToken(record, now) {
+			activeCount++
+		}
+	}
+	maxActive := api.gateway.GetConfig().Security.TLS.EffectiveEnrollmentMaxActive()
+	if activeCount >= maxActive {
+		api.writeError(w, fmt.Sprintf("active enrollment token limit reached (%d)", maxActive), http.StatusConflict)
+		return
+	}
+
+	caKey, caCert, caPEM, err := loadEnrollmentCA(api.gateway.GetConfig().Security.TLS)
+	if err != nil {
+		api.writeError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	_ = caKey
+	_ = caCert
+
+	id, err := randomHex(6)
+	if err != nil {
+		api.writeError(w, "Failed to generate enrollment token", http.StatusInternalServerError)
+		return
+	}
+	secret, err := randomHex(16)
+	if err != nil {
+		api.writeError(w, "Failed to generate enrollment token", http.StatusInternalServerError)
+		return
+	}
+
+	record := enrollmentTokenRecord{
+		ID:        id,
+		Name:      req.Name,
+		TokenHash: hashEnrollmentSecret(secret),
+		CreatedAt: time.Now().UTC(),
+		ExpiresAt: time.Now().UTC().Add(time.Duration(req.TTLMinute) * time.Minute),
+		ServerURL: strings.TrimSpace(req.ServerURL),
+		EnrollURL: strings.TrimSpace(req.EnrollURL),
+		ClientCN:  req.ClientCN,
+	}
+	if err := saveEnrollmentTokenRecord(record); err != nil {
+		api.writeError(w, "Failed to persist enrollment token", http.StatusInternalServerError)
+		return
+	}
+
+	api.logger.Info("Enrollment token created",
+		logging.String("event", "enrollment_token_created"),
+		logging.String("token_id", id),
+		logging.String("token_name", req.Name),
+		logging.String("client_cn", req.ClientCN),
+		logging.String("client_ip", gateway.GetClientIP(r)),
+		logging.Int("ttl_minutes", req.TTLMinute),
+		logging.Int("active_tokens", activeCount+1),
+	)
+
+	api.writeJSON(w, map[string]interface{}{
+		"success": true,
+		"data": map[string]interface{}{
+			"id":         id,
+			"name":       req.Name,
+			"token":      id + "." + secret,
+			"expires_at": record.ExpiresAt,
+			"server_url": record.ServerURL,
+			"enroll_url": record.EnrollURL,
+			"client_cn":  record.ClientCN,
+			"ca_pem":     string(caPEM),
+		},
+	})
+}
+
+func (api *ManagementAPI) enrollClientCertificate(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Token     string `json:"token"`
+		Name      string `json:"name"`
+		CSRPEM    string `json:"csr_pem"`
+		ServerURL string `json:"server_url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		api.writeError(w, "Invalid enrollment request", http.StatusBadRequest)
+		return
+	}
+
+	id, secret, err := parseEnrollmentToken(req.Token)
+	if err != nil {
+		api.writeError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	record, err := loadEnrollmentTokenRecord(id)
+	if err != nil {
+		api.writeError(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	if record.TokenHash != hashEnrollmentSecret(secret) {
+		api.writeError(w, "Invalid enrollment token", http.StatusUnauthorized)
+		return
+	}
+	if !record.UsedAt.IsZero() {
+		api.writeError(w, "Enrollment token has already been used", http.StatusConflict)
+		return
+	}
+	if time.Now().UTC().After(record.ExpiresAt) {
+		api.writeError(w, "Enrollment token has expired", http.StatusUnauthorized)
+		return
+	}
+	if strings.TrimSpace(req.CSRPEM) == "" {
+		api.writeError(w, "csr_pem is required", http.StatusBadRequest)
+		return
+	}
+
+	caKey, caCert, caPEM, err := loadEnrollmentCA(api.gateway.GetConfig().Security.TLS)
+	if err != nil {
+		api.writeError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	commonName := record.ClientCN
+	if commonName == "" {
+		commonName = sanitizedClientCommonName(firstNonEmpty(req.Name, record.Name, "iket-cli"))
+	}
+	certPEM, cert, err := signEnrollmentCSR([]byte(req.CSRPEM), commonName, caKey, caCert)
+	if err != nil {
+		api.writeError(w, fmt.Sprintf("Failed to sign CSR: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	record.UsedAt = time.Now().UTC()
+	if strings.TrimSpace(req.ServerURL) != "" {
+		record.ServerURL = strings.TrimSpace(req.ServerURL)
+	}
+	if err := saveEnrollmentTokenRecord(*record); err != nil {
+		api.writeError(w, "Failed to finalize enrollment token", http.StatusInternalServerError)
+		return
+	}
+
+	api.logger.Info("Enrollment token redeemed",
+		logging.String("event", "enrollment_token_redeemed"),
+		logging.String("token_id", record.ID),
+		logging.String("token_name", record.Name),
+		logging.String("client_cn", commonName),
+		logging.String("client_ip", gateway.GetClientIP(r)),
+	)
+
+	api.writeJSON(w, map[string]interface{}{
+		"success": true,
+		"data": map[string]interface{}{
+			"cert_pem":    string(certPEM),
+			"ca_pem":      string(caPEM),
+			"server_url":  record.ServerURL,
+			"subject":     cert.Subject.String(),
+			"valid_until": cert.NotAfter,
+		},
+	})
+}
+
+func (api *ManagementAPI) listEnrollmentTokens(w http.ResponseWriter, r *http.Request) {
+	records, err := listEnrollmentTokenRecords()
+	if err != nil {
+		api.writeError(w, "Failed to list enrollment tokens", http.StatusInternalServerError)
+		return
+	}
+	now := time.Now().UTC()
+	items := make([]map[string]interface{}, 0, len(records))
+	activeCount := 0
+	for _, record := range records {
+		active := isActiveEnrollmentToken(record, now)
+		if active {
+			activeCount++
+		}
+		items = append(items, map[string]interface{}{
+			"id":         record.ID,
+			"name":       record.Name,
+			"created_at": record.CreatedAt,
+			"expires_at": record.ExpiresAt,
+			"used_at":    record.UsedAt,
+			"server_url": record.ServerURL,
+			"enroll_url": record.EnrollURL,
+			"client_cn":  record.ClientCN,
+			"active":     active,
+		})
+	}
+	api.writeJSON(w, map[string]interface{}{
+		"tokens":             items,
+		"active_count":       activeCount,
+		"max_active_allowed": api.gateway.GetConfig().Security.TLS.EffectiveEnrollmentMaxActive(),
+	})
+}
+
+func (api *ManagementAPI) revokeEnrollmentToken(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	record, err := loadEnrollmentTokenRecord(id)
+	if err != nil {
+		api.writeError(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	if err := deleteEnrollmentTokenRecord(id); err != nil {
+		api.writeError(w, "Failed to revoke enrollment token", http.StatusInternalServerError)
+		return
+	}
+
+	api.logger.Info("Enrollment token revoked",
+		logging.String("event", "enrollment_token_revoked"),
+		logging.String("token_id", id),
+		logging.String("token_name", record.Name),
+		logging.String("client_ip", gateway.GetClientIP(r)),
+	)
+
+	api.writeJSON(w, APIResponse{
+		Success: true,
+		Message: "Enrollment token revoked",
+		Data: map[string]interface{}{
+			"id":   id,
+			"name": record.Name,
+		},
+	})
+}
+
+func (api *ManagementAPI) deleteCertificate(w http.ResponseWriter, r *http.Request) {
+	if err := deleteManagedCertificate(mux.Vars(r)["id"]); err != nil {
+		api.writeError(w, err.Error(), http.StatusNotFound)
+		return
+	}
 
 	response := APIResponse{
 		Success: true,
@@ -1079,15 +1523,19 @@ func (api *ManagementAPI) deleteCertificate(w http.ResponseWriter, r *http.Reque
 // Backup & restore (placeholder implementations)
 
 func (api *ManagementAPI) createBackup(w http.ResponseWriter, r *http.Request) {
-	backupID := fmt.Sprintf("backup-%s", time.Now().Format("2006-01-02-15-04"))
+	backupID, filePath, size, err := createConfigBackup(api.gateway.GetConfig())
+	if err != nil {
+		api.writeError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 
 	response := APIResponse{
 		Success: true,
 		Message: "Backup created successfully",
 		Data: map[string]interface{}{
 			"backup_id":  backupID,
-			"filename":   fmt.Sprintf("iket-backup-%s.tar.gz", time.Now().Format("2006-01-02-15-04")),
-			"size_bytes": 1048576,
+			"filename":   filepath.Base(filePath),
+			"size_bytes": size,
 			"created_at": time.Now(),
 		},
 	}
@@ -1095,13 +1543,10 @@ func (api *ManagementAPI) createBackup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *ManagementAPI) listBackups(w http.ResponseWriter, r *http.Request) {
-	backups := []map[string]interface{}{
-		{
-			"id":         "backup-2024-01-15-12-45",
-			"filename":   "iket-backup-2024-01-15-12-45.tar.gz",
-			"size_bytes": 1048576,
-			"created_at": time.Now().Add(-2 * time.Hour),
-		},
+	backups, err := listConfigBackups()
+	if err != nil {
+		api.writeError(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 
 	response := map[string]interface{}{
@@ -1111,10 +1556,11 @@ func (api *ManagementAPI) listBackups(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *ManagementAPI) restoreBackup(w http.ResponseWriter, r *http.Request) {
-	_ = mux.Vars(r)["id"] // Extract but don't use for now
-
-	// This would restore the backup
-	// For now, return success
+	if err := restoreConfigBackup(api.gateway, mux.Vars(r)["id"]); err != nil {
+		api.writeError(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	api.lastReload = time.Now()
 
 	response := APIResponse{
 		Success: true,
@@ -1131,6 +1577,565 @@ func (api *ManagementAPI) restoreBackup(w http.ResponseWriter, r *http.Request) 
 func (api *ManagementAPI) writeJSON(w http.ResponseWriter, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(data)
+}
+
+type routeRecord struct {
+	ID                 string
+	ServiceConfigIndex int
+	ServiceIndex       int
+	RouteIndex         int
+	Service            config.Service
+	Route              config.RouterConfig
+	EffectivePath      string
+}
+
+func cloneConfig(cfg *config.Config) (*config.Config, error) {
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		return nil, err
+	}
+	var cloned config.Config
+	if err := json.Unmarshal(data, &cloned); err != nil {
+		return nil, err
+	}
+	return &cloned, nil
+}
+
+func (api *ManagementAPI) routeRecords(cfg *config.Config) []routeRecord {
+	if cfg == nil {
+		return nil
+	}
+	records := make([]routeRecord, 0)
+	for sci, svcCfg := range cfg.Services {
+		for si, svc := range svcCfg.Services {
+			for ri, route := range svc.Routes {
+				records = append(records, routeRecord{
+					ID:                 stableRouteID(svc.Name, svc.EffectiveRoutePath(route), route.EffectiveMethods()),
+					ServiceConfigIndex: sci,
+					ServiceIndex:       si,
+					RouteIndex:         ri,
+					Service:            svc,
+					Route:              route,
+					EffectivePath:      svc.EffectiveRoutePath(route),
+				})
+			}
+		}
+	}
+	return records
+}
+
+func (api *ManagementAPI) routeInfoFromRecord(record routeRecord) RouteInfo {
+	timeout := 0
+	if record.Route.Timeout != nil {
+		timeout = int(record.Route.Timeout.Seconds())
+	}
+	return RouteInfo{
+		ID:          record.ID,
+		Path:        record.EffectivePath,
+		Destination: record.Service.Host,
+		Methods:     record.Route.EffectiveMethods(),
+		RequireAuth: record.Route.RequireAuth,
+		Timeout:     timeout,
+		StripPath:   record.Route.StripPath,
+		Enabled:     record.Route.IsEnabled(),
+		Stats: map[string]interface{}{
+			"requests": len(api.logger.RecentLogs(500, "")),
+			"errors":   len(api.logger.RecentLogs(500, "error")),
+		},
+	}
+}
+
+func stableRouteID(serviceName, effectivePath string, methods []string) string {
+	normalizedMethods := make([]string, len(methods))
+	copy(normalizedMethods, methods)
+	for i := range normalizedMethods {
+		normalizedMethods[i] = strings.ToUpper(normalizedMethods[i])
+	}
+	payload := strings.Join([]string{serviceName, effectivePath, strings.Join(normalizedMethods, ",")}, "|")
+	sum := sha1.Sum([]byte(payload))
+	return fmt.Sprintf("route-%x", sum[:6])
+}
+
+func (api *ManagementAPI) findRouteRecord(cfg *config.Config, id string) (routeRecord, error) {
+	for _, record := range api.routeRecords(cfg) {
+		if record.ID == id {
+			return record, nil
+		}
+	}
+	return routeRecord{}, fmt.Errorf("route not found")
+}
+
+func (api *ManagementAPI) findRouteByServicePathMethod(cfg *config.Config, serviceName, path string, methods []string) (routeRecord, error) {
+	for _, record := range api.routeRecords(cfg) {
+		if record.Service.Name == serviceName && record.Route.Path == path && sameMethods(record.Route.EffectiveMethods(), methods) {
+			return record, nil
+		}
+	}
+	return routeRecord{}, fmt.Errorf("route not found")
+}
+
+func sameMethods(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := make(map[string]int, len(a))
+	for _, m := range a {
+		seen[strings.ToUpper(m)]++
+	}
+	for _, m := range b {
+		key := strings.ToUpper(m)
+		if seen[key] == 0 {
+			return false
+		}
+		seen[key]--
+	}
+	return true
+}
+
+func findServiceByName(cfg *config.Config, name string) (*config.Service, error) {
+	for sci := range cfg.Services {
+		for si := range cfg.Services[sci].Services {
+			if cfg.Services[sci].Services[si].Name == name {
+				return &cfg.Services[sci].Services[si], nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("service not found")
+}
+
+func mergeRouteUpdate(dst *config.RouterConfig, src config.RouterConfig) {
+	if src.Path != "" {
+		dst.Path = src.Path
+	}
+	if src.Method != "" {
+		dst.Method = src.Method
+	}
+	if len(src.Methods) > 0 {
+		dst.Methods = src.Methods
+	}
+	if src.Enabled != nil {
+		dst.Enabled = src.Enabled
+	}
+	if src.RequireAuth {
+		dst.RequireAuth = src.RequireAuth
+	}
+	if src.RequireJwt {
+		dst.RequireJwt = src.RequireJwt
+	}
+	if src.StripPath {
+		dst.StripPath = src.StripPath
+	}
+	if src.Name != "" {
+		dst.Name = src.Name
+	}
+	if src.Description != "" {
+		dst.Description = src.Description
+	}
+	if len(src.Backends) > 0 {
+		dst.Backends = src.Backends
+	}
+	if len(src.Headers) > 0 {
+		dst.Headers = src.Headers
+	}
+	if len(src.Scopes) > 0 {
+		dst.Scopes = src.Scopes
+	}
+	if len(src.Roles) > 0 {
+		dst.Roles = src.Roles
+	}
+	if src.AuthPlugin != "" {
+		dst.AuthPlugin = src.AuthPlugin
+	}
+}
+
+func applyRouteRawUpdate(dst *config.RouterConfig, raw map[string]interface{}) {
+	if value, ok := raw["requireAuth"].(bool); ok {
+		dst.RequireAuth = value
+	}
+	if value, ok := raw["requireJwt"].(bool); ok {
+		dst.RequireJwt = value
+	}
+	if value, ok := raw["stripPath"].(bool); ok {
+		dst.StripPath = value
+	}
+	if value, ok := raw["enabled"].(bool); ok {
+		dst.Enabled = config.NewBool(value)
+	}
+}
+
+func (api *ManagementAPI) setRouteEnabled(id string, enabled bool) error {
+	cfg := api.gateway.GetConfig()
+	record, err := api.findRouteRecord(cfg, id)
+	if err != nil {
+		return err
+	}
+	simCfg, err := cloneConfig(cfg)
+	if err != nil {
+		return err
+	}
+	simCfg.Services[record.ServiceConfigIndex].Services[record.ServiceIndex].Routes[record.RouteIndex].Enabled = config.NewBool(enabled)
+	return api.gateway.UpdateConfig(simCfg)
+}
+
+func (api *ManagementAPI) pluginEnabled(name string) bool {
+	cfg := api.gateway.GetConfig()
+	if cfg == nil {
+		return false
+	}
+	pluginCfg, ok := cfg.GetPluginConfig(name)
+	if !ok {
+		return false
+	}
+	if enabled, ok := pluginCfg["enabled"].(bool); ok {
+		return enabled
+	}
+	return true
+}
+
+func (api *ManagementAPI) setPluginEnabled(name string, enabled bool) error {
+	p, err := api.registry.Get(name)
+	if err != nil {
+		return fmt.Errorf("plugin not found")
+	}
+	cfg := api.gateway.GetConfig()
+	if cfg == nil {
+		return fmt.Errorf("configuration not available")
+	}
+	simCfg, err := cloneConfig(cfg)
+	if err != nil {
+		return err
+	}
+	pluginCfg, _ := simCfg.GetPluginConfig(name)
+	if pluginCfg == nil {
+		pluginCfg = map[string]interface{}{}
+	}
+	pluginCfg["enabled"] = enabled
+	simCfg.SetPluginConfig(name, pluginCfg)
+	if err := p.Initialize(pluginCfg); err != nil {
+		return err
+	}
+	return api.gateway.UpdateConfig(simCfg)
+}
+
+func adminDataDir() string {
+	return filepath.Join(".iket-admin")
+}
+
+func certificatesDir() string {
+	return filepath.Join(adminDataDir(), "certificates")
+}
+
+func backupsDir() string {
+	return filepath.Join(adminDataDir(), "backups")
+}
+
+func enrollmentTokensDir() string {
+	return filepath.Join(adminDataDir(), "enrollment-tokens")
+}
+
+type enrollmentTokenRecord struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	TokenHash string    `json:"token_hash"`
+	CreatedAt time.Time `json:"created_at"`
+	ExpiresAt time.Time `json:"expires_at"`
+	UsedAt    time.Time `json:"used_at,omitempty"`
+	ServerURL string    `json:"server_url,omitempty"`
+	EnrollURL string    `json:"enroll_url,omitempty"`
+	ClientCN  string    `json:"client_cn,omitempty"`
+}
+
+func loadManagedCertificates() ([]map[string]interface{}, error) {
+	if err := os.MkdirAll(certificatesDir(), 0755); err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(certificatesDir())
+	if err != nil {
+		return nil, err
+	}
+	out := make([]map[string]interface{}, 0)
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(certificatesDir(), entry.Name()))
+		if err != nil {
+			continue
+		}
+		var meta map[string]interface{}
+		if err := json.Unmarshal(data, &meta); err == nil {
+			out = append(out, meta)
+		}
+	}
+	return out, nil
+}
+
+func saveManagedCertificate(name, certType, certPEM, keyPEM string) (map[string]interface{}, error) {
+	if name == "" || certPEM == "" {
+		return nil, fmt.Errorf("name and cert_pem are required")
+	}
+	block, _ := pem.Decode([]byte(certPEM))
+	if block == nil {
+		return nil, fmt.Errorf("invalid cert_pem")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("invalid certificate: %w", err)
+	}
+	if err := os.MkdirAll(certificatesDir(), 0755); err != nil {
+		return nil, err
+	}
+	sum := sha1.Sum([]byte(name + cert.Subject.String() + time.Now().String()))
+	id := fmt.Sprintf("%x", sum[:6])
+	meta := map[string]interface{}{
+		"id":          id,
+		"name":        name,
+		"type":        certType,
+		"subject":     cert.Subject.String(),
+		"issuer":      cert.Issuer.String(),
+		"valid_from":  cert.NotBefore,
+		"valid_until": cert.NotAfter,
+		"status":      "valid",
+		"cert_pem":    certPEM,
+	}
+	if keyPEM != "" {
+		meta["key_pem"] = keyPEM
+	}
+	data, _ := json.MarshalIndent(meta, "", "  ")
+	if err := os.WriteFile(filepath.Join(certificatesDir(), id+".json"), data, 0644); err != nil {
+		return nil, err
+	}
+	return meta, nil
+}
+
+func deleteManagedCertificate(id string) error {
+	path := filepath.Join(certificatesDir(), id+".json")
+	if _, err := os.Stat(path); err != nil {
+		return fmt.Errorf("certificate not found")
+	}
+	return os.Remove(path)
+}
+
+func saveEnrollmentTokenRecord(record enrollmentTokenRecord) error {
+	if err := os.MkdirAll(enrollmentTokensDir(), 0700); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(enrollmentTokensDir(), record.ID+".json"), data, 0600)
+}
+
+func loadEnrollmentTokenRecord(id string) (*enrollmentTokenRecord, error) {
+	data, err := os.ReadFile(filepath.Join(enrollmentTokensDir(), id+".json"))
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("enrollment token not found")
+		}
+		return nil, err
+	}
+	var record enrollmentTokenRecord
+	if err := json.Unmarshal(data, &record); err != nil {
+		return nil, err
+	}
+	return &record, nil
+}
+
+func listEnrollmentTokenRecords() ([]enrollmentTokenRecord, error) {
+	if err := os.MkdirAll(enrollmentTokensDir(), 0700); err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(enrollmentTokensDir())
+	if err != nil {
+		return nil, err
+	}
+	out := make([]enrollmentTokenRecord, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(enrollmentTokensDir(), entry.Name()))
+		if err != nil {
+			continue
+		}
+		var record enrollmentTokenRecord
+		if err := json.Unmarshal(data, &record); err == nil {
+			out = append(out, record)
+		}
+	}
+	return out, nil
+}
+
+func deleteEnrollmentTokenRecord(id string) error {
+	path := filepath.Join(enrollmentTokensDir(), id+".json")
+	if _, err := os.Stat(path); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("enrollment token not found")
+		}
+		return err
+	}
+	return os.Remove(path)
+}
+
+func isActiveEnrollmentToken(record enrollmentTokenRecord, now time.Time) bool {
+	return record.UsedAt.IsZero() && now.Before(record.ExpiresAt)
+}
+
+func parseEnrollmentToken(token string) (string, string, error) {
+	parts := strings.SplitN(strings.TrimSpace(token), ".", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", fmt.Errorf("invalid enrollment token")
+	}
+	return parts[0], parts[1], nil
+}
+
+func hashEnrollmentSecret(secret string) string {
+	sum := sha256.Sum256([]byte(secret))
+	return hex.EncodeToString(sum[:])
+}
+
+func randomHex(n int) (string, error) {
+	buf := make([]byte, n)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
+}
+
+func loadEnrollmentCA(tlsCfg config.TLSConfig) (*rsa.PrivateKey, *x509.Certificate, []byte, error) {
+	if tlsCfg.ClientCAFile == "" {
+		return nil, nil, nil, fmt.Errorf("client CA is not configured")
+	}
+	caPEM, err := os.ReadFile(tlsCfg.ClientCAFile)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	caBlock, _ := pem.Decode(caPEM)
+	if caBlock == nil {
+		return nil, nil, nil, fmt.Errorf("invalid client CA certificate")
+	}
+	caCert, err := x509.ParseCertificate(caBlock.Bytes)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	caKeyPath := filepath.Join(filepath.Dir(tlsCfg.ClientCAFile), "ca.key")
+	caKeyPEM, err := os.ReadFile(caKeyPath)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil, nil, fmt.Errorf("ca.key not found next to %s; enrollment requires a locally managed CA", tlsCfg.ClientCAFile)
+		}
+		return nil, nil, nil, err
+	}
+	keyBlock, _ := pem.Decode(caKeyPEM)
+	if keyBlock == nil {
+		return nil, nil, nil, fmt.Errorf("invalid ca private key")
+	}
+	caKey, err := x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return caKey, caCert, caPEM, nil
+}
+
+func signEnrollmentCSR(csrPEM []byte, commonName string, caKey *rsa.PrivateKey, caCert *x509.Certificate) ([]byte, *x509.Certificate, error) {
+	block, _ := pem.Decode(csrPEM)
+	if block == nil {
+		return nil, nil, fmt.Errorf("invalid csr_pem")
+	}
+	csr, err := x509.ParseCertificateRequest(block.Bytes)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := csr.CheckSignature(); err != nil {
+		return nil, nil, err
+	}
+
+	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return nil, nil, err
+	}
+	template := &x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject: pkix.Name{
+			CommonName:   commonName,
+			Organization: []string{"Iket"},
+		},
+		NotBefore:             time.Now().Add(-1 * time.Hour),
+		NotAfter:              time.Now().AddDate(1, 0, 0),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		BasicConstraintsValid: true,
+	}
+	certDER, err := x509.CreateCertificate(rand.Reader, template, caCert, csr.PublicKey, caKey)
+	if err != nil {
+		return nil, nil, err
+	}
+	cert, err := x509.ParseCertificate(certDER)
+	if err != nil {
+		return nil, nil, err
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER}), cert, nil
+}
+
+func createConfigBackup(cfg *config.Config) (string, string, int64, error) {
+	if err := os.MkdirAll(backupsDir(), 0755); err != nil {
+		return "", "", 0, err
+	}
+	id := fmt.Sprintf("backup-%s", time.Now().Format("20060102-150405"))
+	path := filepath.Join(backupsDir(), id+".json")
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return "", "", 0, err
+	}
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return "", "", 0, err
+	}
+	return id, path, int64(len(data)), nil
+}
+
+func listConfigBackups() ([]map[string]interface{}, error) {
+	if err := os.MkdirAll(backupsDir(), 0755); err != nil {
+		return nil, err
+	}
+	files, err := os.ReadDir(backupsDir())
+	if err != nil {
+		return nil, err
+	}
+	backups := make([]map[string]interface{}, 0)
+	for _, file := range files {
+		if file.IsDir() || filepath.Ext(file.Name()) != ".json" {
+			continue
+		}
+		info, err := file.Info()
+		if err != nil {
+			continue
+		}
+		backups = append(backups, map[string]interface{}{
+			"id":         strings.TrimSuffix(file.Name(), ".json"),
+			"filename":   file.Name(),
+			"size_bytes": info.Size(),
+			"created_at": info.ModTime(),
+		})
+	}
+	return backups, nil
+}
+
+func restoreConfigBackup(gw *gateway.Gateway, id string) error {
+	path := filepath.Join(backupsDir(), id+".json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("backup not found")
+		}
+		return err
+	}
+	var cfg config.Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return err
+	}
+	return gw.UpdateConfig(&cfg)
 }
 
 func (api *ManagementAPI) writeError(w http.ResponseWriter, message string, statusCode int) {
@@ -1164,6 +2169,40 @@ func getErrorCode(statusCode int) string {
 	}
 }
 
+func sanitizedClientCommonName(name string) string {
+	name = strings.TrimSpace(strings.ToLower(name))
+	if name == "" {
+		return "iket-cli"
+	}
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '-' || r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if out == "" {
+		return "iket-cli"
+	}
+	return out
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func (api *ManagementAPI) getServices(w http.ResponseWriter, r *http.Request) {
 	cfg := api.gateway.GetConfig()
 	if cfg == nil {
@@ -1182,19 +2221,29 @@ func (api *ManagementAPI) getServices(w http.ResponseWriter, r *http.Request) {
 				"base_path":   svc.BasePath,
 				"tags":        svc.Tags,
 				"group":       svc.Group,
+				"scopes":      svc.Scopes,
 				"routes":      make([]map[string]interface{}, 0),
 			}
 			for _, route := range svc.Routes {
 				routeInfo := map[string]interface{}{
 					"path":        route.Path,
 					"method":      route.Method,
+					"methods":     route.EffectiveMethods(),
 					"name":        route.Name,
 					"description": route.Description,
 					"tags":        route.Tags,
 					"group":       route.Group,
 					"priority":    route.Priority,
-					"enabled":     route.Enabled,
-					// Do not include backend URLs or secrets
+					"enabled":     route.IsEnabled(),
+					"requireAuth": route.RequireAuth,
+					"requireJwt":  route.RequireJwt,
+					"stripPath":   route.StripPath,
+					"scopes":      route.Scopes,
+					"roles":       route.Roles,
+					"auth_plugin": route.AuthPlugin,
+					"backend":     route.Backends,
+					"rateLimit":   route.RateLimit,
+					"headers":     route.Headers,
 				}
 				serviceInfo["routes"] = append(serviceInfo["routes"].([]map[string]interface{}), routeInfo)
 			}
@@ -1283,12 +2332,12 @@ func (api *ManagementAPI) createService(w http.ResponseWriter, r *http.Request) 
 	if dryRun {
 		msg := fmt.Sprintf("[DRY RUN] %d service(s) would be added, %d route(s) would be added, %d route(s) would be updated", addedServices, len(addedRoutes), len(updatedRoutes))
 		api.writeJSON(w, map[string]interface{}{
-			"success":         true,
-			"dry_run":         true,
-			"added_services":  addedServices,
-			"added_routes":    addedRoutes,
-			"updated_routes":  updatedRoutes,
-			"message":         msg,
+			"success":        true,
+			"dry_run":        true,
+			"added_services": addedServices,
+			"added_routes":   addedRoutes,
+			"updated_routes": updatedRoutes,
+			"message":        msg,
 		})
 		return
 	}
@@ -1296,11 +2345,11 @@ func (api *ManagementAPI) createService(w http.ResponseWriter, r *http.Request) 
 	api.gateway.UpdateConfig(&simCfg)
 	msg := fmt.Sprintf("%d service(s) added, %d route(s) added, %d route(s) updated", addedServices, len(addedRoutes), len(updatedRoutes))
 	api.writeJSON(w, map[string]interface{}{
-		"success":         true,
-		"added_services":  addedServices,
-		"added_routes":    addedRoutes,
-		"updated_routes":  updatedRoutes,
-		"message":         msg,
+		"success":        true,
+		"added_services": addedServices,
+		"added_routes":   addedRoutes,
+		"updated_routes": updatedRoutes,
+		"message":        msg,
 	})
 }
 
@@ -1555,4 +2604,3 @@ func (api *ManagementAPI) removeClient(w http.ResponseWriter, r *http.Request) {
 
 	api.writeJSON(w, APIResponse{Success: true, Message: "Client removed successfully"})
 }
-

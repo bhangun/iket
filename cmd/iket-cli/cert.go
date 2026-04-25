@@ -11,19 +11,20 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 )
 
 var (
-	certDir       string
-	caDir         string
+	certDir        string
+	caDir          string
 	serverHostname string
 	serverIP       string
-	caDays        int
-	certDays      int
-	keySize       int
+	caDays         int
+	certDays       int
+	keySize        int
 )
 
 func initCertCmd(rootCmd *cobra.Command) {
@@ -47,13 +48,13 @@ Component can be:
 
 Examples:
   # Generate all certificates for development
-  iket-cli cert gen
+  iket cert gen
 
   # Generate all certificates with custom hostnames
-  iket-cli cert gen --server-hostname iket.example.com --server-ip 192.168.1.100
+  iket cert gen --server-hostname iket.example.com --server-ip 192.168.1.100
 
   # Generate only client certificate
-  iket-cli cert gen client
+  iket cert gen client
 `,
 		Args: cobra.MaximumNArgs(1),
 		RunE: runCertGen,
@@ -77,6 +78,72 @@ Examples:
 	}
 	statusCmd.Flags().StringVar(&certDir, "cert-dir", "", "Certificate directory")
 	certCmd.AddCommand(statusCmd)
+
+	var (
+		importContextName string
+		importURL         string
+		importCertDir     string
+		importStrict      bool
+		importSkipVerify  bool
+		importNoVerify    bool
+		importActivate    bool
+	)
+	importCmd := &cobra.Command{
+		Use:   "import",
+		Short: "Import a client certificate bundle into a CLI context",
+		Long:  "Copy ca.crt, client.crt, and client.key into ~/.iket/certs/contexts and create or update a matching CLI context.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			bundle, err := discoverCertBundle(importCertDir)
+			if err != nil {
+				return err
+			}
+
+			installed, err := installCertBundle(importContextName, bundle)
+			if err != nil {
+				return err
+			}
+
+			cfg, err := loadCLIConfig()
+			if err != nil {
+				return err
+			}
+
+			ctx := cfg.Contexts[importContextName]
+			if strings.TrimSpace(importURL) != "" {
+				ctx.ServerURL = importURL
+			}
+			if ctx.ServerURL == "" {
+				ctx.ServerURL = "https://localhost:8443"
+			}
+			ctx.CAFile = installed.CAFile
+			ctx.CertFile = installed.CertFile
+			ctx.KeyFile = installed.KeyFile
+			ctx.SkipVerify = importSkipVerify
+			ctx.Strict = importStrict
+
+			if !importNoVerify {
+				if err := verifyCLIContext(ctx); err != nil {
+					return fmt.Errorf("certificates imported from %s, but gateway verification failed: %w", bundle.SourceHint, err)
+				}
+			}
+
+			if err := saveContextEntry(importContextName, ctx, importActivate); err != nil {
+				return err
+			}
+
+			fmt.Printf("Imported certificates from %s into context %q\n", bundle.SourceHint, importContextName)
+			fmt.Printf("Context URL: %s\n", ctx.ServerURL)
+			return nil
+		},
+	}
+	importCmd.Flags().StringVar(&importContextName, "name", "docker", "Context name to create or update")
+	importCmd.Flags().StringVar(&importURL, "url", "", "Gateway URL to store on the context (defaults to existing value or https://localhost:8443)")
+	importCmd.Flags().StringVar(&importCertDir, "cert-dir", "", "Directory containing ca.crt, client.crt, and client.key")
+	importCmd.Flags().BoolVar(&importStrict, "strict", false, "Enable strict mode on the stored context")
+	importCmd.Flags().BoolVar(&importSkipVerify, "skip-verify", false, "Skip server TLS verification")
+	importCmd.Flags().BoolVar(&importNoVerify, "no-verify", false, "Skip the post-import gateway connectivity check")
+	importCmd.Flags().BoolVar(&importActivate, "activate", true, "Set the imported context as the active context")
+	certCmd.AddCommand(importCmd)
 
 	rootCmd.AddCommand(certCmd)
 }
@@ -183,7 +250,7 @@ func generateServerCert(certDir, caDir string) error {
 
 func generateClientCert(certDir, caDir string) error {
 	fmt.Println("Generating client certificate...")
-	return generateCert(certDir, caDir, "client", "iket-cli", "", false)
+	return generateCert(certDir, caDir, "client", "iket", "", false)
 }
 
 func generateCert(certDir, caDir, name, hostname, ip string, isServer bool) error {

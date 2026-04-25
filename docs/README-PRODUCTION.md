@@ -6,7 +6,7 @@ This guide explains how to deploy Iket Gateway in production using Docker with f
 
 A production Iket setup includes:
 - **Iket Gateway** - Main API gateway service
-- **mTLS Security** - Mutual TLS for secure remote administration via `iket-cli`
+- **mTLS Security** - Mutual TLS for secure remote administration via `iket`
 - **Identity & Access** - Integrated with JWT and Basic Auth
 - **Observability** - Prometheus metrics and structured logging
 - **Containerization** - Multi-stage Docker builds and secure non-root execution
@@ -38,7 +38,7 @@ curl -fsSL https://raw.githubusercontent.com/bhangun/iket/main/scripts/install.s
 
 This script will:
 1. Detect your platform and install dependencies.
-2. Build the latest `iket` and `iket-cli` binaries.
+2. Build the latest `iket-server` and `iket` binaries.
 3. Move binaries to `/usr/local/bin`.
 4. Generate a full mTLS certificate chain in `~/.iket/certs`.
 5. Create default production configurations.
@@ -67,7 +67,7 @@ For production, it is **mandatory** to use TLS 1.3 and mTLS for the management A
 2.  **Configure Admin CLI**:
     Use the guided setup to securely link your local CLI to the remote production instance:
     ```bash
-    iket-cli setup
+    iket setup
     ```
     *   **URL**: Use `https://api.yourdomain.com:8443`
     *   **mTLS**: `y`
@@ -80,24 +80,24 @@ For production, it is **mandatory** to use TLS 1.3 and mTLS for the management A
 
 ---
 
-## 🚀 Remote Administration with `iket-cli`
+## 🚀 Remote Administration with `iket`
 
 Production environments are managed via **Contexts**. This prevents accidentally running commands against the wrong environment.
 
 ### Managing Production
 ```bash
 # 1. Switch to production context
-iket-cli context use prod
+iket context use prod
 
 # 2. Verify connectivity
-iket-cli gateway status
+iket gateway status
 
 # 3. Safe reloads after config changes
-iket-cli gateway reload
+iket gateway reload
 ```
 
 ### Automatic Configuration Persistence
-Iket Gateway now features **Automatic File Persistence**. When you make changes via `iket-cli` (e.g., adding a service or updating a route), the gateway automatically saves these changes back to your `config.yaml` or `service.yaml`.
+Iket Gateway now features **Automatic File Persistence**. When you make changes via `iket` (e.g., adding a service or updating a route), the gateway automatically saves these changes back to your `config.yaml` or `service.yaml`.
 
 - **Atomic Writes**: Changes are written to a temporary file and then moved to the final destination. This prevents file corruption even if the system crashes during a write.
 - **Sticky Changes**: All remote modifications survive gateway restarts, making the CLI a reliable tool for long-term administration.
@@ -143,7 +143,7 @@ docker-compose run cli gateway status
 ### Connectivity Issues
 1. Verify the gateway is listening: `sudo lsof -i :8080` (or 8443).
 2. Check logs: `sudo journalctl -u iket -f` or `docker-compose logs -f`.
-3. Check certificate expiry: `iket-cli cert status`.
+3. Check certificate expiry: `iket cert status`.
 
 ### Permission Issues
 Ensure the user running the gateway has read access to certificates and config:

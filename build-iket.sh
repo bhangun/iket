@@ -27,9 +27,9 @@ else
 fi
 
 echo "Building Iket Gateway..."
-go build -o $BIN_DIR/iket ./cmd/iket
+go build -o $BIN_DIR/iket-server ./cmd/iket
 
 echo "Building Iket CLI..."
-go build -o $BIN_DIR/iket-cli ./cmd/iket-cli
+go build -o $BIN_DIR/iket ./cmd/iket-cli
 
 echo "✅ Build complete! Binaries located in: $BIN_DIR/"

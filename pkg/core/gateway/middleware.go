@@ -2,6 +2,8 @@ package gateway
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"io"
 	"net"
 	"net/http"
@@ -33,6 +35,15 @@ import (
 type ctxKey string
 
 const clientIPKey ctxKey = "clientIP"
+const matchedRouteKey ctxKey = "matchedRoute"
+const routeVarsKey ctxKey = "routeVars"
+const tenantRealmKey ctxKey = "tenantRealm"
+const requestIDKey ctxKey = "requestID"
+
+type matchedRouteContext struct {
+	Route config.RouterConfig
+	Vars  map[string]string
+}
 
 // getIP extracts client IP from request headers or RemoteAddr
 func getIP(r *http.Request) string {
@@ -73,6 +84,37 @@ func GetClientIP(r *http.Request) string {
 	return ""
 }
 
+func GetRequestID(r *http.Request) string {
+	if requestID, ok := r.Context().Value(requestIDKey).(string); ok {
+		return requestID
+	}
+	return ""
+}
+
+func GetMatchedRoute(r *http.Request) (config.RouterConfig, bool) {
+	if matched, ok := r.Context().Value(matchedRouteKey).(matchedRouteContext); ok {
+		return matched.Route, true
+	}
+	return config.RouterConfig{}, false
+}
+
+func GetRouteVars(r *http.Request) map[string]string {
+	if matched, ok := r.Context().Value(matchedRouteKey).(matchedRouteContext); ok && matched.Vars != nil {
+		return matched.Vars
+	}
+	if vars, ok := r.Context().Value(routeVarsKey).(map[string]string); ok {
+		return vars
+	}
+	return nil
+}
+
+func GetTenantRealm(r *http.Request) string {
+	if realm, ok := r.Context().Value(tenantRealmKey).(string); ok {
+		return realm
+	}
+	return ""
+}
+
 func AccessLogMiddleware(g *Gateway, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -103,6 +145,29 @@ func AccessLogMiddleware(g *Gateway, next http.Handler) http.Handler {
 	})
 }
 
+func (g *Gateway) routeContextMiddleware() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			match := ResolveRouteMatch(g.config.GetAllRoutesFromServices(g.logger), r.Method, r.URL.Path)
+			if !match.Matched {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			ctx := context.WithValue(r.Context(), matchedRouteKey, matchedRouteContext{
+				Route: match.Route,
+				Vars:  match.Vars,
+			})
+			ctx = context.WithValue(ctx, routeVarsKey, match.Vars)
+			if realm := match.Vars["realm"]; realm != "" {
+				ctx = context.WithValue(ctx, tenantRealmKey, realm)
+			}
+
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
 type contextKey string
 
 const jwtClaimsKey contextKey = "jwtClaims"
@@ -129,8 +194,11 @@ func (g *Gateway) loggingMiddleware() func(http.Handler) http.Handler {
 			g.logger.Info("HTTP request",
 				logging.String("method", r.Method),
 				logging.String("path", r.URL.Path),
+				logging.String("route_name", routeNameForLog(r)),
+				logging.String("service_name", serviceNameForLog(g, r)),
 				logging.String("remote_addr", r.RemoteAddr),
 				logging.String("client_ip", clientIP),
+				logging.String("request_id", GetRequestID(r)),
 				logging.String("user_agent", r.UserAgent()),
 				logging.Int("status_code", wrapped.statusCode),
 				logging.Duration("duration", duration),
@@ -171,7 +239,11 @@ func (g *Gateway) securityHeadersMiddleware() func(http.Handler) http.Handler {
 			// Remove server header
 			w.Header().Del("Server")
 
-			next.ServeHTTP(w, r)
+			requestID := ensureRequestID(r)
+			w.Header().Set("X-Request-Id", requestID)
+			ctx := context.WithValue(r.Context(), requestIDKey, requestID)
+
+			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
 }
@@ -278,56 +350,20 @@ func (g *Gateway) proxyHandler(route config.RouterConfig) http.HandlerFunc {
 			return
 		}
 
-		// Optionally strip path prefix
 		origPath := r.URL.Path
-
-		// If a backend url_pattern is configured, apply it first. This is the
-		// intended behavior for routes like:
-		//   path:       /jahsy/auth/api/{rest:.*}
-		//   url_pattern:/api/{rest:.*}
-		// Without this, Iket will only strip prefixes and forward /auth/profile.
-		if len(route.Backends) > 0 && route.Backends[0].URLPattern != "" {
-			vars := mux.Vars(r)
-			p := applyURLPattern(route.Backends[0].URLPattern, route.Path, origPath, vars)
-			if p != "" {
-				r.URL.Path = destURL.Path + p
-				g.logger.Info(
-					"Proxying request",
-					logging.String("original_path", origPath),
-					logging.String("proxied_path", r.URL.Path),
-					logging.String("destination", destURL.String()),
-				)
-				// continue to proxy below
-				goto DO_PROXY
-			}
+		routeVars := mux.Vars(r)
+		if len(routeVars) == 0 {
+			routeVars = GetRouteVars(r)
 		}
-
-		if route.StripPath {
-			prefix := route.Path
-			if idx := len(prefix); idx > 0 {
-				if i := findWildcardIndex(prefix); i > 0 {
-					prefix = prefix[:i-1]
-				}
-			}
-			if prefix != "" && prefix != "/" && len(origPath) >= len(prefix) && origPath[:len(prefix)] == prefix {
-				stripped := origPath[len(prefix):]
-				if !strings.HasPrefix(stripped, "/") && stripped != "" {
-					stripped = "/" + stripped
-				}
-				if stripped == "" {
-					stripped = "/"
-				}
-				r.URL.Path = destURL.Path + stripped
-			} else {
-				r.URL.Path = destURL.Path
-			}
-		} else {
-			r.URL.Path = destURL.Path + r.URL.Path
+		proxiedPath, err := ComputeProxiedPath(service, route, origPath, routeVars)
+		if err != nil {
+			g.logger.Error("Failed to compute proxied path", err, logging.String("route_path", route.Path), logging.String("destination", destination))
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			return
 		}
+		r.URL.Path = proxiedPath
 
 		g.logger.Info("Proxying request", logging.String("original_path", origPath), logging.String("proxied_path", r.URL.Path), logging.String("destination", destURL.String()))
-
-	DO_PROXY:
 		if isWebSocketRequest(r) {
 			g.logger.Info("Initiating WebSocket proxy", logging.String("path", r.URL.Path), logging.String("destination", destURL.String()))
 			wsOpts := route.WebSocket
@@ -345,9 +381,18 @@ func (g *Gateway) proxyHandler(route config.RouterConfig) http.HandlerFunc {
 		}
 
 		proxy := httputil.NewSingleHostReverseProxy(destURL)
+		proxy.Director = func(req *http.Request) {
+			req.URL.Scheme = destURL.Scheme
+			req.URL.Host = destURL.Host
+			req.Host = destURL.Host
+			normalizeForwardedHeaders(req)
+		}
 		proxy.ModifyResponse = func(resp *http.Response) error {
 			resp.Header.Set("X-Gateway", "Iket")
 			resp.Header.Set("X-Gateway-Route", route.Path)
+			if requestID := GetRequestID(r); requestID != "" {
+				resp.Header.Set("X-Request-Id", requestID)
+			}
 			return nil
 		}
 		proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
@@ -355,14 +400,6 @@ func (g *Gateway) proxyHandler(route config.RouterConfig) http.HandlerFunc {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadGateway)
 			w.Write([]byte(`{"error":"Bad Gateway","message":"Unable to reach the upstream service"}`))
-		}
-		r.URL.Host = destURL.Host
-		r.URL.Scheme = destURL.Scheme
-		r.Header.Set("X-Forwarded-Host", r.Header.Get("Host"))
-		r.Host = destURL.Host
-		headers := http.Header{}
-		for k, v := range r.Header {
-			headers[k] = v
 		}
 		proxy.ServeHTTP(w, r)
 	}
@@ -462,14 +499,7 @@ func proxyWebSocket(w http.ResponseWriter, r *http.Request, destURL *url.URL, lo
 	}
 
 	// Add X-Forwarded headers
-	if clientIP, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-		requestHeader.Set("X-Forwarded-For", clientIP)
-	}
-	requestHeader.Set("X-Forwarded-Proto", "http")
-	if r.TLS != nil {
-		requestHeader.Set("X-Forwarded-Proto", "https")
-	}
-	requestHeader.Set("X-Forwarded-Host", r.Host)
+	normalizeForwardedHeaderMap(r, requestHeader)
 
 	logger.Debug("Dialing backend WebSocket",
 		logging.String("url", backendURL.String()),
@@ -720,17 +750,106 @@ func contains(arr []string, s string) bool {
 
 // matchRoute finds the route config for the current request
 func (g *Gateway) matchRoute(r *http.Request) (config.RouterConfig, bool) {
-	for _, route := range g.config.GetAllRoutesFromServices(g.logger) {
-		// Routes are enabled by default (when Enabled field is not specified in YAML)
-		// Only skip if explicitly disabled
-		if !route.Enabled {
-			continue // skip disabled routes
-		}
-		if route.Path == r.URL.Path {
-			return route, true
-		}
+	if route, ok := GetMatchedRoute(r); ok {
+		return route, true
+	}
+	match := ResolveRouteMatch(g.config.GetAllRoutesFromServices(g.logger), r.Method, r.URL.Path)
+	if match.Matched {
+		return match.Route, true
 	}
 	return config.RouterConfig{}, false
+}
+
+func ensureRequestID(r *http.Request) string {
+	if requestID := r.Header.Get("X-Request-Id"); requestID != "" {
+		return requestID
+	}
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err == nil {
+		requestID := hex.EncodeToString(buf)
+		r.Header.Set("X-Request-Id", requestID)
+		return requestID
+	}
+	requestID := fmt.Sprintf("%d", time.Now().UnixNano())
+	r.Header.Set("X-Request-Id", requestID)
+	return requestID
+}
+
+func normalizeForwardedHeaders(r *http.Request) {
+	normalizeForwardedHeaderMap(r, r.Header)
+}
+
+func normalizeForwardedHeaderMap(r *http.Request, headers http.Header) {
+	clientIP := remotePeerIP(r)
+	if clientIP == "" {
+		clientIP = getIP(r)
+	}
+
+	if existing := headers.Get("X-Forwarded-For"); existing != "" {
+		if clientIP != "" && !forwardedForContains(existing, clientIP) {
+			headers.Set("X-Forwarded-For", existing+", "+clientIP)
+		}
+	} else if clientIP != "" {
+		headers.Set("X-Forwarded-For", clientIP)
+	}
+
+	if r.TLS != nil {
+		headers.Set("X-Forwarded-Proto", "https")
+	} else {
+		headers.Set("X-Forwarded-Proto", "http")
+	}
+	headers.Set("X-Forwarded-Host", originalRequestHost(r))
+	if requestID := ensureRequestID(r); requestID != "" {
+		headers.Set("X-Request-Id", requestID)
+	}
+}
+
+func remotePeerIP(r *http.Request) string {
+	if host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr)); err == nil {
+		return host
+	}
+	return strings.TrimSpace(r.RemoteAddr)
+}
+
+func forwardedForContains(existing, clientIP string) bool {
+	for _, part := range strings.Split(existing, ",") {
+		if strings.TrimSpace(part) == clientIP {
+			return true
+		}
+	}
+	return false
+}
+
+func originalRequestHost(r *http.Request) string {
+	if forwardedHost := r.Header.Get("X-Forwarded-Host"); forwardedHost != "" {
+		return forwardedHost
+	}
+	if r.Host != "" {
+		return r.Host
+	}
+	return r.Header.Get("Host")
+}
+
+func routeNameForLog(r *http.Request) string {
+	if route, ok := GetMatchedRoute(r); ok {
+		if route.Name != "" {
+			return route.Name
+		}
+		return route.Path
+	}
+	return ""
+}
+
+func serviceNameForLog(g *Gateway, r *http.Request) string {
+	route, ok := GetMatchedRoute(r)
+	if !ok {
+		return ""
+	}
+	service := g.config.FindServiceForRoute(route.Path, r.Method)
+	if service == nil {
+		return ""
+	}
+	return service.Name
 }
 
 // Helper to load an RSA public key from a PEM file

@@ -2,7 +2,9 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -25,6 +27,7 @@ func NewConfigValidator() *ConfigValidator {
 		rules: []ValidationRule{
 			&ServerConfigRule{},
 			&SecurityConfigRule{},
+			&StorageConfigRule{},
 			&ServicesConfigRule{},
 			&PluginsConfigRule{},
 		},
@@ -75,6 +78,21 @@ func (r *ServerConfigRule) Validate(cfg *Config) error {
 	return nil
 }
 
+type StorageConfigRule struct{}
+
+func (r *StorageConfigRule) Validate(cfg *Config) error {
+	mode := cfg.Storage.EffectiveMode()
+	switch mode {
+	case "sqlite", "file", "postgres":
+	default:
+		return errors.NewValidationError("storage.mode", "storage mode must be sqlite, file, or postgres")
+	}
+	if mode == "postgres" && strings.TrimSpace(cfg.Storage.PostgresURL) == "" {
+		return errors.NewValidationError("storage.postgres_url", "postgres_url is required when storage mode is postgres")
+	}
+	return nil
+}
+
 // SecurityConfigRule validates security configuration
 type SecurityConfigRule struct{}
 
@@ -85,6 +103,15 @@ func (r *SecurityConfigRule) Validate(cfg *Config) error {
 		}
 		if cfg.Security.TLS.KeyFile == "" {
 			return errors.NewValidationError("security.tls.keyFile", "private key file is required when TLS is enabled")
+		}
+		if cfg.Security.TLS.Port < 0 || cfg.Security.TLS.Port > 65535 {
+			return errors.NewValidationError("security.tls.port", "TLS port must be between 0 and 65535")
+		}
+		if cfg.Security.TLS.EnrollmentPort < 0 || cfg.Security.TLS.EnrollmentPort > 65535 {
+			return errors.NewValidationError("security.tls.enrollmentPort", "enrollment TLS port must be between 0 and 65535")
+		}
+		if cfg.Security.TLS.EnrollmentMaxActive < 0 {
+			return errors.NewValidationError("security.tls.enrollmentMaxActive", "enrollment max active must be zero or greater")
 		}
 	}
 
@@ -111,6 +138,8 @@ func (r *SecurityConfigRule) Validate(cfg *Config) error {
 
 // ServicesConfigRule validates service-based configuration
 type ServicesConfigRule struct{}
+
+var routeTemplateVarPattern = regexp.MustCompile(`\{([A-Za-z0-9_]+)(:[^}]*)?\}`)
 
 func (r *ServicesConfigRule) Validate(cfg *Config) error {
 	if len(cfg.Services) == 0 {
@@ -163,8 +192,8 @@ func (r *ServicesConfigRule) Validate(cfg *Config) error {
 			}
 
 			// Validate host URL
-			if _, err := url.Parse(service.Host); err != nil {
-				return errors.NewValidationError(fmt.Sprintf("services[%d].services[%d].host", i, j), "invalid host URL")
+			if err := validateServiceHost(service.Host); err != nil {
+				return errors.NewValidationError(fmt.Sprintf("services[%d].services[%d].host", i, j), err.Error())
 			}
 
 			// Validate base path if specified
@@ -225,6 +254,9 @@ func (r *ServicesConfigRule) Validate(cfg *Config) error {
 				for l, backend := range route.Backends {
 					if backend.URLPattern == "" {
 						return errors.NewValidationError(fmt.Sprintf("services[%d].services[%d].routes[%d].backend[%d].url_pattern", i, j, k, l), "url_pattern is required")
+					}
+					if err := validateBackendPattern(route, backend); err != nil {
+						return errors.NewValidationError(fmt.Sprintf("services[%d].services[%d].routes[%d].backend[%d].url_pattern", i, j, k, l), err.Error())
 					}
 				}
 			}
@@ -327,4 +359,60 @@ func isPluginOrInternalRoute(path string) bool {
 		}
 	}
 	return false
+}
+
+func validateServiceHost(raw string) error {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid host URL")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("host must use http or https")
+	}
+	if parsed.Host == "" || parsed.Hostname() == "" {
+		return fmt.Errorf("host must include a hostname")
+	}
+	hostname := parsed.Hostname()
+	if strings.Contains(hostname, ":") && net.ParseIP(hostname) == nil {
+		return fmt.Errorf("host contains an invalid hostname")
+	}
+	if port := parsed.Port(); port != "" {
+		if _, err := net.LookupPort("tcp", port); err != nil {
+			return fmt.Errorf("host contains an invalid port")
+		}
+	}
+	return nil
+}
+
+func validateBackendPattern(route RouterConfig, backend Backend) error {
+	routeVars := extractTemplateVars(route.Path)
+	patternVars := extractTemplateVars(backend.URLPattern)
+	_, routeHasRest := routeVars["rest"]
+	_, patternHasRest := patternVars["rest"]
+
+	if route.StripPath && patternHasRest && !routeHasRest {
+		return fmt.Errorf("stripPath=true with url_pattern {rest} requires route path to define {rest:.*}")
+	}
+	if patternHasRest && !routeHasRest {
+		return fmt.Errorf("url_pattern contains {rest} but route path does not define it")
+	}
+
+	for name := range patternVars {
+		if _, ok := routeVars[name]; !ok {
+			return fmt.Errorf("url_pattern contains {%s} but route path does not define it", name)
+		}
+	}
+
+	return nil
+}
+
+func extractTemplateVars(path string) map[string]struct{} {
+	matches := routeTemplateVarPattern.FindAllStringSubmatch(path, -1)
+	vars := make(map[string]struct{}, len(matches))
+	for _, match := range matches {
+		if len(match) > 1 {
+			vars[match[1]] = struct{}{}
+		}
+	}
+	return vars
 }

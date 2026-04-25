@@ -34,6 +34,7 @@ type Gateway struct {
 	metrics        *metrics.Collector
 	logger         *logging.Logger
 	server         *http.Server
+	tlsServer      *http.Server
 
 	// State management
 	mu       sync.RWMutex
@@ -127,13 +128,8 @@ func (g *Gateway) setupRoutes() error {
 
 	// Setup proxy routes
 	for _, route := range g.config.GetAllRoutesFromServices(g.logger) {
-		// Enabled by default unless explicitly set to false
-		if !route.Enabled {
-			// Check if the field was explicitly set to false in YAML
-			// Since Go's YAML unmarshaler can't distinguish unset from false, treat all as enabled unless explicitly false
-			// We'll use a workaround: if the field is present in YAML, skip; otherwise, allow
-			// But since we can't detect this, we will treat all routes as enabled unless explicitly set to false in YAML
-			continue // skip only if explicitly false
+		if !route.IsEnabled() {
+			continue
 		}
 		if err := g.addProxyRoute(route); err != nil {
 			return fmt.Errorf("failed to add route %s: %w", route.Path, err)
@@ -176,6 +172,7 @@ func (g *Gateway) setupRoutes() error {
 
 // setupMiddleware configures the middleware chain
 func (g *Gateway) setupMiddleware() error {
+	g.router.Use(g.routeContextMiddleware())
 	// Add client credential auth middleware if enabled
 	if len(g.config.Security.Clients) > 0 {
 		g.router.Use(g.clientCredentialAuthMiddleware())
@@ -227,22 +224,11 @@ func (g *Gateway) clientCredentialAuthMiddleware() func(http.Handler) http.Handl
 			matched := false
 			var requireAuth bool = true
 			for _, route := range g.config.GetAllRoutesFromServices(g.logger) {
-				// Routes are enabled by default (when Enabled field is not specified in YAML)
-				// Only skip if explicitly disabled
-				if !route.Enabled {
-					continue // skip disabled routes
+				if !route.IsEnabled() {
+					continue
 				}
-				if r.Method != "" && len(route.Methods) > 0 {
-					found := false
-					for _, m := range route.Methods {
-						if m == r.Method {
-							found = true
-							break
-						}
-					}
-					if !found {
-						continue
-					}
+				if !route.SupportsMethod(r.Method) {
+					continue
 				}
 				if route.Path == r.URL.Path || containsRestWildcard(route.Path) {
 					matched = true
@@ -371,7 +357,7 @@ func (g *Gateway) addProxyRoute(route config.RouterConfig) error {
 
 	// Wildcard support: if path contains {rest:.*} or ends with /*, use PathPrefix or regex
 	if route.Path == "/{rest:.*}" || route.Path == "/*" {
-		g.router.PathPrefix("/").Handler(handler).Methods(route.Methods...)
+		g.router.PathPrefix("/").Handler(handler).Methods(route.EffectiveMethods()...)
 		service := g.config.FindServiceForRoute(route.Path, "")
 		backend := ""
 		if service != nil {
@@ -380,7 +366,7 @@ func (g *Gateway) addProxyRoute(route config.RouterConfig) error {
 		g.logger.Info("Added wildcard route (PathPrefix)", logging.String("path", route.Path), logging.String("backend", backend))
 	} else if len(route.Path) > 0 && route.Path[len(route.Path)-2:] == "/*" {
 		prefix := route.Path[:len(route.Path)-1] // remove the *
-		g.router.PathPrefix(prefix).Handler(handler).Methods(route.Methods...)
+		g.router.PathPrefix(prefix).Handler(handler).Methods(route.EffectiveMethods()...)
 		service := g.config.FindServiceForRoute(route.Path, "")
 		backend := ""
 		if service != nil {
@@ -388,7 +374,7 @@ func (g *Gateway) addProxyRoute(route config.RouterConfig) error {
 		}
 		g.logger.Info("Added wildcard route (PathPrefix)", logging.String("path", route.Path), logging.String("backend", backend))
 	} else if route.Path == "/" {
-		g.router.Handle(route.Path, handler).Methods(route.Methods...)
+		g.router.Handle(route.Path, handler).Methods(route.EffectiveMethods()...)
 		service := g.config.FindServiceForRoute(route.Path, "")
 		backend := ""
 		if service != nil {
@@ -397,7 +383,7 @@ func (g *Gateway) addProxyRoute(route config.RouterConfig) error {
 		g.logger.Info("Added root route", logging.String("path", route.Path), logging.String("backend", backend))
 	} else if containsRestWildcard(route.Path) {
 		// Use regex for {rest:.*}
-		g.router.HandleFunc(route.Path, g.proxyHandler(route)).Methods(route.Methods...)
+		g.router.HandleFunc(route.Path, g.proxyHandler(route)).Methods(route.EffectiveMethods()...)
 		service := g.config.FindServiceForRoute(route.Path, "")
 		backend := ""
 		if service != nil {
@@ -405,7 +391,7 @@ func (g *Gateway) addProxyRoute(route config.RouterConfig) error {
 		}
 		g.logger.Info("Added regex wildcard route", logging.String("path", route.Path), logging.String("backend", backend))
 	} else {
-		g.router.Handle(route.Path, handler).Methods(route.Methods...)
+		g.router.Handle(route.Path, handler).Methods(route.EffectiveMethods()...)
 		service := g.config.FindServiceForRoute(route.Path, "")
 		backend := ""
 		if service != nil {
@@ -432,9 +418,22 @@ func (g *Gateway) Serve(ctx context.Context) error {
 	}
 
 	g.server = server
+	tlsPort := g.config.Security.TLS.EffectivePort(g.config.Server.Port)
 
-	// Setup TLS if enabled
+	if !g.config.Security.TLS.Enabled || tlsPort != g.config.Server.Port {
+		go func() {
+			if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				g.logger.Error("Server error", err)
+			}
+		}()
+	}
+
+	// Setup TLS if enabled on a dedicated or shared port
 	if g.config.Security.TLS.Enabled {
+		if err := config.EnsureTLSAssets(g.config.Security.TLS); err != nil {
+			return fmt.Errorf("failed to prepare TLS assets: %w", err)
+		}
+
 		tlsConfig := &tls.Config{
 			MinVersion: tls.VersionTLS12,
 		}
@@ -480,28 +479,40 @@ func (g *Gateway) Serve(ctx context.Context) error {
 			}
 		}
 
-		server.TLSConfig = tlsConfig
+		if tlsPort == g.config.Server.Port {
+			go func() {
+				g.logger.Info("Starting TLS server", logging.Int("port", tlsPort), logging.String("cert", g.config.Security.TLS.CertFile))
+				if err := server.ListenAndServeTLS(g.config.Security.TLS.CertFile, g.config.Security.TLS.KeyFile); err != nil && err != http.ErrServerClosed {
+					g.logger.Error("TLS Server error", err)
+				}
+			}()
+			g.tlsServer = server
+		} else {
+			tlsServer := &http.Server{
+				Addr:      fmt.Sprintf(":%d", tlsPort),
+				Handler:   AccessLogMiddleware(g, g.router),
+				TLSConfig: tlsConfig,
+			}
+			g.tlsServer = tlsServer
 
-		// Start server in goroutine
-		go func() {
-			g.logger.Info("Starting TLS server", logging.String("cert", g.config.Security.TLS.CertFile))
-			if err := server.ListenAndServeTLS(g.config.Security.TLS.CertFile, g.config.Security.TLS.KeyFile); err != nil && err != http.ErrServerClosed {
-				g.logger.Error("TLS Server error", err)
-			}
-		}()
-	} else {
-		// Start server in goroutine (Plain HTTP)
-		go func() {
-			if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				g.logger.Error("Server error", err)
-			}
-		}()
+			go func() {
+				g.logger.Info("Starting TLS server", logging.Int("port", tlsPort), logging.String("cert", g.config.Security.TLS.CertFile))
+				if err := tlsServer.ListenAndServeTLS(g.config.Security.TLS.CertFile, g.config.Security.TLS.KeyFile); err != nil && err != http.ErrServerClosed {
+					g.logger.Error("TLS Server error", err)
+				}
+			}()
+		}
 	}
 
 	// Wait for shutdown signal
 	<-g.shutdown
 
 	g.logger.Info("Shutting down gateway server")
+	if g.tlsServer != nil && g.tlsServer != server {
+		if err := g.tlsServer.Shutdown(ctx); err != nil {
+			g.logger.Error("TLS shutdown error", err)
+		}
+	}
 	return server.Shutdown(ctx)
 }
 
@@ -531,6 +542,27 @@ func (g *Gateway) GetConfig() *config.Config {
 // GetRouter returns the router for external route registration
 func (g *Gateway) GetRouter() *mux.Router {
 	return g.router
+}
+
+func (g *Gateway) ReloadConfig() error {
+	if g.configProvider == nil {
+		return fmt.Errorf("config provider not available")
+	}
+
+	cfg, err := g.configProvider.Load()
+	if err != nil {
+		return fmt.Errorf("failed to reload configuration: %w", err)
+	}
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.config = cfg
+	g.logger.Info("Configuration reloaded from provider")
+	return nil
+}
+
+func (g *Gateway) Version() string {
+	return g.version
 }
 
 // UpdateConfig updates the gateway configuration

@@ -81,12 +81,12 @@ Manage clients dynamically without restarting the gateway.
 
 ### List Clients
 ```bash
-iket-cli client list
+iket client list
 ```
 
 ### Add a Client
 ```bash
-iket-cli client add "partner-xyz" \
+iket client add "partner-xyz" \
   --name "Partner Integration" \
   --key "part-key-789" \
   --group "partner" \
@@ -96,7 +96,7 @@ iket-cli client add "partner-xyz" \
 
 ### Delete a Client
 ```bash
-iket-cli client delete "part-key-789"
+iket client delete "part-key-789"
 ```
 
 ---

@@ -14,13 +14,13 @@ IKET_VERSION := $(shell git describe --tags --always 2>/dev/null || echo "dev")
 # Build targets
 build: ## Build the main gateway binary
 	@echo "Building Iket Gateway..."
-	go build -ldflags "-X 'github.com/bhangun/iket/pkg/app.Version=$(VERSION)'" -o bin/iket ./cmd/iket/main.go
-	@echo "Build complete: bin/iket"
+	go build -ldflags "-X 'github.com/bhangun/iket/pkg/app.Version=$(VERSION)'" -o bin/iket-server ./cmd/iket/main.go
+	@echo "Build complete: bin/iket-server"
 
 build-cli: ## Build the CLI binary
 	@echo "Building Iket CLI..."
-	go build -o bin/iket-cli ./cmd/iket-cli/*.go
-	@echo "Build complete: bin/iket-cli"
+	go build -o bin/iket ./cmd/iket-cli/*.go
+	@echo "Build complete: bin/iket"
 
 build-basic: ## Build with basic tags (no storage dependencies)
 	@echo "Building Iket Gateway (basic mode)..."

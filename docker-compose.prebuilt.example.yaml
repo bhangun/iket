@@ -1,0 +1,18 @@
+version: "3.8"
+
+services:
+  iket:
+    image: bhangun/iket:latest
+    container_name: iket
+    restart: unless-stopped
+    ports:
+      - "7100:8080"
+      - "8443:8443"
+      - "9443:9443"
+    environment:
+      - TZ=UTC
+      - IKET_CERTS_DIR=/app/certs
+    volumes:
+      - ./config:/app/config:ro
+      - ./certs:/app/certs:rw
+      - ./logs:/app/logs:rw

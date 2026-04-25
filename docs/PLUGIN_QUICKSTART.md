@@ -96,16 +96,16 @@ cp my-first-plugin.so plugins/
 
 3. Start the gateway:
 ```bash
-iket --config config/config.yaml
+iket-server --config config/config.yaml
 ```
 
-## Step 6: Verify with `iket-cli`
+## Step 6: Verify with `iket`
 
 Use the CLI to verify that your plugin is loaded and active:
 
 ```bash
 # List all plugins
-iket-cli plugin list
+iket plugin list
 ```
 
 ## Step 7: Test Your Plugin
@@ -124,16 +124,16 @@ You should see:
 
 ## 🛠️ Managing Plugins via CLI
 
-Iket allows you to manage plugins in real-time using `iket-cli`.
+Iket allows you to manage plugins in real-time using `iket`.
 
 ### Enable a Plugin
 ```bash
-iket-cli plugin enable my_first_plugin
+iket plugin enable my_first_plugin
 ```
 
 ### Disable a Plugin
 ```bash
-iket-cli plugin disable my_first_plugin
+iket plugin disable my_first_plugin
 ```
 
 ---

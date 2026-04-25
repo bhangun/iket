@@ -66,8 +66,8 @@ func initServiceWizard(serviceCmd *cobra.Command) {
 			// Route loop
 			for {
 				fmt.Printf("\n--- Adding Route for %s ---\n", svc.Name)
-				route := config.RouterConfig{Enabled: true}
-				
+				route := config.RouterConfig{Enabled: config.NewBool(true)}
+
 				fmt.Print("Route Path (e.g., /products): ")
 				route.Path, _ = reader.ReadString('\n')
 				route.Path = strings.TrimSpace(route.Path)
@@ -146,7 +146,7 @@ func initServiceSet(serviceCmd *cobra.Command) {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
-			
+
 			// 1. Fetch current services
 			resp, err := apiClient.Do("GET", "/api/v1/services", nil)
 			if err != nil {
@@ -256,20 +256,7 @@ func initRouteSet(routeCmd *cobra.Command) {
 			var targetRoute *config.RouterConfig
 			for i := range targetSvc.Routes {
 				r := &targetSvc.Routes[i]
-				match := false
-				if r.Path == path {
-					if r.Method == method {
-						match = true
-					} else {
-						for _, m := range r.Methods {
-							if strings.ToUpper(m) == method {
-								match = true
-								break
-							}
-						}
-					}
-				}
-				if match {
+				if routeMatchesCLI(*targetSvc, *r, path, method) {
 					targetRoute = r
 					break
 				}
@@ -284,7 +271,7 @@ func initRouteSet(routeCmd *cobra.Command) {
 				targetRoute.RequireAuth = strings.ToLower(auth) == "true" || strings.ToLower(auth) == "y"
 			}
 			if enabled != "" {
-				targetRoute.Enabled = strings.ToLower(enabled) == "true" || strings.ToLower(enabled) == "y"
+				targetRoute.Enabled = config.NewBool(strings.ToLower(enabled) == "true" || strings.ToLower(enabled) == "y")
 			}
 			if len(scopes) > 0 {
 				targetRoute.Scopes = scopes
@@ -311,3 +298,12 @@ func initRouteSet(routeCmd *cobra.Command) {
 	routeCmd.AddCommand(setCmd)
 }
 
+func routeMatchesCLI(service config.Service, route config.RouterConfig, path, method string) bool {
+	if !route.SupportsMethod(method) {
+		return false
+	}
+	if route.Path == path {
+		return true
+	}
+	return service.EffectiveRoutePath(route) == path
+}

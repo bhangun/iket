@@ -45,7 +45,7 @@ build_binaries() {
 
 run_gateway() {
     print_info "Starting Iket Gateway..."
-    ./bin/iket --config "$CONFIG_FILE" --services "$SERVICES_FILE" &
+    ./bin/iket-server --config "$CONFIG_FILE" --services "$SERVICES_FILE" &
     echo $! > "$PID_FILE"
     print_success "Iket running with PID $(cat "$PID_FILE")"
 }

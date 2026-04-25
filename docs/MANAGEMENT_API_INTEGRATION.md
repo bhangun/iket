@@ -1,6 +1,6 @@
 # Iket Management API Integration Guide
 
-This guide explains how to integrate and secure the management API of the Iket API Gateway, including the use of `iket-cli` for secure remote administration via mTLS.
+This guide explains how to integrate and secure the management API of the Iket API Gateway, including the use of `iket` for secure remote administration via mTLS.
 
 ## Overview
 
@@ -42,9 +42,9 @@ security:
 
 ---
 
-## 🛠️ Administrative Tool: `iket-cli`
+## 🛠️ Administrative Tool: `iket`
 
-The `iket-cli` is the recommended way to interact with the Management API. It handles the mTLS handshake and credential management automatically.
+The `iket` client is the recommended way to interact with the Management API. It handles the mTLS handshake and credential management automatically.
 
 ### Installation
 ```bash
@@ -53,15 +53,15 @@ curl -fsSL https://raw.githubusercontent.com/bhangun/iket/main/scripts/install.s
 ```
 
 ### Configuration (`cli-config.yaml`)
-`iket-cli` manages its settings in `~/.iket/cli-config.yaml`. The easiest way to configure it is via the guided setup:
+`iket` manages its settings in `~/.iket/cli-config.yaml`. The easiest way to configure it is via the guided setup:
 ```bash
-iket-cli setup
+iket setup
 ```
 
 Alternatively, you can manage multiple **Contexts** manually:
 ```bash
 # Add a remote production context
-iket-cli context add prod \
+iket context add prod \
   --url https://api.yourdomain.com:8443 \
   --ca ~/.iket/certs/ca.crt \
   --cert ~/.iket/certs/client.crt \

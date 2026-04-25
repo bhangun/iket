@@ -1,8 +1,8 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 
@@ -17,10 +17,12 @@ var (
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "iket-cli",
-	Short: "Iket Gateway management CLI",
+	Use:     "iket",
+	Aliases: []string{"iket-cli"},
+	Short:   "Iket Gateway management CLI",
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		if cmd.Name() == "cert" || cmd.Name() == "gen" || cmd.Name() == "setup" || cmd.Name() == "context" {
+		topLevel := topLevelCommandName(cmd)
+		if topLevel == "cert" || topLevel == "setup" || topLevel == "context" || topLevel == "enroll" || topLevel == "server" || topLevel == "docker" || topLevel == "simulate" || topLevel == "test" {
 			return nil
 		}
 
@@ -37,18 +39,32 @@ var rootCmd = &cobra.Command{
 			isDangerous := true
 			// List of safe (read-only) command paths
 			safeCommandPaths := map[string]bool{
-				"iket-cli gateway status": true,
-				"iket-cli service list":   true,
-				"iket-cli route list":     true,
-				"iket-cli plugin list":    true,
-				"iket-cli context list":   true,
-				"iket-cli cert status":    true,
+				"iket gateway status":    true,
+				"iket gateway self-test": true,
+				"iket gateway metrics":   true,
+				"iket gateway system":    true,
+				"iket simulate":          true,
+				"iket test":              true,
+				"iket service list":      true,
+				"iket route list":        true,
+				"iket route get":         true,
+				"iket logs tail":         true,
+				"iket logs list":         true,
+				"iket plugin list":       true,
+				"iket plugin get":        true,
+				"iket plugin status":     true,
+				"iket plugin health":     true,
+				"iket context list":      true,
+				"iket context test":      true,
+				"iket cert status":       true,
+				"iket cert list-remote":  true,
+				"iket backup list":       true,
 			}
 
 			cmdPath := cmd.CommandPath()
 
 			// Special handling for 'gateway config' (safe if no args)
-			if cmdPath == "iket-cli gateway config" && len(args) == 0 {
+			if cmdPath == "iket gateway config" && len(args) == 0 {
 				isDangerous = false
 			} else if safeCommandPaths[cmdPath] {
 				isDangerous = false
@@ -81,6 +97,13 @@ var rootCmd = &cobra.Command{
 	},
 }
 
+func topLevelCommandName(cmd *cobra.Command) string {
+	for cmd.Parent() != nil && cmd.Parent().Parent() != nil {
+		cmd = cmd.Parent()
+	}
+	return cmd.Name()
+}
+
 func main() {
 	rootCmd.PersistentFlags().BoolVarP(&force, "force", "f", false, "Force execution without confirmation")
 	rootCmd.PersistentFlags().BoolVar(&dryRun, "dry-run", false, "Simulate the command without making changes")
@@ -88,6 +111,8 @@ func main() {
 	initCertCmd(rootCmd)
 	initContextCmd(rootCmd)
 	initSetupCmd(rootCmd)
+	initEnrollCmd(rootCmd)
+	initServerCmd(rootCmd)
 	initPushCmd(rootCmd)
 	initPullCmd(rootCmd)
 	initGatewayCmd(rootCmd)
@@ -95,6 +120,9 @@ func main() {
 	initRouteCmd(rootCmd)
 	initPluginCmd(rootCmd)
 	initClientCmd(rootCmd)
+	initLogsCmd(rootCmd)
+	initSimulateCmd(rootCmd)
+	initAdminCoverageCmds(rootCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Println(err)
@@ -116,7 +144,7 @@ func initGatewayCmd(rootCmd *cobra.Command) {
 			if err != nil {
 				return err
 			}
-			fmt.Println(string(resp))
+			printResponse(resp)
 			return nil
 		},
 	})
@@ -131,17 +159,13 @@ func initGatewayCmd(rootCmd *cobra.Command) {
 				if err != nil {
 					return err
 				}
-				fmt.Println(string(resp))
+				printResponse(resp)
 				return nil
 			}
 
 			// Set config from file
-			data, err := os.ReadFile(args[0])
+			cfg, err := loadStructuredFile(args[0])
 			if err != nil {
-				return err
-			}
-			var cfg map[string]interface{}
-			if err := json.Unmarshal(data, &cfg); err != nil {
 				return err
 			}
 
@@ -153,7 +177,7 @@ func initGatewayCmd(rootCmd *cobra.Command) {
 			if err != nil {
 				return err
 			}
-			fmt.Println(string(resp))
+			printResponse(resp)
 			return nil
 		},
 	})
@@ -166,10 +190,31 @@ func initGatewayCmd(rootCmd *cobra.Command) {
 			if err != nil {
 				return err
 			}
-			fmt.Println(string(resp))
+			printResponse(resp)
 			return nil
 		},
 	})
+
+	var (
+		selfTestPath   string
+		selfTestMethod string
+	)
+	selfTestCmd := &cobra.Command{
+		Use:   "self-test",
+		Short: "Run config self-test for a sample request",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			apiPath := fmt.Sprintf("/api/v1/gateway/config/self-test?path=%s&method=%s", url.QueryEscape(selfTestPath), url.QueryEscape(strings.ToUpper(selfTestMethod)))
+			resp, err := apiClient.Do("GET", apiPath, nil)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	}
+	selfTestCmd.Flags().StringVar(&selfTestPath, "path", "/example", "Sample request path")
+	selfTestCmd.Flags().StringVar(&selfTestMethod, "method", "GET", "Sample request method")
+	gatewayCmd.AddCommand(selfTestCmd)
 
 	rootCmd.AddCommand(gatewayCmd)
 }
@@ -188,7 +233,7 @@ func initServiceCmd(rootCmd *cobra.Command) {
 			if err != nil {
 				return err
 			}
-			fmt.Println(string(resp))
+			printResponse(resp)
 			return nil
 		},
 	})
@@ -206,7 +251,7 @@ func initServiceCmd(rootCmd *cobra.Command) {
 			if err != nil {
 				return err
 			}
-			fmt.Println(string(resp))
+			printResponse(resp)
 			return nil
 		},
 	})
@@ -228,7 +273,7 @@ func initRouteCmd(rootCmd *cobra.Command) {
 			if err != nil {
 				return err
 			}
-			fmt.Println(string(resp))
+			printResponse(resp)
 			return nil
 		},
 	})
@@ -245,7 +290,7 @@ func initRouteCmd(rootCmd *cobra.Command) {
 			if err != nil {
 				return err
 			}
-			fmt.Println(string(resp))
+			printResponse(resp)
 			return nil
 		},
 	})
@@ -259,7 +304,7 @@ func initRouteCmd(rootCmd *cobra.Command) {
 			if err != nil {
 				return err
 			}
-			fmt.Println(string(resp))
+			printResponse(resp)
 			return nil
 		},
 	})
@@ -281,7 +326,7 @@ func initPluginCmd(rootCmd *cobra.Command) {
 			if err != nil {
 				return err
 			}
-			fmt.Println(string(resp))
+			printResponse(resp)
 			return nil
 		},
 	})
@@ -295,7 +340,7 @@ func initPluginCmd(rootCmd *cobra.Command) {
 			if err != nil {
 				return err
 			}
-			fmt.Println(string(resp))
+			printResponse(resp)
 			return nil
 		},
 	})
@@ -309,7 +354,7 @@ func initPluginCmd(rootCmd *cobra.Command) {
 			if err != nil {
 				return err
 			}
-			fmt.Println(string(resp))
+			printResponse(resp)
 			return nil
 		},
 	})
@@ -331,7 +376,7 @@ func initClientCmd(rootCmd *cobra.Command) {
 			if err != nil {
 				return err
 			}
-			fmt.Println(string(resp))
+			printResponse(resp)
 			return nil
 		},
 	})
@@ -362,7 +407,7 @@ func initClientCmd(rootCmd *cobra.Command) {
 			if err != nil {
 				return err
 			}
-			fmt.Println(string(resp))
+			printResponse(resp)
 			return nil
 		},
 	}
@@ -384,7 +429,7 @@ func initClientCmd(rootCmd *cobra.Command) {
 			if err != nil {
 				return err
 			}
-			fmt.Println(string(resp))
+			printResponse(resp)
 			return nil
 		},
 	})

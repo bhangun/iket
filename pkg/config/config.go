@@ -25,18 +25,38 @@ import (
 type Config struct {
 	Server   ServerConfig                      `yaml:"server"`
 	Security SecurityConfig                    `yaml:"security"`
+	Storage  StorageConfig                     `yaml:"storage,omitempty"`
 	Services []ServiceConfig                   `yaml:"services,omitempty"` // New service-based configuration
 	Plugins  map[string]map[string]interface{} `yaml:"plugins"`
 }
 
+type StorageConfig struct {
+	Mode        string `yaml:"mode,omitempty" json:"mode,omitempty"`
+	SQLitePath  string `yaml:"sqlite_path,omitempty" json:"sqlite_path,omitempty"`
+	PostgresURL string `yaml:"postgres_url,omitempty" json:"postgres_url,omitempty"`
+	MirrorFiles *bool  `yaml:"mirror_files,omitempty" json:"mirror_files,omitempty"`
+}
+
+func (s StorageConfig) EffectiveMode() string {
+	if strings.TrimSpace(s.Mode) == "" {
+		return "sqlite"
+	}
+	return strings.ToLower(strings.TrimSpace(s.Mode))
+}
+
+func (s StorageConfig) EffectiveMirrorFiles() bool {
+	return s.MirrorFiles == nil || *s.MirrorFiles
+}
+
 // ServerConfig represents server configuration
 type ServerConfig struct {
-	Port          int    `yaml:"port"`
-	ReadTimeout   string `yaml:"readTimeout"`
-	WriteTimeout  string `yaml:"writeTimeout"`
-	IdleTimeout   string `yaml:"idleTimeout"`
-	PluginsDir    string `yaml:"pluginsDir,omitempty"`
-	EnableLogging bool   `yaml:"enableLogging"`
+	Port          int       `yaml:"port"`
+	ReadTimeout   string    `yaml:"readTimeout"`
+	WriteTimeout  string    `yaml:"writeTimeout"`
+	IdleTimeout   string    `yaml:"idleTimeout"`
+	PluginsDir    string    `yaml:"pluginsDir,omitempty"`
+	EnableLogging bool      `yaml:"enableLogging"`
+	TLS           TLSConfig `yaml:"tls,omitempty"`
 }
 
 // SecurityConfig represents security configuration
@@ -63,7 +83,7 @@ type RouterConfig struct {
 	ValidateSchema string            `yaml:"validateSchema"`
 	WebSocket      *WebSocketOptions `yaml:"websocket,omitempty"`
 	RequireJwt     bool              `yaml:"requireJwt"`
-	Enabled        bool              `yaml:"enabled"`
+	Enabled        *bool             `yaml:"enabled"`
 	AuthPlugin     string            `yaml:"auth_plugin,omitempty" json:"auth_plugin,omitempty"`
 	// New fields for enhanced configuration
 	Name            string    `yaml:"name,omitempty" json:"name,omitempty"`
@@ -80,13 +100,18 @@ type RouterConfig struct {
 
 // TLSConfig represents TLS configuration
 type TLSConfig struct {
-	Enabled        bool     `yaml:"enabled"`
-	CertFile       string   `yaml:"certFile"`
-	KeyFile        string   `yaml:"keyFile"`
-	ClientCAFile   string   `yaml:"clientCAFile"`
-	ClientAuthType string   `yaml:"clientAuthType"` // NoClientCert, RequestClientCert, RequireAnyClientCert, VerifyClientCertIfGiven, RequireAndVerifyClientCert
-	MinVersion     string   `yaml:"minVersion"`
-	Ciphers        []string `yaml:"ciphers"`
+	Enabled              bool     `yaml:"enabled"`
+	Port                 int      `yaml:"port,omitempty"`
+	EnrollmentPort       int      `yaml:"enrollmentPort,omitempty"`
+	EnrollmentMaxActive  int      `yaml:"enrollmentMaxActive,omitempty"`
+	CertFile             string   `yaml:"certFile"`
+	KeyFile              string   `yaml:"keyFile"`
+	ClientCAFile         string   `yaml:"clientCAFile"`
+	ClientAuthType       string   `yaml:"clientAuthType"` // NoClientCert, RequestClientCert, RequireAnyClientCert, VerifyClientCertIfGiven, RequireAndVerifyClientCert
+	MinVersion           string   `yaml:"minVersion"`
+	Ciphers              []string `yaml:"ciphers"`
+	AutoGenerate         *bool    `yaml:"autoGenerate,omitempty"`
+	GenerateSharedClient *bool    `yaml:"generateSharedClient,omitempty"`
 }
 
 type WebSocketOptions struct {
@@ -137,6 +162,107 @@ type Service struct {
 // Backend represents a backend configuration for routes
 type Backend struct {
 	URLPattern string `yaml:"url_pattern" json:"url_pattern"`
+}
+
+func (r RouterConfig) IsEnabled() bool {
+	return r.Enabled == nil || *r.Enabled
+}
+
+func (r RouterConfig) EffectiveMethods() []string {
+	if len(r.Methods) > 0 {
+		return r.Methods
+	}
+	if r.Method != "" {
+		return []string{strings.ToUpper(r.Method)}
+	}
+	return nil
+}
+
+func (r RouterConfig) SupportsMethod(method string) bool {
+	methods := r.EffectiveMethods()
+	if len(methods) == 0 || method == "" {
+		return true
+	}
+	method = strings.ToUpper(method)
+	for _, candidate := range methods {
+		if strings.ToUpper(candidate) == method {
+			return true
+		}
+	}
+	return false
+}
+
+func (s Service) EffectiveRoutePath(route RouterConfig) string {
+	return joinRouteSegments(s.BasePath, route.Path)
+}
+
+func (s Service) UpstreamBasePath() string {
+	return joinRouteSegments("", s.BasePath)
+}
+
+func joinRouteSegments(parts ...string) string {
+	cleaned := make([]string, 0, len(parts))
+	for i, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" || part == "/" {
+			continue
+		}
+		if i == 0 && strings.Contains(part, "://") {
+			cleaned = append(cleaned, strings.TrimRight(part, "/"))
+			continue
+		}
+		cleaned = append(cleaned, strings.Trim(part, "/"))
+	}
+
+	if len(cleaned) == 0 {
+		return "/"
+	}
+
+	result := strings.Join(cleaned, "/")
+	if strings.Contains(cleaned[0], "://") {
+		return result
+	}
+	return "/" + result
+}
+
+func cloneRouteWithService(route RouterConfig, service Service) RouterConfig {
+	cloned := route
+	cloned.Path = service.EffectiveRoutePath(route)
+	cloned.Methods = route.EffectiveMethods()
+	return cloned
+}
+
+func NewBool(v bool) *bool {
+	return &v
+}
+
+func (t TLSConfig) EffectivePort(defaultPort int) int {
+	if t.Port > 0 {
+		return t.Port
+	}
+	return defaultPort
+}
+
+func (t TLSConfig) EffectiveEnrollmentPort() int {
+	if t.EnrollmentPort > 0 {
+		return t.EnrollmentPort
+	}
+	return 0
+}
+
+func (t TLSConfig) EffectiveEnrollmentMaxActive() int {
+	if t.EnrollmentMaxActive > 0 {
+		return t.EnrollmentMaxActive
+	}
+	return 10
+}
+
+func (t TLSConfig) ShouldAutoGenerate() bool {
+	return t.AutoGenerate != nil && *t.AutoGenerate
+}
+
+func (t TLSConfig) ShouldGenerateSharedClient() bool {
+	return t.GenerateSharedClient != nil && *t.GenerateSharedClient
 }
 
 // Provider defines the interface for configuration providers
@@ -198,6 +324,7 @@ func (p *FileProvider) Load() (*Config, error) {
 	if err := yaml.Unmarshal(configData, &config); err != nil {
 		return nil, coreerrors.NewConfigError("failed to parse config file", err)
 	}
+	normalizeLegacyConfig(&config)
 	// Expand env vars in all string fields
 	expandEnvVarsInStruct(&config)
 
@@ -503,7 +630,9 @@ func (c *Config) GetAllRoutesFromServices(logger *logging.Logger) []RouterConfig
 	var allRoutes []RouterConfig
 	for _, serviceConfig := range c.Services {
 		for _, service := range serviceConfig.Services {
-			allRoutes = append(allRoutes, service.Routes...)
+			for _, route := range service.Routes {
+				allRoutes = append(allRoutes, cloneRouteWithService(route, service))
+			}
 			if logger != nil {
 				logger.Info("Loaded Services", logging.Any("service", service))
 			}
@@ -557,17 +686,8 @@ func (c *Config) FindServiceForRoute(path string, method string) *Service {
 	for _, serviceConfig := range c.Services {
 		for _, service := range serviceConfig.Services {
 			for _, route := range service.Routes {
-				if route.Path == path {
-					if route.Method != "" && route.Method == method {
-						return &service
-					}
-					if len(route.Methods) > 0 {
-						for _, m := range route.Methods {
-							if m == method {
-								return &service
-							}
-						}
-					}
+				if service.EffectiveRoutePath(route) == path && route.SupportsMethod(method) {
+					return &service
 				}
 			}
 		}
@@ -619,6 +739,46 @@ func expandEnvVarsInMap(m map[string]interface{}) {
 				}
 			}
 		}
+	}
+}
+
+func normalizeLegacyConfig(cfg *Config) {
+	legacyTLS := cfg.Server.TLS
+	activeTLS := cfg.Security.TLS
+
+	if !activeTLS.Enabled && legacyTLS.Enabled {
+		cfg.Security.TLS = legacyTLS
+		return
+	}
+	if activeTLS.CertFile == "" && legacyTLS.CertFile != "" {
+		cfg.Security.TLS.CertFile = legacyTLS.CertFile
+	}
+	if activeTLS.KeyFile == "" && legacyTLS.KeyFile != "" {
+		cfg.Security.TLS.KeyFile = legacyTLS.KeyFile
+	}
+	if activeTLS.ClientCAFile == "" && legacyTLS.ClientCAFile != "" {
+		cfg.Security.TLS.ClientCAFile = legacyTLS.ClientCAFile
+	}
+	if activeTLS.ClientAuthType == "" && legacyTLS.ClientAuthType != "" {
+		cfg.Security.TLS.ClientAuthType = legacyTLS.ClientAuthType
+	}
+	if activeTLS.MinVersion == "" && legacyTLS.MinVersion != "" {
+		cfg.Security.TLS.MinVersion = legacyTLS.MinVersion
+	}
+	if activeTLS.Port == 0 && legacyTLS.Port > 0 {
+		cfg.Security.TLS.Port = legacyTLS.Port
+	}
+	if activeTLS.EnrollmentPort == 0 && legacyTLS.EnrollmentPort > 0 {
+		cfg.Security.TLS.EnrollmentPort = legacyTLS.EnrollmentPort
+	}
+	if activeTLS.EnrollmentMaxActive == 0 && legacyTLS.EnrollmentMaxActive > 0 {
+		cfg.Security.TLS.EnrollmentMaxActive = legacyTLS.EnrollmentMaxActive
+	}
+	if activeTLS.AutoGenerate == nil && legacyTLS.AutoGenerate != nil {
+		cfg.Security.TLS.AutoGenerate = legacyTLS.AutoGenerate
+	}
+	if len(activeTLS.Ciphers) == 0 && len(legacyTLS.Ciphers) > 0 {
+		cfg.Security.TLS.Ciphers = legacyTLS.Ciphers
 	}
 }
 

@@ -170,14 +170,17 @@ build_and_install() {
     if [ "$CLI_ONLY" = true ]; then
         print_info "${BUILD} Building CLI binary..."
         make build-cli > /dev/null
-        print_info "Moving iket-cli to $INSTALL_DIR..."
-        $SUDO_CMD install -m 755 bin/iket-cli "$INSTALL_DIR/iket-cli"
+        print_info "Moving iket to $INSTALL_DIR..."
+        $SUDO_CMD install -m 755 bin/iket "$INSTALL_DIR/iket"
+        $SUDO_CMD install -m 755 bin/iket "$INSTALL_DIR/iket-cli"
     else
         print_info "${BUILD} Building binaries (this may take a minute)..."
         make build build-cli > /dev/null
         print_info "Moving binaries to $INSTALL_DIR..."
+        $SUDO_CMD install -m 755 bin/iket-server "$INSTALL_DIR/iket-server"
         $SUDO_CMD install -m 755 bin/iket "$INSTALL_DIR/iket"
-        $SUDO_CMD install -m 755 bin/iket-cli "$INSTALL_DIR/iket-cli"
+        $SUDO_CMD install -m 755 bin/iket "$INSTALL_DIR/iket-cli"
+        $SUDO_CMD install -m 755 bin/iket-server "$INSTALL_DIR/iket-gateway"
     fi
     
     print_success "Binaries installed successfully."
@@ -200,7 +203,7 @@ setup_security() {
         if [ ! -f "$cert_dir/ca.crt" ]; then
             print_info "${LOCK} Generating default mTLS certificates..."
             # Use the freshly installed CLI
-            $INSTALL_DIR/iket-cli cert gen --cert-dir "$cert_dir" --server-hostname localhost --server-ip 127.0.0.1 > /dev/null
+            $INSTALL_DIR/iket cert gen --cert-dir "$cert_dir" --server-hostname localhost --server-ip 127.0.0.1 > /dev/null
             print_success "Certificates generated in $cert_dir"
         else
             print_info "Certificates already exist, keeping them."
@@ -215,10 +218,15 @@ server:
 security:
   tls:
     enabled: true
+    port: 8443
+    enrollmentPort: 9443
+    enrollmentMaxActive: 10
     certFile: "$cert_dir/server.crt"
     keyFile: "$cert_dir/server.key"
     clientCAFile: "$cert_dir/ca.crt"
     clientAuthType: "RequireAndVerifyClientCert"
+    minVersion: "TLS1.2"
+    autoGenerate: true
   enableBasicAuth: true
   basicAuthUsers:
     admin: admin123
@@ -230,11 +238,11 @@ EOF
     # CLI Config
     if [ ! -f "$CONFIG_DIR/cli-config.yaml" ]; then
         cat > "$CONFIG_DIR/cli-config.yaml" <<EOF
-server_url: "https://localhost:8080"
+server_url: "https://localhost:8443"
 cert_file: "$cert_dir/client.crt"
 key_file: "$cert_dir/client.key"
 ca_file: "$cert_dir/ca.crt"
-skip_verify: true
+skip_verify: false
 EOF
         print_success "CLI configuration created."
     fi
@@ -259,7 +267,7 @@ After=network.target
 Type=simple
 User=$ORIGINAL_USER
 WorkingDirectory=$ORIGINAL_HOME
-ExecStart=$INSTALL_DIR/iket --config $CONFIG_DIR/config.yaml
+ExecStart=$INSTALL_DIR/iket-server --config $CONFIG_DIR/config.yaml
 Restart=always
 RestartSec=5
 
@@ -295,9 +303,9 @@ main() {
     print_success "Done! Iket is ready to go."
     echo ""
     if [ "$CLI_ONLY" != true ]; then
-        echo -e "  ${BLUE}Server Bin:${NC}    $INSTALL_DIR/iket"
+        echo -e "  ${BLUE}Server Bin:${NC}    $INSTALL_DIR/iket-server"
     fi
-    echo -e "  ${BLUE}CLI Bin:${NC}       $INSTALL_DIR/iket-cli"
+    echo -e "  ${BLUE}CLI Bin:${NC}       $INSTALL_DIR/iket"
     echo -e "  ${BLUE}Config Dir:${NC}    $CONFIG_DIR"
     echo ""
     
@@ -306,13 +314,13 @@ main() {
         if [ "$HAS_SYSTEMD" == "true" ]; then
             echo -e "  ${YELLOW}sudo systemctl start iket${NC}"
         else
-            echo -e "  ${YELLOW}iket --config ~/.iket/config.yaml${NC}"
+            echo -e "  ${YELLOW}iket-server --config ~/.iket/config.yaml${NC}"
         fi
         echo ""
     fi
     
     print_info "To check status with CLI:"
-    echo -e "  ${YELLOW}iket-cli --config ~/.iket/cli-config.yaml gateway status${NC}"
+    echo -e "  ${YELLOW}iket gateway status${NC}"
     echo ""
     echo -e "${PURPLE}Enjoy your secure gateway!${NC}"
 }

@@ -38,24 +38,24 @@ services:
 
 ---
 
-## 🛠️ Management via `iket-cli`
+## 🛠️ Management via `iket`
 
 You can toggle routes in real-time without restarting the gateway using the CLI.
 
 ### 1. List Routes
 To see the current status of all routes:
 ```bash
-iket-cli route list
+iket route list
 ```
 
 ### 2. Disable a Route
 ```bash
-iket-cli route disable <route-id>
+iket route disable <route-id>
 ```
 
 ### 3. Enable a Route
 ```bash
-iket-cli route enable <route-id>
+iket route enable <route-id>
 ```
 
 *Note: Changes made via CLI are applied immediately to the running gateway. To make them persistent, update your `service.yaml` file.*

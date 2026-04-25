@@ -20,7 +20,7 @@ This script automates everything for you:
 *   **Auto-Dependency Check**: Detects and installs missing tools (`git`, `go`, `make`, `openssl`).
 *   **Platform Detection**: Auto-detects Linux (Debian, Ubuntu, Fedora, RHEL, CentOS, Arch) or macOS.
 *   **Source Preparation**: Clones the latest code from GitHub.
-*   **Building**: Compiles `iket` and `iket-cli` (or just `iket-cli` in CLI mode).
+*   **Building**: Compiles `iket-server` and `iket` (or just `iket` in CLI mode).
 *   **Installation**: Moves binaries to `/usr/local/bin`.
 *   **Security (mTLS)**: Generates CA, Server, and Client certificates in `~/.iket/certs` (Full mode only).
 *   **Configuration**: Creates default `config.yaml` and `cli-config.yaml`.
@@ -34,7 +34,7 @@ This script automates everything for you:
 Installs the Iket Gateway server, the CLI tool, generates certificates, and sets up a system service. Use this on the machine that will act as your API Gateway.
 
 ### 2. CLI-Only Setup (`--cli-only`)
-Installs only the `iket-cli` binary and creates the configuration directory. Use this on your local machine or admin workstation to manage a remote Iket Gateway.
+Installs only the `iket` client binary and creates the configuration directory. Use this on your local machine or admin workstation to manage a remote Iket Gateway.
 
 ---
 
@@ -82,25 +82,207 @@ make build
 make build-cli
 
 # Install to /usr/local/bin
+sudo install -m 755 bin/iket-server /usr/local/bin/
 sudo install -m 755 bin/iket /usr/local/bin/
-sudo install -m 755 bin/iket-cli /usr/local/bin/
 
 # Generate initial certificates
-./bin/iket-cli cert gen --cert-dir ~/.iket/certs
+./bin/iket cert gen --cert-dir ~/.iket/certs
 ```
 
 ## 🐳 Remote Docker Installation
 
-To run Iket on a remote server using Docker:
+To run Iket on a remote server using Docker, you do not need the source repository. The recommended path is the prebuilt image.
 
-### 1. Deploy to Remote Server
-Copy the repository to your remote server and run:
+### 1. Deploy to Remote Server With Prebuilt Image
+On the remote server:
+
 ```bash
-./run-docker.sh up -d
+mkdir -p ~/iket-docker/{config,certs,logs}
+cd ~/iket-docker
 ```
 
-### 2. Extract Client Certificates
-Since the Docker setup generates certificates inside a volume, you need to extract the client certificates to your local machine to enable secure remote control.
+If you already have `iket` available on the remote server, the quickest way is:
+
+```bash
+iket server init --mode docker --output ~/iket-docker --with-systemd
+cd ~/iket-docker
+docker compose up -d
+iket server doctor --mode docker --output ~/iket-docker
+```
+
+This generates the same compose/config scaffold automatically, plus:
+- `.env` for image and port overrides
+- `config/service.yaml` for service and route definitions
+- `iket-docker.service` if `--with-systemd` is used
+
+The generated Docker scaffold also runs the container with the host UID/GID by default. That is important because Iket auto-generates certs and writes SQLite/log files into mounted host directories, and the container user must be able to write to those paths.
+
+Create `docker-compose.yaml`:
+
+```yaml
+version: "3.8"
+
+services:
+  iket:
+    image: bhangun/iket:latest
+    container_name: iket
+    restart: unless-stopped
+    user: "${IKET_UID:-1000}:${IKET_GID:-1000}"
+    ports:
+      - "7100:8080"
+      - "8443:8443"
+      - "9443:9443"
+    environment:
+      - TZ=UTC
+      - IKET_CERTS_DIR=/app/certs
+    volumes:
+      - ./config:/app/config:ro
+      - ./certs:/app/certs:rw
+      - ./logs:/app/logs:rw
+```
+
+Create `config/config.yaml`:
+
+```yaml
+server:
+  port: 8080
+  readTimeout: "10s"
+  writeTimeout: "10s"
+  idleTimeout: "60s"
+  enableLogging: true
+
+security:
+  tls:
+    enabled: true
+    port: 8443
+    enrollmentPort: 9443
+    enrollmentMaxActive: 10
+    certFile: "/app/certs/server.crt"
+    keyFile: "/app/certs/server.key"
+    clientCAFile: "/app/certs/ca.crt"
+    clientAuthType: "RequireAndVerifyClientCert"
+    minVersion: "TLS1.2"
+    autoGenerate: true
+  enableBasicAuth: true
+  basicAuthUsers:
+    admin: "change-this-password"
+
+storage:
+  mode: "sqlite"
+  sqlite_path: "/app/.iket-admin/sqlite/iket.db"
+  mirror_files: true
+```
+
+Then start the container:
+
+```bash
+docker compose up -d
+```
+
+On first start, Iket will auto-generate the TLS assets in `./certs` if they do not exist yet:
+- `ca.crt`
+- `ca.key`
+- `server.crt`
+- `server.key`
+
+The normal first bootstrap flow is:
+1. start the server
+2. wait for `ca.*` and `server.*` to appear in `./certs`
+3. on the trusted server host, run `iket setup docker --cert-dir ./certs --url https://<server-ip>:8443`
+
+`iket setup docker` is intentionally a trusted-host bootstrap path. If `client.crt` / `client.key` are not present, it will mint a local admin client certificate from the server CA and store it in the caller's managed CLI context instead of leaving a reusable shared admin key in the server cert directory.
+
+Enrollment tokens are the follow-up path for additional admin machines, not the first bootstrap step for a fresh server.
+
+If the certs do not appear, check `.env` and confirm the container is running with the correct:
+- `IKET_UID`
+- `IKET_GID`
+
+### 1b. Repo-Based Docker Compose
+If you do have the repository checked out on the remote server, you can also use the bundled compose files:
+
+```bash
+docker compose -f docker/docker-compose.prebuilt.yaml up -d
+```
+
+There are also ready-to-copy example files in the repo root:
+- `docker-compose.prebuilt.example.yaml`
+- `config.prebuilt.example.yaml`
+- `.env.prebuilt.example`
+- `iket-docker.service.example`
+
+If you generated a systemd unit with `iket server init --mode docker --with-systemd`, install it with:
+
+```bash
+sudo cp ~/iket-docker/iket-docker.service /etc/systemd/system/iket-docker.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now iket-docker
+```
+
+You can re-check the deployment scaffold and local runtime state at any time with:
+
+```bash
+iket server doctor --mode docker --output ~/iket-docker
+iket server doctor --mode docker --output ~/iket-docker --context remote-prod
+```
+
+`server doctor --mode docker` now also checks:
+- container health/status via Docker
+- local reachability of the published HTTP, admin TLS, and enrollment TLS ports
+- TLS handshakes against the generated CA when possible
+
+## 🖥️ Host Installation Scaffold
+
+For a host-native deployment without Docker:
+
+```bash
+iket server init --mode host --output ~/iket-host --with-systemd
+iket-server --config ~/iket-host/config/config.yaml
+iket server doctor --mode host --output ~/iket-host
+```
+
+This scaffold creates:
+- `config/config.yaml`
+- `config/service.yaml`
+- `.env` if enabled
+- `iket.service` if `--with-systemd` is used
+- `certs/`
+- `logs/`
+- `.iket-admin/sqlite/`
+
+If you generated a systemd unit for host mode, install it with:
+
+```bash
+sudo cp ~/iket-host/iket.service /etc/systemd/system/iket.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now iket
+```
+
+`server doctor --mode host` checks:
+- required scaffold files and directories
+- local port reachability from the generated config
+- TLS handshakes against the generated CA when possible
+- `iket-server` binary presence in `PATH`
+- optional CLI context verification
+
+Both scaffold modes now start Iket with `--config ... --services ...`, so `service.yaml` is active from first boot and file mirroring remains consistent when SQLite is the primary store.
+
+### 2. Bootstrap CLI Access
+If you are on the trusted server host and your local `iket` client can see the Docker cert volume, you can bootstrap the first admin context directly after first boot has generated `ca.*` and `server.*`:
+
+```bash
+iket setup docker --cert-dir ./certs --url https://<server-ip>:8443
+```
+
+If you have explicitly enabled `generateSharedClient: true`, or you already manage a dedicated client bundle yourself, you can also import that bundle into a named context:
+
+```bash
+iket cert import --name remote-prod --cert-dir ./certs --url https://<server-ip>:8443
+```
+
+Do not copy `ca.key` off the trusted server host. For additional remote admin machines, prefer enrollment tokens instead of copying shared admin credentials around.
+
+If you are intentionally using a dedicated client certificate bundle and the Docker cert volume is only present on the remote server, copy only the client credentials to your local machine first.
 
 **From your Local Machine:**
 ```bash
@@ -109,26 +291,48 @@ mkdir -p ~/.iket/certs/remote-prod
 
 # 2. Copy the certificates from the remote server
 # (Replace <user> and <server-ip> with your actual credentials)
-scp <user>@<server-ip>:~/iket/certs/ca.crt ~/.iket/certs/remote-prod/
-scp <user>@<server-ip>:~/iket/certs/client.crt ~/.iket/certs/remote-prod/
-scp <user>@<server-ip>:~/iket/certs/client.key ~/.iket/certs/remote-prod/
+scp <user>@<server-ip>:~/iket-docker/certs/ca.crt ~/.iket/certs/remote-prod/
+scp <user>@<server-ip>:~/iket-docker/certs/client.crt ~/.iket/certs/remote-prod/
+scp <user>@<server-ip>:~/iket-docker/certs/client.key ~/.iket/certs/remote-prod/
 ```
 
 ### 3. Setup Local CLI Context
-Now, configure your local `iket-cli` to connect to the remote Docker instance:
+Now, configure your local `iket` client to connect to the remote Docker instance:
 
 ```bash
-iket-cli context add remote-prod \
+iket cert import \
+  --name remote-prod \
   --url https://<server-ip>:8443 \
-  --ca ~/.iket/certs/remote-prod/ca.crt \
-  --cert ~/.iket/certs/remote-prod/client.crt \
-  --key ~/.iket/certs/remote-prod/client.key
+  --cert-dir ~/.iket/certs/remote-prod
 ```
+
+If you prefer not to copy the full client certificate bundle, create a short-lived enrollment token on the admin-capable machine:
+
+```bash
+iket enroll create-token --name laptop-admin --out ./enroll.json
+```
+
+Then move only that token bundle to your laptop and redeem it there:
+
+```bash
+iket enroll use --file ./enroll.json --name remote-prod
+```
+
+To inspect or revoke bootstrap tokens from the admin-capable machine:
+
+```bash
+iket enroll list-tokens
+iket enroll revoke-token <token-id>
+```
+
+This enrollment flow requires Iket to have access to its local CA signing key, which is the default when certificates are auto-generated and managed by Iket itself.
+The bootstrap exchange now runs on the dedicated HTTPS enrollment port (`9443` by default), separate from the main mTLS admin port (`8443`).
 
 ### 4. Verify Remote Access
 ```bash
-iket-cli context use remote-prod
-iket-cli gateway status
+iket context use remote-prod
+iket context test
+iket gateway status
 ```
 
 ---
@@ -139,10 +343,11 @@ iket-cli gateway status
 
 ```bash
 # Check binaries are installed
-which iket iket-cli
+which iket iket-server
 
 # Check versions
 iket --version
+iket-server --version
 ```
 
 ### 2. Start Gateway Service
@@ -166,7 +371,7 @@ sudo journalctl -u iket -f
 
 ```bash
 # Start Gateway with default config
-iket --config ~/.iket/config.yaml
+iket-server --config ~/.iket/config.yaml
 ```
 
 ---
@@ -189,27 +394,27 @@ After installation, configuration and certificates are located in `~/.iket/`:
 
 ---
 
-## Administration with `iket-cli`
+## Administration with `iket`
 
 Once the gateway is running, use the CLI for remote control. The CLI uses a **Context** system to manage different environments.
 
 ### 1. Guided Setup
 The easiest way to configure a new connection is using the `setup` command:
 ```bash
-iket-cli setup
+iket setup
 ```
 
 ### 2. Context Management
 Manage multiple server profiles (Local, Docker, Production):
 ```bash
 # List all configured contexts
-iket-cli context list
+iket context list
 
 # Add a new context manually
-iket-cli context add prod --url https://api.example.com:8443 --ca ~/.iket/certs/ca.crt
+iket context add prod --url https://api.example.com:8443 --ca ~/.iket/certs/ca.crt
 
 # Switch the active context
-iket-cli context use prod
+iket context use prod
 ```
 
 ### 4. Multi-Environment Scenario
@@ -220,15 +425,15 @@ For critical environments (like Production), you can enable **Strict Mode**. Thi
 
 ```bash
 # Add a production context with strict mode enabled
-iket-cli context add prod --url https://api.iket.io:8443 --strict
+iket context add prod --url https://api.iket.io:8443 --strict
 
 # Any dangerous command will now prompt for confirmation
-iket-cli plugin disable ratelimit
+iket plugin disable ratelimit
 # Output: ⚠️ STRICT MODE ENABLED for context "prod"
 # Are you sure you want to proceed? (y/N):
 
 # Bypass confirmation for automated scripts
-iket-cli plugin disable ratelimit --force
+iket plugin disable ratelimit --force
 ```
 
 #### Configuration Sync (Push/Pull)
@@ -236,16 +441,16 @@ Maintain your configuration locally in Git and sync it to your gateways.
 
 ```bash
 # Export local services to remote (merge existing)
-iket-cli push services local_service.yaml --strategy merge
+iket push services local_service.yaml --strategy merge
 
 # Replace remote services with local definition
-iket-cli push services local_service.yaml --strategy replace
+iket push services local_service.yaml --strategy replace
 
 # Pull remote config to local file
-iket-cli pull config my_config.yaml
+iket pull config my_config.yaml
 
 # Pull remote services to local file in JSON format
-iket-cli pull services current_services.json --format json
+iket pull services current_services.json --format json
 ```
 
 #### Recommended Directory Structure for Certificates
@@ -264,20 +469,20 @@ iket-cli pull services current_services.json --format json
 #### Example: Setting up 4 Environments
 ```bash
 # 1. Local Host (Direct)
-iket-cli context add local --url http://localhost:8080
+iket context add local --url http://localhost:8080
 
 # 2. Local Docker (via mapped port)
-iket-cli context add docker --url http://localhost:7100
+iket context add docker --url http://localhost:7100
 
 # 3. Remote Staging (on Host with mTLS)
-iket-cli context add staging \
+iket context add staging \
   --url https://staging.iket.io:8443 \
   --ca ~/.iket/certs/staging/ca.crt \
   --cert ~/.iket/certs/staging/client.crt \
   --key ~/.iket/certs/staging/client.key
 
 # 4. Remote Production (in Docker with mTLS)
-iket-cli context add prod \
+iket context add prod \
   --url https://api.iket.io:8443 \
   --ca ~/.iket/certs/prod/ca.crt \
   --cert ~/.iket/certs/prod/client.crt \
@@ -287,12 +492,12 @@ iket-cli context add prod \
 #### Switching Environments
 ```bash
 # Check staging status
-iket-cli context use staging
-iket-cli gateway status
+iket context use staging
+iket gateway status
 
 # Switch to production
-iket-cli context use prod
-iket-cli gateway status
+iket context use prod
+iket gateway status
 ```
 
 ---
@@ -301,7 +506,7 @@ iket-cli gateway status
 
 To manage an Iket Gateway from your local computer or a different admin machine:
 
-### 1. Install `iket-cli` on Client Machine
+### 1. Install `iket` on Client Machine
 Run the installer with the `--cli-only` flag:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/bhangun/iket/main/scripts/install.sh | bash -s -- --cli-only
@@ -320,7 +525,7 @@ scp <user>@<server-ip>:~/.iket/certs/{ca.crt,client.crt,client.key} ~/.iket/cert
 ### 3. Configure CLI via Setup
 Run the setup wizard on your client machine:
 ```bash
-iket-cli setup
+iket setup
 ```
 *   **Name**: `prod` or `remote`
 *   **URL**: `https://<server-ip>:8443`
@@ -329,7 +534,7 @@ iket-cli setup
 
 ### 4. Verify Connection
 ```bash
-iket-cli gateway status
+iket gateway status
 ```
 
 ---
@@ -344,7 +549,7 @@ sudo systemctl stop iket
 sudo systemctl disable iket
 
 # Remove binaries
-sudo rm /usr/local/bin/iket /usr/local/bin/iket-cli
+sudo rm /usr/local/bin/iket /usr/local/bin/iket-server /usr/local/bin/iket-cli
 
 # Remove service file
 sudo rm /etc/systemd/system/iket.service
@@ -360,10 +565,10 @@ rm -rf ~/.iket
 
 ### Certificate Errors
 
-If `iket-cli` cannot connect due to certificate issues:
+If `iket` cannot connect due to certificate issues:
 1. Ensure `ca.crt` in `cli-config.yaml` matches the one used by the server.
 2. Verify the server is running with `clientAuthType: "RequireAndVerifyClientCert"`.
-3. Check certificate expiry: `iket-cli cert status`.
+3. Check certificate expiry: `iket cert status`.
 
 ### Port Already in Use
 

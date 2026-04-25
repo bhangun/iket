@@ -9,6 +9,7 @@ services:
     ports:
       - "7100:8080" # Management / HTTP
       - "8443:8443" # HTTPS / mTLS
+      - "9443:9443" # HTTPS enrollment bootstrap
     environment:
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - TZ=UTC
@@ -24,6 +25,24 @@ services:
       start_period: 15s
     networks:
       - iket-network
+
+  cli:
+    image: bhangun/iket:latest
+    container_name: iket-cli
+    entrypoint: ["iket-cli"]
+    environment:
+      - TZ=UTC
+      - IKET_SERVER_URL=https://iket:8443
+      - IKET_CA_FILE=/app/certs/ca.crt
+      - IKET_CERT_FILE=/app/certs/client.crt
+      - IKET_KEY_FILE=/app/certs/client.key
+    volumes:
+      - ../config:/app/config:ro
+      - ../certs:/app/certs:ro
+    networks:
+      - iket-network
+    depends_on:
+      - iket
 
 networks:
   iket-network:

@@ -23,7 +23,9 @@ print_info "Building Iket for production..."
 
 # 2. Install
 print_info "Installing Iket binaries..."
-sudo cp bin/iket bin/iket-cli /usr/local/bin/
+sudo cp bin/iket-server bin/iket /usr/local/bin/
+sudo cp /usr/local/bin/iket /usr/local/bin/iket-cli
+sudo cp /usr/local/bin/iket-server /usr/local/bin/iket-gateway
 
 # 3. Directories & Permissions
 print_info "Ensuring production directories exist..."
@@ -41,7 +43,7 @@ if [ -d "/etc/systemd/system" ]; then
     echo "Check status: sudo systemctl status iket"
 else
     print_info "No systemd detected. Starting manually in background..."
-    nohup /usr/local/bin/iket --config /etc/iket/config.yaml > /var/log/iket/server.log 2>&1 &
+    nohup /usr/local/bin/iket-server --config /etc/iket/config.yaml > /var/log/iket/server.log 2>&1 &
     print_success "Iket started in background."
 fi
 

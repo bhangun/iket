@@ -1,0 +1,29 @@
+server:
+  port: 8080
+  readTimeout: "10s"
+  writeTimeout: "10s"
+  idleTimeout: "60s"
+  enableLogging: true
+
+security:
+  tls:
+    enabled: true
+    port: 8443
+    enrollmentPort: 9443
+    enrollmentMaxActive: 10
+    certFile: "/app/certs/server.crt"
+    keyFile: "/app/certs/server.key"
+    clientCAFile: "/app/certs/ca.crt"
+    clientAuthType: "RequireAndVerifyClientCert"
+    minVersion: "TLS1.2"
+    autoGenerate: true
+  enableBasicAuth: true
+  basicAuthUsers:
+    admin: "change-this-password"
+
+storage:
+  mode: "sqlite"
+  sqlite_path: "/app/.iket-admin/sqlite/iket.db"
+  mirror_files: true
+
+plugins: {}

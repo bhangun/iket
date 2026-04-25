@@ -4,8 +4,18 @@ server:
   writeTimeout: "10s"
   idleTimeout: "60s"
   enableLogging: true
+security:
   tls:
-    enabled: false
+    enabled: true
+    port: 8443
+    enrollmentPort: 9443
+    enrollmentMaxActive: 10
+    certFile: "${IKET_CERTS_DIR:-./certs}/server.crt"
+    keyFile: "${IKET_CERTS_DIR:-./certs}/server.key"
+    clientCAFile: "${IKET_CERTS_DIR:-./certs}/ca.crt"
+    clientAuthType: "RequireAndVerifyClientCert"
+    minVersion: "TLS1.2"
+    autoGenerate: true
 
 services:
   - version: 1
@@ -39,4 +49,3 @@ plugins:
     retry_attempts: 3
     batch_size: 1
     flush_interval: 1s
-
