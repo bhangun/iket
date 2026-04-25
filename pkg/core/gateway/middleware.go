@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -24,6 +25,7 @@ import (
 	"fmt"
 
 	"github.com/golang-jwt/jwt/v4"
+	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
 )
 
@@ -278,6 +280,28 @@ func (g *Gateway) proxyHandler(route config.RouterConfig) http.HandlerFunc {
 
 		// Optionally strip path prefix
 		origPath := r.URL.Path
+
+		// If a backend url_pattern is configured, apply it first. This is the
+		// intended behavior for routes like:
+		//   path:       /jahsy/auth/api/{rest:.*}
+		//   url_pattern:/api/{rest:.*}
+		// Without this, Iket will only strip prefixes and forward /auth/profile.
+		if len(route.Backends) > 0 && route.Backends[0].URLPattern != "" {
+			vars := mux.Vars(r)
+			p := applyURLPattern(route.Backends[0].URLPattern, route.Path, origPath, vars)
+			if p != "" {
+				r.URL.Path = destURL.Path + p
+				g.logger.Info(
+					"Proxying request",
+					logging.String("original_path", origPath),
+					logging.String("proxied_path", r.URL.Path),
+					logging.String("destination", destURL.String()),
+				)
+				// continue to proxy below
+				goto DO_PROXY
+			}
+		}
+
 		if route.StripPath {
 			prefix := route.Path
 			if idx := len(prefix); idx > 0 {
@@ -303,6 +327,7 @@ func (g *Gateway) proxyHandler(route config.RouterConfig) http.HandlerFunc {
 
 		g.logger.Info("Proxying request", logging.String("original_path", origPath), logging.String("proxied_path", r.URL.Path), logging.String("destination", destURL.String()))
 
+	DO_PROXY:
 		if isWebSocketRequest(r) {
 			g.logger.Info("Initiating WebSocket proxy", logging.String("path", r.URL.Path), logging.String("destination", destURL.String()))
 			wsOpts := route.WebSocket
@@ -341,6 +366,46 @@ func (g *Gateway) proxyHandler(route config.RouterConfig) http.HandlerFunc {
 		}
 		proxy.ServeHTTP(w, r)
 	}
+}
+
+var routeVarRe = regexp.MustCompile(`\{([A-Za-z0-9_]+)(:[^}]*)?\}`)
+
+// applyURLPattern expands a backend URL pattern like "/api/{rest:.*}" using mux vars.
+// If the named var is missing, and the placeholder is {rest...}, it falls back to
+// deriving "rest" from the original request path and the route path prefix.
+func applyURLPattern(pattern, routePath, origPath string, vars map[string]string) string {
+	derivedRest := ""
+	if i := findWildcardIndex(routePath); i > 0 {
+		prefix := routePath[:i-1]
+		if prefix != "" && prefix != "/" && strings.HasPrefix(origPath, prefix) {
+			derivedRest = strings.TrimPrefix(origPath[len(prefix):], "/")
+		}
+	}
+
+	out := routeVarRe.ReplaceAllStringFunc(pattern, func(m string) string {
+		sub := routeVarRe.FindStringSubmatch(m)
+		if len(sub) < 2 {
+			return m
+		}
+		name := sub[1]
+		val := ""
+		if vars != nil {
+			val = vars[name]
+		}
+		if val == "" && name == "rest" {
+			val = derivedRest
+		}
+		return strings.TrimPrefix(val, "/")
+	})
+
+	out = strings.TrimSpace(out)
+	if out == "" {
+		return "/"
+	}
+	if !strings.HasPrefix(out, "/") {
+		out = "/" + out
+	}
+	return out
 }
 
 // isWebSocketRequest checks if the request is a WebSocket upgrade
