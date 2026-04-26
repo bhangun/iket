@@ -2,7 +2,7 @@
 FROM golang:1.23.8-alpine AS builder
 
 # Install build dependencies
-RUN apk add --no-cache git ca-certificates tzdata make gcc musl-dev
+RUN apk add --no-cache git ca-certificates tzdata make build-base linux-headers
 
 WORKDIR /app
 
@@ -15,13 +15,16 @@ COPY . .
 
 # Build binaries
 ARG VERSION=dev
-RUN CGO_ENABLED=1 GOOS=linux \
-    go build -ldflags="-w -s -X github.com/bhangun/iket/pkg/app.Version=${VERSION}" \
-    -o /bin/iket-server ./cmd/iket/main.go
+ARG TARGETOS
+ARG TARGETARCH
 
-RUN CGO_ENABLED=0 GOOS=linux \
+RUN CGO_ENABLED=1 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
+    go build -ldflags="-w -s -X github.com/bhangun/iket/pkg/app.Version=${VERSION}" \
+    -o /bin/iket-server ./cmd/iket
+
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
     go build -ldflags="-w -s" \
-    -o /bin/iket ./cmd/iket-cli/*.go
+    -o /bin/iket ./cmd/iket-cli
 
 # Runtime stage
 FROM alpine:3.19
@@ -59,8 +62,8 @@ ENV TZ=UTC \
     IKET_CONFIG_DIR=/app/config \
     IKET_CERTS_DIR=/app/certs
 
-# Expose HTTP and HTTPS/mTLS ports
-EXPOSE 8080 8443
+# Expose HTTP, HTTPS/mTLS, and enrollment TLS ports
+EXPOSE 8080 8443 9443
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
