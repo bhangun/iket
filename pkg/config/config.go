@@ -110,6 +110,8 @@ type TLSConfig struct {
 	ClientAuthType       string   `yaml:"clientAuthType"` // NoClientCert, RequestClientCert, RequireAnyClientCert, VerifyClientCertIfGiven, RequireAndVerifyClientCert
 	MinVersion           string   `yaml:"minVersion"`
 	Ciphers              []string `yaml:"ciphers"`
+	ServerNames          []string `yaml:"serverNames,omitempty"`
+	ServerIPs            []string `yaml:"serverIPs,omitempty"`
 	AutoGenerate         *bool    `yaml:"autoGenerate,omitempty"`
 	GenerateSharedClient *bool    `yaml:"generateSharedClient,omitempty"`
 }

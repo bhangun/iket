@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/x509"
+	"encoding/pem"
 	"os"
 	"path/filepath"
 	"testing"
@@ -178,5 +180,93 @@ func TestEnsureTLSAssetsCanAddSharedClientAfterInitialBootstrap(t *testing.T) {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("expected generated shared client file %s after enablement: %v", path, err)
 		}
+	}
+}
+
+func TestEnsureTLSAssetsGeneratesConfiguredServerSANs(t *testing.T) {
+	tmpDir := t.TempDir()
+	auto := true
+
+	tlsCfg := TLSConfig{
+		Enabled:      true,
+		Port:         8443,
+		CertFile:     filepath.Join(tmpDir, "server.crt"),
+		KeyFile:      filepath.Join(tmpDir, "server.key"),
+		ClientCAFile: filepath.Join(tmpDir, "ca.crt"),
+		ServerNames:  []string{"localhost", "iket", "gateway.example.com"},
+		ServerIPs:    []string{"127.0.0.1", "103.16.199.4"},
+		AutoGenerate: &auto,
+	}
+
+	if err := EnsureTLSAssets(tlsCfg); err != nil {
+		t.Fatalf("EnsureTLSAssets returned error: %v", err)
+	}
+
+	certPEM, err := os.ReadFile(tlsCfg.CertFile)
+	if err != nil {
+		t.Fatalf("read server cert: %v", err)
+	}
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		t.Fatalf("decode server cert pem")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("parse server cert: %v", err)
+	}
+
+	if err := cert.VerifyHostname("gateway.example.com"); err != nil {
+		t.Fatalf("expected hostname SAN to verify: %v", err)
+	}
+	if err := cert.VerifyHostname("103.16.199.4"); err != nil {
+		t.Fatalf("expected IP SAN to verify: %v", err)
+	}
+}
+
+func TestEnsureTLSAssetsRegeneratesServerCertWhenSANsChange(t *testing.T) {
+	tmpDir := t.TempDir()
+	auto := true
+
+	initial := TLSConfig{
+		Enabled:      true,
+		Port:         8443,
+		CertFile:     filepath.Join(tmpDir, "server.crt"),
+		KeyFile:      filepath.Join(tmpDir, "server.key"),
+		ClientCAFile: filepath.Join(tmpDir, "ca.crt"),
+		ServerNames:  []string{"localhost"},
+		ServerIPs:    []string{"127.0.0.1"},
+		AutoGenerate: &auto,
+	}
+
+	if err := EnsureTLSAssets(initial); err != nil {
+		t.Fatalf("initial EnsureTLSAssets returned error: %v", err)
+	}
+
+	updated := initial
+	updated.ServerNames = []string{"localhost", "gateway.example.com"}
+	updated.ServerIPs = []string{"127.0.0.1", "103.16.199.4"}
+
+	if err := EnsureTLSAssets(updated); err != nil {
+		t.Fatalf("updated EnsureTLSAssets returned error: %v", err)
+	}
+
+	certPEM, err := os.ReadFile(updated.CertFile)
+	if err != nil {
+		t.Fatalf("read server cert: %v", err)
+	}
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		t.Fatalf("decode server cert pem")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("parse server cert: %v", err)
+	}
+
+	if err := cert.VerifyHostname("gateway.example.com"); err != nil {
+		t.Fatalf("expected regenerated hostname SAN to verify: %v", err)
+	}
+	if err := cert.VerifyHostname("103.16.199.4"); err != nil {
+		t.Fatalf("expected regenerated IP SAN to verify: %v", err)
 	}
 }

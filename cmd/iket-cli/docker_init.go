@@ -82,6 +82,8 @@ security:
     clientCAFile: "/app/certs/ca.crt"
     clientAuthType: "RequireAndVerifyClientCert"
     minVersion: "TLS1.2"
+    serverNames: ["localhost", "iket"]
+    serverIPs: ["127.0.0.1"]
     autoGenerate: true
     generateSharedClient: false
   enableBasicAuth: true
@@ -158,6 +160,8 @@ security:
     clientCAFile: "%s"
     clientAuthType: "RequireAndVerifyClientCert"
     minVersion: "TLS1.2"
+    serverNames: ["localhost"]
+    serverIPs: ["127.0.0.1"]
     autoGenerate: true
     generateSharedClient: false
   enableBasicAuth: true

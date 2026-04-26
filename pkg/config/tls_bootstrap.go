@@ -11,6 +11,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -57,10 +59,6 @@ func EnsureTLSAssets(tlsCfg TLSConfig) error {
 	serverAssetsExist := fileExists(tlsCfg.CertFile) && fileExists(tlsCfg.KeyFile) && fileExists(tlsCfg.ClientCAFile)
 	sharedClientExists := fileExists(clientCertPath) && fileExists(clientKeyPath)
 
-	if serverAssetsExist && (!tlsCfg.ShouldGenerateSharedClient() || sharedClientExists) {
-		return nil
-	}
-
 	if err := os.MkdirAll(certDir, 0700); err != nil {
 		return err
 	}
@@ -79,6 +77,18 @@ func EnsureTLSAssets(tlsCfg TLSConfig) error {
 
 	hosts := []string{"localhost", "iket"}
 	ips := []net.IP{net.ParseIP("127.0.0.1")}
+	if len(tlsCfg.ServerNames) > 0 {
+		hosts = normalizeServerNames(tlsCfg.ServerNames)
+	}
+	if len(tlsCfg.ServerIPs) > 0 {
+		ips = parseServerIPs(tlsCfg.ServerIPs)
+	}
+	if serverAssetsExist {
+		serverMatches, err := existingServerCertMatches(tlsCfg.CertFile, "iket-server", hosts, ips)
+		if err == nil && serverMatches && (!tlsCfg.ShouldGenerateSharedClient() || sharedClientExists) {
+			return nil
+		}
+	}
 	if err := ensureSignedCert(tlsCfg.CertFile, tlsCfg.KeyFile, "iket-server", hosts, ips, true, caKey, caCert); err != nil {
 		return err
 	}
@@ -132,7 +142,13 @@ func ensureCA(keyPath, certPath string) (*rsa.PrivateKey, *x509.Certificate, err
 
 func ensureSignedCert(certPath, keyPath, commonName string, hosts []string, ips []net.IP, serverCert bool, caKey *rsa.PrivateKey, caCert *x509.Certificate) error {
 	if fileExists(certPath) && fileExists(keyPath) {
-		return nil
+		if !serverCert {
+			return nil
+		}
+		matches, err := existingServerCertMatches(certPath, commonName, hosts, ips)
+		if err == nil && matches {
+			return nil
+		}
 	}
 
 	key, err := rsa.GenerateKey(rand.Reader, 4096)
@@ -215,4 +231,85 @@ func writeCertificate(path string, certDER []byte) error {
 func fileExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()
+}
+
+func normalizeServerNames(names []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(names))
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	if len(out) == 0 {
+		return []string{"localhost", "iket"}
+	}
+	return out
+}
+
+func parseServerIPs(rawIPs []string) []net.IP {
+	seen := map[string]struct{}{}
+	out := make([]net.IP, 0, len(rawIPs))
+	for _, raw := range rawIPs {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		ip := net.ParseIP(raw)
+		if ip == nil {
+			continue
+		}
+		key := ip.String()
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, ip)
+	}
+	if len(out) == 0 {
+		return []net.IP{net.ParseIP("127.0.0.1")}
+	}
+	return out
+}
+
+func existingServerCertMatches(certPath, commonName string, hosts []string, ips []net.IP) (bool, error) {
+	pemBytes, err := os.ReadFile(certPath)
+	if err != nil {
+		return false, err
+	}
+	block, _ := pem.Decode(pemBytes)
+	if block == nil {
+		return false, fmt.Errorf("invalid certificate pem")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return false, err
+	}
+	if cert.Subject.CommonName != commonName {
+		return false, nil
+	}
+	existingHosts := append([]string(nil), cert.DNSNames...)
+	expectedHosts := append([]string(nil), hosts...)
+	slices.Sort(existingHosts)
+	slices.Sort(expectedHosts)
+	if !slices.Equal(existingHosts, expectedHosts) {
+		return false, nil
+	}
+	existingIPs := make([]string, 0, len(cert.IPAddresses))
+	for _, ip := range cert.IPAddresses {
+		existingIPs = append(existingIPs, ip.String())
+	}
+	expectedIPs := make([]string, 0, len(ips))
+	for _, ip := range ips {
+		expectedIPs = append(expectedIPs, ip.String())
+	}
+	slices.Sort(existingIPs)
+	slices.Sort(expectedIPs)
+	return slices.Equal(existingIPs, expectedIPs), nil
 }
