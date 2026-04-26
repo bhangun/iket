@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -83,6 +84,7 @@ func candidateCertDirs(explicitDir string) []string {
 
 func discoverCertBundleInDirs(candidates []string) (certBundle, error) {
 	var tried []string
+	var hints []string
 	for _, dir := range candidates {
 		if dir == "" {
 			continue
@@ -104,12 +106,19 @@ func discoverCertBundleInDirs(candidates []string) (certBundle, error) {
 			bundle.SourceHint = dir
 			return bundle, nil
 		}
+		if fileExists(bundle.CAFile) && !fileExists(bundle.CertFile) && !fileExists(bundle.KeyFile) {
+			hints = append(hints, fmt.Sprintf("%s (found CA only; no shared client bundle)", dir))
+		}
 	}
 
 	if len(tried) == 0 {
 		return certBundle{}, fmt.Errorf("no certificate directories configured")
 	}
-	return certBundle{}, fmt.Errorf("no usable client certificate bundle found in: %s", strings.Join(tried, ", "))
+	msg := fmt.Sprintf("no usable client certificate bundle found in: %s", strings.Join(tried, ", "))
+	if len(hints) > 0 {
+		msg += fmt.Sprintf(". Hint: %s. If generateSharedClient=false, use 'iket setup docker --cert-dir <server-certs-dir> --url https://<server>:8443' on the trusted server host, or use enrollment tokens for remote admins", strings.Join(hints, ", "))
+	}
+	return certBundle{}, fmt.Errorf("%s", msg)
 }
 
 func discoverCertBundle(explicitDir string) (certBundle, error) {
@@ -132,6 +141,28 @@ func discoverCADir(explicitDir string) (string, error) {
 		return "", fmt.Errorf("no certificate directories configured")
 	}
 	return "", fmt.Errorf("no usable CA material found in: %s", strings.Join(tried, ", "))
+}
+
+func describeCertMaterial(dir string) string {
+	dir = absolutePath(dir)
+	if dir == "" {
+		return "no certificate directory specified"
+	}
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		return fmt.Sprintf("%s (directory not found)", dir)
+	}
+
+	parts := []string{}
+	for _, name := range []string{"ca.crt", "ca.key", "server.crt", "server.key", "client.crt", "client.key"} {
+		if fileExists(filepath.Join(dir, name)) {
+			parts = append(parts, name)
+		}
+	}
+	if len(parts) == 0 {
+		return fmt.Sprintf("%s (no expected cert files found)", dir)
+	}
+	return fmt.Sprintf("%s (%s)", dir, strings.Join(parts, ", "))
 }
 
 func fileExists(path string) bool {
@@ -321,4 +352,22 @@ func verifyCLIContext(ctx Context) error {
 	}
 	_, err = client.Do("GET", "/api/v1/gateway/status", nil)
 	return err
+}
+
+func normalizeAdminURL(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", nil
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return "", fmt.Errorf("invalid URL %q: %w", raw, err)
+	}
+	if parsed.Scheme == "http" {
+		port := parsed.Port()
+		if port == "8443" || port == "9443" {
+			return "", fmt.Errorf("URL %q uses http on TLS admin/enrollment port %s; use https:// instead", raw, port)
+		}
+	}
+	return trimmed, nil
 }

@@ -99,3 +99,47 @@ func TestEnsureTLSAssetsCanGenerateSharedClientWhenEnabled(t *testing.T) {
 		}
 	}
 }
+
+func TestEnsureTLSAssetsCanAddSharedClientAfterInitialBootstrap(t *testing.T) {
+	tmpDir := t.TempDir()
+	auto := true
+
+	initial := TLSConfig{
+		Enabled:      true,
+		Port:         8443,
+		CertFile:     filepath.Join(tmpDir, "server.crt"),
+		KeyFile:      filepath.Join(tmpDir, "server.key"),
+		ClientCAFile: filepath.Join(tmpDir, "ca.crt"),
+		AutoGenerate: &auto,
+	}
+
+	if err := EnsureTLSAssets(initial); err != nil {
+		t.Fatalf("initial EnsureTLSAssets returned error: %v", err)
+	}
+
+	for _, path := range []string{
+		filepath.Join(tmpDir, "client.crt"),
+		filepath.Join(tmpDir, "client.key"),
+	} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("expected shared client file to be absent before enablement: %s", path)
+		}
+	}
+
+	generateSharedClient := true
+	updated := initial
+	updated.GenerateSharedClient = &generateSharedClient
+
+	if err := EnsureTLSAssets(updated); err != nil {
+		t.Fatalf("updated EnsureTLSAssets returned error: %v", err)
+	}
+
+	for _, path := range []string{
+		filepath.Join(tmpDir, "client.crt"),
+		filepath.Join(tmpDir, "client.key"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected generated shared client file %s after enablement: %v", path, err)
+		}
+	}
+}

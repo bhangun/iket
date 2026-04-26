@@ -199,6 +199,8 @@ On first start, Iket will auto-generate the TLS assets in `./certs` if they do n
 - `server.crt`
 - `server.key`
 
+These are generated in the server-side Docker cert volume, not automatically in the CLI's `~/.iket/certs`. For example, if your deployment folder is `~/iket-docker`, the generated files are written to `~/iket-docker/certs/`.
+
 The normal first bootstrap flow is:
 1. start the server
 2. wait for `ca.*` and `server.*` to appear in `./certs`
@@ -301,6 +303,12 @@ Use this for the first admin on the same host that runs Iket. `iket setup docker
 iket setup docker --cert-dir ./certs --url https://<server-ip>:8443
 ```
 
+The client credentials created or imported by this command are then stored in the local CLI-managed directory, usually:
+
+```bash
+~/.iket/certs/contexts/<context-name>/
+```
+
 Option 2: Shared client bundle compatibility mode
 
 Use this only if you explicitly set `generateSharedClient: true`, or if you already manage a dedicated reusable client bundle yourself.
@@ -317,6 +325,12 @@ Then you can import that bundle into a named context:
 ```bash
 iket cert import --name remote-prod --cert-dir ./certs --url https://<server-ip>:8443
 ```
+
+When `generateSharedClient: true` is enabled, Iket writes the shared client bundle into the same server-side Docker cert directory:
+- `./certs/client.crt`
+- `./certs/client.key`
+
+If you first booted with `generateSharedClient: false` and later changed it to `true`, restart or recreate Iket after upgrading to a version that includes the shared-client regeneration fix, then confirm those two files appear.
 
 If the Docker cert volume is only present on the remote server, copy only the client bundle files you intend to use:
 
@@ -336,6 +350,8 @@ iket cert import \
   --cert-dir ~/.iket/certs/remote-prod
 ```
 
+Use `https://` for port `8443`. `http://<server-ip>:8443` is invalid because that port serves TLS.
+
 Option 3: Enrollment for additional remote admins
 
 This is the preferred path for extra laptops or admin machines after the first admin already has access.
@@ -351,6 +367,20 @@ Then move only that token bundle to the target machine and redeem it there:
 ```bash
 iket enroll use --file ./enroll.json --name remote-prod
 ```
+
+Quick checks when the cert location feels unclear:
+
+```bash
+# Server-side cert volume
+ls -la ./certs
+
+# Inside the running container
+docker exec iket ls -la /app/certs
+```
+
+Expected files by mode:
+- default secure mode: `ca.crt`, `ca.key`, `server.crt`, `server.key`
+- shared client compatibility mode: the files above plus `client.crt`, `client.key`
 
 To inspect or revoke bootstrap tokens from the admin-capable machine:
 

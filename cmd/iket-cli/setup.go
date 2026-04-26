@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -149,6 +150,14 @@ func initSetupCmd(rootCmd *cobra.Command) {
 				installed  Context
 				sourceHint string
 			)
+			var err error
+			dockerURL, err = normalizeAdminURL(dockerURL)
+			if err != nil {
+				return err
+			}
+			if strings.TrimSpace(dockerCertDir) != "" {
+				fmt.Printf("Inspecting trusted server cert directory: %s\n", describeCertMaterial(dockerCertDir))
+			}
 			bundle, bundleErr := discoverCertBundle(dockerCertDir)
 			if bundleErr == nil {
 				installed, bundleErr = installCertBundle(dockerContextName, bundle)
@@ -188,6 +197,7 @@ func initSetupCmd(rootCmd *cobra.Command) {
 			}
 
 			fmt.Printf("Configured context %q using bootstrap material from %s\n", dockerContextName, sourceHint)
+			fmt.Printf("Managed CLI certificates stored in %s\n", filepath.Dir(installed.CAFile))
 			fmt.Printf("Active context URL: %s\n", dockerURL)
 			fmt.Println("Try running: iket gateway status")
 			return nil

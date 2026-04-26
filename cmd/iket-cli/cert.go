@@ -93,6 +93,16 @@ Examples:
 		Short: "Import a client certificate bundle into a CLI context",
 		Long:  "Copy ca.crt, client.crt, and client.key into ~/.iket/certs/contexts and create or update a matching CLI context.",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			var err error
+			importURL, err = normalizeAdminURL(importURL)
+			if err != nil {
+				return err
+			}
+
+			if strings.TrimSpace(importCertDir) != "" {
+				fmt.Printf("Inspecting certificate directory: %s\n", describeCertMaterial(importCertDir))
+			}
+
 			bundle, err := discoverCertBundle(importCertDir)
 			if err != nil {
 				return err
@@ -132,6 +142,7 @@ Examples:
 			}
 
 			fmt.Printf("Imported certificates from %s into context %q\n", bundle.SourceHint, importContextName)
+			fmt.Printf("Stored managed CLI certificates in %s\n", filepath.Dir(installed.CAFile))
 			fmt.Printf("Context URL: %s\n", ctx.ServerURL)
 			return nil
 		},

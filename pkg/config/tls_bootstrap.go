@@ -22,11 +22,16 @@ func EnsureTLSAssets(tlsCfg TLSConfig) error {
 		return fmt.Errorf("tls auto-generation requires certFile, keyFile, and clientCAFile")
 	}
 
-	if fileExists(tlsCfg.CertFile) && fileExists(tlsCfg.KeyFile) && fileExists(tlsCfg.ClientCAFile) {
+	certDir := filepath.Dir(tlsCfg.CertFile)
+	clientCertPath := filepath.Join(certDir, "client.crt")
+	clientKeyPath := filepath.Join(certDir, "client.key")
+	serverAssetsExist := fileExists(tlsCfg.CertFile) && fileExists(tlsCfg.KeyFile) && fileExists(tlsCfg.ClientCAFile)
+	sharedClientExists := fileExists(clientCertPath) && fileExists(clientKeyPath)
+
+	if serverAssetsExist && (!tlsCfg.ShouldGenerateSharedClient() || sharedClientExists) {
 		return nil
 	}
 
-	certDir := filepath.Dir(tlsCfg.CertFile)
 	if err := os.MkdirAll(certDir, 0700); err != nil {
 		return err
 	}
@@ -49,8 +54,6 @@ func EnsureTLSAssets(tlsCfg TLSConfig) error {
 		return err
 	}
 	if tlsCfg.ShouldGenerateSharedClient() {
-		clientCertPath := filepath.Join(certDir, "client.crt")
-		clientKeyPath := filepath.Join(certDir, "client.key")
 		if err := ensureSignedCert(clientCertPath, clientKeyPath, "iket", nil, nil, false, caKey, caCert); err != nil {
 			return err
 		}
