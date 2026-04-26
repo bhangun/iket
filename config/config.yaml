@@ -16,6 +16,7 @@ security:
     clientAuthType: "RequireAndVerifyClientCert"
     minVersion: "TLS1.2"
     autoGenerate: true
+    generateSharedClient: false
 
 services:
   - version: 1

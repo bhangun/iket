@@ -176,6 +176,7 @@ security:
     clientAuthType: "RequireAndVerifyClientCert"
     minVersion: "TLS1.2"
     autoGenerate: true
+    generateSharedClient: false
   enableBasicAuth: true
   basicAuthUsers:
     admin: "change-this-password"
@@ -281,36 +282,52 @@ sudo systemctl enable --now iket
 Both scaffold modes now start Iket with `--config ... --services ...`, so `service.yaml` is active from first boot and file mirroring remains consistent when SQLite is the primary store.
 
 ### 2. Bootstrap CLI Access
-If you are on the trusted server host and your local `iket` client can see the Docker cert volume, you can bootstrap the first admin context directly after first boot has generated `ca.*` and `server.*`:
+The default and recommended config is:
+
+```yaml
+security:
+  tls:
+    autoGenerate: true
+    generateSharedClient: false
+```
+
+That means Iket generates only `ca.*` and `server.*` on first boot. How you get a client cert depends on your admin scenario:
+
+Option 1: Trusted server host bootstrap
+
+Use this for the first admin on the same host that runs Iket. `iket setup docker` reads the trusted local server cert directory and mints or imports a client cert into the caller's local CLI context.
 
 ```bash
 iket setup docker --cert-dir ./certs --url https://<server-ip>:8443
 ```
 
-If you have explicitly enabled `generateSharedClient: true`, or you already manage a dedicated client bundle yourself, you can also import that bundle into a named context:
+Option 2: Shared client bundle compatibility mode
+
+Use this only if you explicitly set `generateSharedClient: true`, or if you already manage a dedicated reusable client bundle yourself.
+
+```yaml
+security:
+  tls:
+    autoGenerate: true
+    generateSharedClient: true
+```
+
+Then you can import that bundle into a named context:
 
 ```bash
 iket cert import --name remote-prod --cert-dir ./certs --url https://<server-ip>:8443
 ```
 
-Do not copy `ca.key` off the trusted server host. For additional remote admin machines, prefer enrollment tokens instead of copying shared admin credentials around.
+If the Docker cert volume is only present on the remote server, copy only the client bundle files you intend to use:
 
-If you are intentionally using a dedicated client certificate bundle and the Docker cert volume is only present on the remote server, copy only the client credentials to your local machine first.
-
-**From your Local Machine:**
 ```bash
-# 1. Create a local certs directory
 mkdir -p ~/.iket/certs/remote-prod
-
-# 2. Copy the certificates from the remote server
-# (Replace <user> and <server-ip> with your actual credentials)
 scp <user>@<server-ip>:~/iket-docker/certs/ca.crt ~/.iket/certs/remote-prod/
 scp <user>@<server-ip>:~/iket-docker/certs/client.crt ~/.iket/certs/remote-prod/
 scp <user>@<server-ip>:~/iket-docker/certs/client.key ~/.iket/certs/remote-prod/
 ```
 
-### 3. Setup Local CLI Context
-Now, configure your local `iket` client to connect to the remote Docker instance:
+Then import them:
 
 ```bash
 iket cert import \
@@ -319,13 +336,17 @@ iket cert import \
   --cert-dir ~/.iket/certs/remote-prod
 ```
 
-If you prefer not to copy the full client certificate bundle, create a short-lived enrollment token on the admin-capable machine:
+Option 3: Enrollment for additional remote admins
+
+This is the preferred path for extra laptops or admin machines after the first admin already has access.
+
+Create a short-lived enrollment token on an already-admin-capable machine:
 
 ```bash
 iket enroll create-token --name laptop-admin --out ./enroll.json
 ```
 
-Then move only that token bundle to your laptop and redeem it there:
+Then move only that token bundle to the target machine and redeem it there:
 
 ```bash
 iket enroll use --file ./enroll.json --name remote-prod
@@ -337,6 +358,8 @@ To inspect or revoke bootstrap tokens from the admin-capable machine:
 iket enroll list-tokens
 iket enroll revoke-token <token-id>
 ```
+
+Do not copy `ca.key` off the trusted server host. Prefer Option 1 for the first local admin and Option 3 for additional remote admins. Option 2 exists mainly for compatibility or explicitly managed shared-client environments.
 
 This enrollment flow requires Iket to have access to its local CA signing key, which is the default when certificates are auto-generated and managed by Iket itself.
 The bootstrap exchange now runs on the dedicated HTTPS enrollment port (`9443` by default), separate from the main mTLS admin port (`8443`).

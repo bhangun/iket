@@ -17,6 +17,7 @@ security:
     clientAuthType: "RequireAndVerifyClientCert"
     minVersion: "TLS1.2"
     autoGenerate: true
+    generateSharedClient: false
   enableBasicAuth: true
   basicAuthUsers:
     admin: "change-this-password"
