@@ -46,6 +46,16 @@ curl -fsSL https://raw.githubusercontent.com/bhangun/iket/main/scripts/install.s
 
 By default, the installer downloads prebuilt release binaries. `--from-source` is only needed if you explicitly want a local source build. In full mode it also generates mTLS certificates and sets up your initial configuration.
 
+**Safe Uninstall:**
+```bash
+curl -fsSL https://raw.githubusercontent.com/bhangun/iket/main/scripts/uninstall.sh | bash
+```
+
+**Backup Then Full Remove:**
+```bash
+curl -fsSL https://raw.githubusercontent.com/bhangun/iket/main/scripts/uninstall.sh | bash -s -- --backup --purge-state
+```
+
 For detailed instructions and manual installation, see [docs/INSTALL.md](docs/INSTALL.md).
 
 ### Run the Gateway

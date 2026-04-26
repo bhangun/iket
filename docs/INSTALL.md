@@ -580,19 +580,37 @@ iket gateway status
 ### Linux/macOS
 
 ```bash
-# Stop service
-sudo systemctl stop iket
-sudo systemctl disable iket
+# Safe default: remove binaries/service, keep ~/.iket state
+curl -fsSL https://raw.githubusercontent.com/bhangun/iket/main/scripts/uninstall.sh | bash
+```
 
-# Remove binaries
-sudo rm /usr/local/bin/iket /usr/local/bin/iket-server /usr/local/bin/iket-cli
+```bash
+# Remove binaries/service and create a backup archive first
+curl -fsSL https://raw.githubusercontent.com/bhangun/iket/main/scripts/uninstall.sh | bash -s -- --backup
+```
 
-# Remove service file
-sudo rm /etc/systemd/system/iket.service
-sudo systemctl daemon-reload
+```bash
+# Full removal: backup first, then remove ~/.iket state too
+curl -fsSL https://raw.githubusercontent.com/bhangun/iket/main/scripts/uninstall.sh | bash -s -- --backup --purge-state
+```
 
-# Remove configuration and certificates (optional)
-rm -rf ~/.iket
+```bash
+# Preview what would happen without changing anything
+curl -fsSL https://raw.githubusercontent.com/bhangun/iket/main/scripts/uninstall.sh | bash -s -- --dry-run
+```
+
+The uninstall script removes:
+- `/usr/local/bin/iket`
+- `/usr/local/bin/iket-cli`
+- `/usr/local/bin/iket-server`
+- `/usr/local/bin/iket-gateway`
+- `/etc/systemd/system/iket.service` when present
+
+By default it keeps `~/.iket` so your config, SQLite state, certs, backups, and CLI contexts remain available unless you explicitly pass `--purge-state`.
+
+If you already have the repo checked out, you can run it directly:
+```bash
+./scripts/uninstall.sh --backup --purge-state
 ```
 
 ---
