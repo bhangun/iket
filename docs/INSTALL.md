@@ -182,8 +182,8 @@ security:
     admin: "change-this-password"
 
 storage:
-  mode: "sqlite"
-  sqlite_path: "/app/.iket-admin/sqlite/iket.db"
+  mode: "postgres"
+  postgres_url: "${IKET_POSTGRES_URL:-postgres://iket:iket@postgres:5432/iket?sslmode=disable}"
   mirror_files: true
 ```
 
@@ -213,6 +213,8 @@ Enrollment tokens are the follow-up path for additional admin machines, not the 
 If the certs do not appear, check `.env` and confirm the container is running with the correct:
 - `IKET_UID`
 - `IKET_GID`
+
+The generated Docker stack also includes an internal `postgres` service for Iket itself. It is only reachable on the Docker network by default, so it does not consume a host PostgreSQL port unless you choose to publish one yourself.
 
 ### 1b. Repo-Based Docker Compose
 If you do have the repository checked out on the remote server, you can also use the bundled compose files:
@@ -264,7 +266,7 @@ This scaffold creates:
 - `iket.service` if `--with-systemd` is used
 - `certs/`
 - `logs/`
-- `.iket-admin/sqlite/`
+- PostgreSQL connection defaults via `.env`
 
 If you generated a systemd unit for host mode, install it with:
 

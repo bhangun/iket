@@ -20,11 +20,30 @@ import (
 const prebuiltDockerComposeTemplate = `version: "3.8"
 
 services:
+  postgres:
+    image: ${IKET_POSTGRES_IMAGE:-postgres:16-bookworm}
+    container_name: iket-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=${IKET_DB_NAME:-iket}
+      - POSTGRES_USER=${IKET_DB_USER:-iket}
+      - POSTGRES_PASSWORD=${IKET_DB_PASSWORD:-iket}
+    volumes:
+      - iket-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${IKET_DB_USER:-iket} -d ${IKET_DB_NAME:-iket}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
   iket:
     image: ${IKET_IMAGE:-%s}
     container_name: iket
     restart: unless-stopped
     user: "${IKET_UID:-1000}:${IKET_GID:-1000}"
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "${IKET_HTTP_PORT:-%s}:8080"
       - "${IKET_HTTPS_PORT:-%s}:8443"
@@ -32,11 +51,15 @@ services:
     environment:
       - TZ=${TZ:-%s}
       - IKET_CERTS_DIR=/app/certs
+      - IKET_POSTGRES_URL=postgres://${IKET_DB_USER:-iket}:${IKET_DB_PASSWORD:-iket}@postgres:5432/${IKET_DB_NAME:-iket}?sslmode=disable
     command: ["--config", "/app/config/config.yaml", "--services", "/app/config/service.yaml"]
     volumes:
       - ./config:/app/config:ro
       - ./certs:/app/certs:rw
       - ./logs:/app/logs:rw
+
+volumes:
+  iket-postgres-data:
 `
 
 const prebuiltConfigTemplate = `server:
@@ -64,8 +87,8 @@ security:
     admin: "%s"
 
 storage:
-  mode: "sqlite"
-  sqlite_path: "/app/.iket-admin/sqlite/iket.db"
+  mode: "postgres"
+  postgres_url: "${IKET_POSTGRES_URL:-postgres://iket:iket@postgres:5432/iket?sslmode=disable}"
   mirror_files: true
 
 plugins: {}
@@ -86,11 +109,15 @@ services:
 `
 
 const prebuiltEnvTemplate = `IKET_IMAGE=%s
+IKET_POSTGRES_IMAGE=postgres:16-bookworm
 IKET_UID=%s
 IKET_GID=%s
 IKET_HTTP_PORT=%s
 IKET_HTTPS_PORT=%s
 IKET_ENROLLMENT_PORT=%s
+IKET_DB_NAME=iket
+IKET_DB_USER=iket
+IKET_DB_PASSWORD=iket
 TZ=%s
 `
 
@@ -136,8 +163,8 @@ security:
     admin: "%s"
 
 storage:
-  mode: "sqlite"
-  sqlite_path: "%s"
+  mode: "postgres"
+  postgres_url: "${IKET_POSTGRES_URL:-postgres://iket:iket@127.0.0.1:55432/iket?sslmode=disable}"
   mirror_files: true
 
 plugins: {}
@@ -148,6 +175,7 @@ IKET_SERVICES=%s
 IKET_HTTP_PORT=%s
 IKET_HTTPS_PORT=%s
 IKET_ENROLLMENT_PORT=%s
+IKET_POSTGRES_URL=postgres://iket:iket@127.0.0.1:55432/iket?sslmode=disable
 TZ=%s
 `
 
@@ -269,7 +297,7 @@ func initServerCmd(rootCmd *cobra.Command) {
 			selectedSystemdName := normalizeSystemdName(systemdName, selectedMode)
 			layout := newServerScaffoldLayout(rootDir, selectedSystemdName)
 
-			for _, dir := range []string{layout.rootDir, layout.configDir, layout.certsDir, layout.logsDir, layout.sqliteDir} {
+			for _, dir := range []string{layout.rootDir, layout.configDir, layout.certsDir, layout.logsDir} {
 				if err := os.MkdirAll(dir, 0755); err != nil {
 					return err
 				}
@@ -428,15 +456,16 @@ func writeDockerScaffold(layout serverScaffoldLayout, imageName, adminPassword, 
 	fmt.Printf("  1. Review %s and change the admin password.\n", layout.configPath)
 	fmt.Printf("  2. Review %s and replace the example upstream/service routes.\n", layout.servicesPath)
 	if withEnv {
-		fmt.Printf("  3. Adjust %s if you want different ports, image tags, or UID/GID mapping.\n", layout.envPath)
+		fmt.Printf("  3. Adjust %s if you want different ports, image tags, database credentials, or UID/GID mapping.\n", layout.envPath)
 	}
 	fmt.Printf("  4. Start Iket with: cd %s && docker compose up -d\n", layout.rootDir)
-	fmt.Printf("  5. Wait for first boot to auto-generate TLS assets in %s (ca.crt, ca.key, server.crt, server.key).\n", layout.certsDir)
+	fmt.Printf("  5. Docker also starts an internal PostgreSQL service for Iket on the compose network only, so no host PostgreSQL port is used by default.\n")
+	fmt.Printf("  6. Wait for first boot to auto-generate TLS assets in %s (ca.crt, ca.key, server.crt, server.key).\n", layout.certsDir)
 	if withSystemd {
-		fmt.Printf("  6. Install the service with: sudo cp %s /etc/systemd/system/%s && sudo systemctl daemon-reload && sudo systemctl enable --now %s\n", layout.systemdPath, filepath.Base(layout.systemdPath), strings.TrimSuffix(filepath.Base(layout.systemdPath), ".service"))
+		fmt.Printf("  7. Install the service with: sudo cp %s /etc/systemd/system/%s && sudo systemctl daemon-reload && sudo systemctl enable --now %s\n", layout.systemdPath, filepath.Base(layout.systemdPath), strings.TrimSuffix(filepath.Base(layout.systemdPath), ".service"))
 	}
-	fmt.Printf("  7. On the trusted server host, bootstrap the first local admin context with: iket setup docker --cert-dir %s --url https://<server>:8443\n", layout.certsDir)
-	fmt.Printf("  8. Use enrollment tokens later for additional remote admins: iket enroll create-token --name <admin-name> --out ./enroll.json\n")
+	fmt.Printf("  8. On the trusted server host, bootstrap the first local admin context with: iket setup docker --cert-dir %s --url https://<server>:8443\n", layout.certsDir)
+	fmt.Printf("  9. Use enrollment tokens later for additional remote admins: iket enroll create-token --name <admin-name> --out ./enroll.json\n")
 	return nil
 }
 
@@ -450,7 +479,6 @@ func writeHostScaffold(layout serverScaffoldLayout, adminPassword, httpPort, htt
 		filepath.Join(layout.certsDir, "server.key"),
 		filepath.Join(layout.certsDir, "ca.crt"),
 		adminPassword,
-		layout.sqlitePath,
 	)
 	envContent := fmt.Sprintf(hostEnvTemplate, layout.configPath, layout.servicesPath, httpPort, httpsPort, enrollmentPort, timezone)
 	systemdContent := fmt.Sprintf(hostSystemdTemplate, layout.rootDir, layout.envPath, "/usr/local/bin/iket-server", layout.configPath, layout.servicesPath)
@@ -483,13 +511,12 @@ func writeHostScaffold(layout serverScaffoldLayout, adminPassword, httpPort, htt
 	}
 	fmt.Printf("  - %s\n", layout.certsDir)
 	fmt.Printf("  - %s\n", layout.logsDir)
-	fmt.Printf("  - %s\n", layout.sqliteDir)
 	fmt.Println()
 	fmt.Println("Next steps:")
 	fmt.Printf("  1. Review %s and change the admin password.\n", layout.configPath)
 	fmt.Printf("  2. Review %s and replace the example upstream/service routes.\n", layout.servicesPath)
 	if withEnv {
-		fmt.Printf("  3. Adjust %s if you want different ports or runtime hints.\n", layout.envPath)
+		fmt.Printf("  3. Adjust %s if you want different ports or PostgreSQL connection settings.\n", layout.envPath)
 	}
 	fmt.Printf("  4. Start Iket with: iket-server --config %s --services %s\n", layout.configPath, layout.servicesPath)
 	fmt.Printf("  5. Wait for first boot to auto-generate TLS assets in %s (ca.crt, ca.key, server.crt, server.key).\n", layout.certsDir)
@@ -557,6 +584,16 @@ func runDockerDoctor(layout serverScaffoldLayout, doctorContext string, doctorSk
 						status.addWarn("container health/status: %s", health)
 					}
 				}
+				if out, err := runCommand(layout.rootDir, "docker", "inspect", "--format", "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}", "iket-postgres"); err != nil {
+					status.addWarn("docker inspect for postgres health failed: %v", err)
+				} else {
+					health := strings.TrimSpace(out)
+					if health == "healthy" || health == "running" {
+						status.addOK("postgres container health/status: %s", health)
+					} else {
+						status.addWarn("postgres container health/status: %s", health)
+					}
+				}
 			}
 		}
 	}
@@ -582,7 +619,6 @@ func runHostDoctor(layout serverScaffoldLayout, doctorContext string) error {
 	checkPath(layout.servicesPath, "service config", false)
 	checkPath(layout.certsDir, "certs directory", true)
 	checkPath(layout.logsDir, "logs directory", true)
-	checkPath(layout.sqliteDir, "sqlite directory", true)
 	if _, err := os.Stat(layout.envPath); err == nil {
 		status.addOK(".env present: %s", layout.envPath)
 	} else {

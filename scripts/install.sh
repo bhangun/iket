@@ -338,6 +338,10 @@ security:
   enableBasicAuth: true
   basicAuthUsers:
     admin: admin123
+storage:
+  mode: postgres
+  postgres_url: "postgres://iket:iket@127.0.0.1:55432/iket?sslmode=disable"
+  mirror_files: true
 EOF
             print_success "Server configuration created."
         fi

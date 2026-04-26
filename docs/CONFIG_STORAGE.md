@@ -1,12 +1,13 @@
 # Config Storage
 
-Iket currently uses file-based configuration by default through `config.yaml` and `service.yaml`.
+Iket now defaults to PostgreSQL as the primary config/state store, with
+`config.yaml` and `service.yaml` remaining the user-facing mirror/import format.
 
-That is still the right default for local development and small deployments because it is:
+That default is aimed at safer admin operations while preserving a file-based UX:
 
-- easy to inspect and edit
-- easy to version in Git
-- operationally simple
+- transactional updates in the primary store
+- YAML remains easy to inspect and edit
+- mirrored files still fit Git-based workflows
 
 ## Future-Proof Storage Model
 
@@ -20,40 +21,40 @@ This is the intended direction for storage strategies:
 
 Examples:
 
-- Primary `FileProvider`, mirror SQLite cache
+- Primary `FileProvider`, mirror local cache
 - Primary SQLite, mirror YAML files for operator visibility
-- Primary Postgres, mirror local file snapshots
+- Primary Postgres, mirror YAML files or local snapshots
 
 ## Recommendation
 
 Current default:
 
-- server primary store: SQLite
+- server primary store: PostgreSQL
 - user-facing mirror/export: `config.yaml` and optional `service.yaml`
 
-That means admin changes made through `iket` are persisted to SQLite first, then mirrored back to files.
+That means admin changes made through `iket` are persisted to PostgreSQL first, then mirrored back to files.
 
 Storage modes:
 
-- `--storage=sqlite` (default): SQLite primary, file mirror/bootstrap
+- `--storage=postgres` (default): PostgreSQL primary, file mirror/bootstrap
+- `--storage=sqlite`: SQLite primary, file mirror/bootstrap
 - `--storage=file`: legacy file-primary mode
-- `--storage=postgres`: reserved enterprise-oriented provider path
 
 ## Schema Versioning
 
-The SQLite provider now maintains an internal schema migration table:
+The database-backed providers maintain internal schema migration tables:
 
 - `iket_schema_migrations`
 
-This allows Iket to evolve the database layout over time without changing the
-gateway, CLI, or management API storage contract.
+Current schema version:
 
-Current schema version: `1`
+- PostgreSQL: `1`
+- SQLite: `1`
 
 Recommended direction:
 
-- local / single-node managed installs: SQLite primary
-- enterprise / HA control-plane: Postgres primary
+- Docker / managed installs: PostgreSQL primary
+- local fallback / very small installs: SQLite primary
 - operator UX: keep file import/export and optional mirroring
 
 ## Why Not Switch Immediately?
@@ -65,4 +66,4 @@ A database is not automatically faster for the current workload. Iket config is 
 - richer audit/history possibilities
 - better multi-process or multi-node coordination
 
-The current file-based mode remains fully supported. A future database provider should preserve file import/export so operators can still work with declarative config files.
+The current file-based mode remains fully supported. Database-backed modes preserve file import/export so operators can still work with declarative config files.

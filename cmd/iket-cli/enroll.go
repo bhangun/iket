@@ -9,6 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -323,7 +324,7 @@ func redeemEnrollment(bundle enrollmentBundle, csrPEM string) (enrollmentRedeemR
 	}
 	if resp.StatusCode >= 400 {
 		if wrapper.Error.Message != "" {
-			return enrollmentRedeemResponse{}, fmt.Errorf(wrapper.Error.Message)
+			return enrollmentRedeemResponse{}, errors.New(wrapper.Error.Message)
 		}
 		return enrollmentRedeemResponse{}, fmt.Errorf("enrollment failed with status %d", resp.StatusCode)
 	}

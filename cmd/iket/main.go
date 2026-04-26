@@ -38,8 +38,9 @@ import (
 )
 
 var (
-	defaultConfigPath = "config/config.yaml"
-	defaultSQLitePath = ".iket-admin/sqlite/iket.db"
+	defaultConfigPath  = "config/config.yaml"
+	defaultSQLitePath  = ".iket-admin/sqlite/iket.db"
+	defaultPostgresURL = "postgres://iket:iket@127.0.0.1:55432/iket?sslmode=disable"
 	// defaultServicePath = "config/service.yaml"
 	version = app.Version // use version from app package
 )
@@ -78,8 +79,8 @@ security:
     required: false
 
 storage:
-  mode: "sqlite"
-  sqlite_path: ".iket-admin/sqlite/iket.db"
+  mode: "postgres"
+  postgres_url: "${IKET_POSTGRES_URL:-postgres://iket:iket@127.0.0.1:55432/iket?sslmode=disable}"
   mirror_files: true
 
 plugins:
@@ -134,8 +135,9 @@ func main() {
 
 	configPath := flag.String("config", defaultConfigPath, "Path to config.yaml")
 	servicesPath := flag.String("services", "", "Path to service-based config (service.yaml), optional")
-	storageMode := flag.String("storage", "", "Configuration storage backend override: sqlite or file")
+	storageMode := flag.String("storage", "", "Configuration storage backend override: postgres, sqlite, or file")
 	sqlitePath := flag.String("sqlite-path", "", "SQLite database path override")
+	postgresURL := flag.String("postgres-url", "", "PostgreSQL connection URL override")
 	portFlag := flag.Int("port", 0, "Port to run the gateway on (overrides config and IKET_PORT env var)")
 	printConfig := flag.Bool("print-config", false, "Print the loaded configuration and exit")
 	printVersion := flag.Bool("version", false, "Print version and exit")
@@ -158,8 +160,14 @@ func main() {
 	if *sqlitePath != "" {
 		storageSettings.SQLitePath = *sqlitePath
 	}
+	if *postgresURL != "" {
+		storageSettings.PostgresURL = *postgresURL
+	}
 	if strings.TrimSpace(storageSettings.SQLitePath) == "" {
 		storageSettings.SQLitePath = defaultSQLitePath
+	}
+	if strings.TrimSpace(storageSettings.PostgresURL) == "" {
+		storageSettings.PostgresURL = defaultPostgresURL
 	}
 
 	// Initialize logger
@@ -187,7 +195,7 @@ func main() {
 			provider = sqliteProvider
 		}
 	case "postgres":
-		postgresProvider := config.NewPostgresProvider(storageSettings.PostgresURL)
+		postgresProvider := config.NewPostgresProvider(storageSettings.PostgresURL, fileProvider, logger)
 		if storageSettings.EffectiveMirrorFiles() {
 			provider = config.NewMirroringProvider(postgresProvider, fileProvider)
 		} else {
@@ -271,6 +279,7 @@ func main() {
 	logger.Info("Configuration storage ready",
 		logging.String("storage", storageSettings.EffectiveMode()),
 		logging.String("sqlite_path", storageSettings.SQLitePath),
+		logging.String("postgres_url", configRedactedPostgresURL(storageSettings.PostgresURL)),
 		logging.Bool("mirror_files", storageSettings.EffectiveMirrorFiles()),
 	)
 
@@ -307,8 +316,9 @@ func main() {
 
 func readStorageSettings(configPath string) config.StorageConfig {
 	settings := config.StorageConfig{
-		Mode:       "sqlite",
-		SQLitePath: defaultSQLitePath,
+		Mode:        "postgres",
+		SQLitePath:  defaultSQLitePath,
+		PostgresURL: defaultPostgresURL,
 	}
 
 	data, err := os.ReadFile(configPath)
@@ -328,10 +338,35 @@ func readStorageSettings(configPath string) config.StorageConfig {
 	if raw.Storage.SQLitePath != "" {
 		settings.SQLitePath = raw.Storage.SQLitePath
 	}
+	if raw.Storage.PostgresURL != "" {
+		settings.PostgresURL = raw.Storage.PostgresURL
+	}
 	if raw.Storage.MirrorFiles != nil {
 		settings.MirrorFiles = raw.Storage.MirrorFiles
 	}
 	return settings
+}
+
+func configRedactedPostgresURL(raw string) string {
+	if raw == "" {
+		return raw
+	}
+	start := strings.Index(raw, "://")
+	if start == -1 {
+		return raw
+	}
+	start += 3
+	at := strings.Index(raw[start:], "@")
+	if at == -1 {
+		return raw
+	}
+	at += start
+	colon := strings.Index(raw[start:at], ":")
+	if colon == -1 {
+		return raw
+	}
+	colon += start
+	return raw[:colon+1] + "****" + raw[at:]
 }
 
 func startEnrollmentServer(cfg *config.Config, logger *logging.Logger, managementAPI *api.ManagementAPI) *http.Server {

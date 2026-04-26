@@ -4,10 +4,17 @@ ARG TARGETOS
 ARG TARGETARCH
 
 # Build stage
-FROM --platform=$TARGETPLATFORM golang:1.23.8-alpine AS builder
+FROM --platform=$TARGETPLATFORM golang:1.25.0-bookworm AS builder
 
 # Install build dependencies
-RUN apk add --no-cache git ca-certificates tzdata make build-base linux-headers
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    ca-certificates \
+    tzdata \
+    make \
+    build-essential \
+    pkg-config \
+ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -21,7 +28,7 @@ COPY . .
 # Build binaries
 ARG VERSION=dev
 
-RUN CGO_ENABLED=1 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
     go build -ldflags="-w -s -X github.com/bhangun/iket/pkg/app.Version=${VERSION}" \
     -o /bin/iket-server ./cmd/iket
 
@@ -30,13 +37,18 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
     -o /bin/iket ./cmd/iket-cli
 
 # Runtime stage
-FROM --platform=$TARGETPLATFORM alpine:3.19
+FROM --platform=$TARGETPLATFORM debian:bookworm-slim
 
 # Add basic security
-RUN adduser -D -u 10001 iketuser
+RUN useradd --system --uid 10001 --create-home --home-dir /home/iketuser iketuser
 
 # Install runtime dependencies
-RUN apk add --no-cache ca-certificates tzdata curl openssl
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    tzdata \
+    curl \
+    openssl \
+ && rm -rf /var/lib/apt/lists/*
 
 # Create necessary directories
 RUN mkdir -p /app/config /app/certs /app/plugins /app/logs && \

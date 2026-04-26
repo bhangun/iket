@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 func TestSQLiteProviderSaveLoad(t *testing.T) {
@@ -57,7 +57,7 @@ func TestSQLiteProviderAppliesSchemaMigrations(t *testing.T) {
 	}
 	defer provider.Close()
 
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open(sqliteDriverName, dbPath)
 	if err != nil {
 		t.Fatalf("failed to open sqlite db: %v", err)
 	}

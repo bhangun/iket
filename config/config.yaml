@@ -18,6 +18,11 @@ security:
     autoGenerate: true
     generateSharedClient: false
 
+storage:
+  mode: "postgres"
+  postgres_url: "${IKET_POSTGRES_URL:-postgres://iket:iket@127.0.0.1:55432/iket?sslmode=disable}"
+  mirror_files: true
+
 services:
   - version: 1
     services:

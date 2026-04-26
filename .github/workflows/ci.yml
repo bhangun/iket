@@ -13,9 +13,9 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.23.8'
+        go-version: '1.25.0'
     - name: Build server
-      run: go build -o iket-server ./cmd/iket
+      run: CGO_ENABLED=0 go build -o iket-server ./cmd/iket
     - name: Build client
       run: CGO_ENABLED=0 go build -o iket ./cmd/iket-cli
     #- name: Test

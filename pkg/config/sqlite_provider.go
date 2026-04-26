@@ -11,10 +11,11 @@ import (
 
 	coreerrors "github.com/bhangun/iket/pkg/core/errors"
 	"github.com/bhangun/iket/pkg/logging"
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 const sqliteSchemaVersion = 1
+const sqliteDriverName = "sqlite"
 
 type SQLiteProvider struct {
 	dbPath      string
@@ -133,7 +134,7 @@ func (p *SQLiteProvider) ensureDB() error {
 		return err
 	}
 
-	db, err := sql.Open("sqlite3", p.dbPath)
+	db, err := sql.Open(sqliteDriverName, p.dbPath)
 	if err != nil {
 		return err
 	}

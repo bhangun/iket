@@ -23,8 +23,8 @@ security:
     admin: "change-this-password"
 
 storage:
-  mode: "sqlite"
-  sqlite_path: "/app/.iket-admin/sqlite/iket.db"
+  mode: "postgres"
+  postgres_url: "${IKET_POSTGRES_URL:-postgres://iket:iket@postgres:5432/iket?sslmode=disable}"
   mirror_files: true
 
 plugins: {}

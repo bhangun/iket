@@ -64,10 +64,11 @@ For detailed instructions and manual installation, see [docs/INSTALL.md](docs/IN
 # Start with default config created by installer
 iket-server --config ~/.iket/config.yaml
 
-# Default storage is sqlite with file mirroring
+# Default storage is PostgreSQL with file mirroring
 iket-server --config ./config/config.yaml --services ./config/service.yaml
 
-# Use legacy file-primary mode if needed
+# Use explicit PostgreSQL or legacy file-primary mode if needed
+iket-server --storage postgres --postgres-url "postgres://iket:iket@127.0.0.1:55432/iket?sslmode=disable" --config ./config/config.yaml --services ./config/service.yaml
 iket-server --storage file --config ./config/config.yaml --services ./config/service.yaml
 ```
 
