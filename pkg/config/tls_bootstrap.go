@@ -12,7 +12,36 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
+
+func ReadBootstrapTLSConfig(configPath string) (TLSConfig, error) {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return TLSConfig{}, err
+	}
+
+	var raw struct {
+		Server struct {
+			TLS TLSConfig `yaml:"tls,omitempty"`
+		} `yaml:"server"`
+		Security struct {
+			TLS TLSConfig `yaml:"tls"`
+		} `yaml:"security"`
+	}
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return TLSConfig{}, err
+	}
+
+	cfg := &Config{
+		Server:   ServerConfig{TLS: raw.Server.TLS},
+		Security: SecurityConfig{TLS: raw.Security.TLS},
+	}
+	normalizeLegacyConfig(cfg)
+	expandEnvVarsInStruct(cfg)
+	return cfg.Security.TLS, nil
+}
 
 func EnsureTLSAssets(tlsCfg TLSConfig) error {
 	if !tlsCfg.Enabled || !tlsCfg.ShouldAutoGenerate() {

@@ -6,6 +6,43 @@ import (
 	"testing"
 )
 
+func TestReadBootstrapTLSConfigReadsSecurityTLS(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(`
+security:
+  tls:
+    enabled: true
+    port: 8443
+    certFile: "/tmp/server.crt"
+    keyFile: "/tmp/server.key"
+    clientCAFile: "/tmp/ca.crt"
+    clientAuthType: "RequireAndVerifyClientCert"
+    minVersion: "TLS1.2"
+    autoGenerate: true
+    generateSharedClient: true
+`), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	tlsCfg, err := ReadBootstrapTLSConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("ReadBootstrapTLSConfig returned error: %v", err)
+	}
+	if !tlsCfg.Enabled {
+		t.Fatalf("expected tls enabled")
+	}
+	if tlsCfg.CertFile != "/tmp/server.crt" {
+		t.Fatalf("unexpected cert file: %s", tlsCfg.CertFile)
+	}
+	if !tlsCfg.ShouldAutoGenerate() {
+		t.Fatalf("expected autoGenerate true")
+	}
+	if !tlsCfg.ShouldGenerateSharedClient() {
+		t.Fatalf("expected generateSharedClient true")
+	}
+}
+
 func TestNormalizeLegacyConfigMovesServerTLS(t *testing.T) {
 	cfg := &Config{
 		Server: ServerConfig{

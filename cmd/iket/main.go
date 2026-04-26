@@ -153,6 +153,16 @@ func main() {
 		os.Exit(0)
 	}
 
+	bootstrapTLS, err := config.ReadBootstrapTLSConfig(*configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to read bootstrap TLS settings from %s: %v\n", *configPath, err)
+		os.Exit(1)
+	}
+	if err := config.EnsureTLSAssets(bootstrapTLS); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to prepare bootstrap TLS assets from %s: %v\n", *configPath, err)
+		os.Exit(1)
+	}
+
 	storageSettings := readStorageSettings(*configPath)
 	if *storageMode != "" {
 		storageSettings.Mode = *storageMode
