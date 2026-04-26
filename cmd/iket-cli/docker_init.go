@@ -9,7 +9,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	iketconfig "github.com/bhangun/iket/pkg/config"
@@ -550,6 +552,7 @@ func runDockerDoctor(layout serverScaffoldLayout, doctorContext string, doctorSk
 	} else {
 		status.addWarn("systemd unit not present: %s", layout.systemdPath)
 	}
+	checkDockerOwnership(status, layout)
 	checkCertFiles(status, layout.certsDir, readExpectedSharedClient(layout.configPath))
 
 	if !doctorSkipDocker {
@@ -606,6 +609,69 @@ func runDockerDoctor(layout serverScaffoldLayout, doctorContext string, doctorSk
 	checkTLSPort(status, "https enrollment tls", ports.enrollment, filepath.Join(layout.certsDir, "ca.crt"), "localhost")
 	checkDoctorContext(status, doctorContext)
 	return finishDoctor(status, "server doctor")
+}
+
+func readEnvFileMap(path string) map[string]string {
+	out := map[string]string{}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return out
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || !strings.Contains(line, "=") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		out[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+	}
+	return out
+}
+
+func checkDockerOwnership(status *doctorStatus, layout serverScaffoldLayout) {
+	envMap := readEnvFileMap(layout.envPath)
+	uid := strings.TrimSpace(envMap["IKET_UID"])
+	gid := strings.TrimSpace(envMap["IKET_GID"])
+	if uid == "" || gid == "" {
+		status.addWarn("IKET_UID/IKET_GID not found in %s; ownership checks are limited", layout.envPath)
+		return
+	}
+
+	uidNum, errUID := strconv.Atoi(uid)
+	gidNum, errGID := strconv.Atoi(gid)
+	if errUID != nil || errGID != nil {
+		status.addWarn("IKET_UID/IKET_GID are not numeric in %s", layout.envPath)
+		return
+	}
+
+	checkOwnershipPath(status, "certs directory", layout.certsDir, uidNum, gidNum)
+	checkOwnershipPath(status, "logs directory", layout.logsDir, uidNum, gidNum)
+}
+
+func checkOwnershipPath(status *doctorStatus, label, path string, expectedUID, expectedGID int) {
+	info, err := os.Stat(path)
+	if err != nil {
+		status.addWarn("%s not accessible for ownership check: %v", label, err)
+		return
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		status.addWarn("%s ownership details unavailable on this platform", label)
+		return
+	}
+
+	mode := info.Mode().Perm()
+	actualUID := int(stat.Uid)
+	actualGID := int(stat.Gid)
+	if actualUID == expectedUID && actualGID == expectedGID {
+		status.addOK("%s ownership matches IKET_UID/IKET_GID (%d:%d)", label, expectedUID, expectedGID)
+	} else {
+		status.addWarn("%s ownership is %d:%d but IKET_UID/IKET_GID expects %d:%d", label, actualUID, actualGID, expectedUID, expectedGID)
+	}
+
+	if mode&0200 == 0 {
+		status.addWarn("%s owner write bit is not set (mode %o)", label, mode)
+	}
 }
 
 func runHostDoctor(layout serverScaffoldLayout, doctorContext string) error {

@@ -164,6 +164,8 @@ If you explicitly enable `generateSharedClient: true`, Iket also generates `clie
 ```bash
 iket cert import --name remote-prod --cert-dir ./certs --url https://<server-ip>:8443
 ```
+
+If Docker startup fails with `open /app/certs/ca.key: permission denied`, the host-mounted `./certs` directory is not writable by the container user. Make sure `IKET_UID` / `IKET_GID` match the host owner, clear stale root-owned cert files if needed, and prefer running `docker compose` as the same user that owns the deployment folder.
 `security.tls.enrollmentPort` exposes a narrow HTTPS bootstrap endpoint for one-time certificate enrollment without opening the full admin surface.
 
 The direct enrollment flow works best when Iket is using its local managed CA. If you point `clientCAFile` at an external CA but do not keep the signing key on the server, Iket cannot mint new client certificates and enrollment will be rejected.

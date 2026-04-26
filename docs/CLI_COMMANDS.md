@@ -13,7 +13,7 @@ Manage different environment profiles (Local, Docker, Staging, Production).
 | `iket setup docker` | On a trusted server host, import an existing client bundle or mint a local admin client certificate from the server CA and create a ready-to-use mTLS context. |
 | `iket server init --mode docker` | Generate a prebuilt Docker deployment scaffold with `config.yaml`, `service.yaml`, compose, and optional `.env`/systemd files. |
 | `iket server init --mode host` | Generate a host-native scaffold with `config.yaml`, `service.yaml`, cert/log directories, SQLite path, and optional `.env`/systemd files. |
-| `iket server doctor --mode docker` | Check scaffold files, local Docker state, container health, local ports, TLS handshakes, generated certs, and an optional CLI context. |
+| `iket server doctor --mode docker` | Check scaffold files, Docker state, `certs/` and `logs/` ownership against `IKET_UID` / `IKET_GID`, container health, local ports, TLS handshakes, generated certs, and an optional CLI context. |
 | `iket server doctor --mode host` | Check host scaffold files, local ports, TLS handshakes, Iket binary availability, and an optional CLI context. |
 | `iket enroll create-token` | Create a short-lived enrollment token from the current admin context. |
 | `iket enroll list-tokens` | List current and historical enrollment tokens. |

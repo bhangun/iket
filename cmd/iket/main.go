@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -44,6 +45,8 @@ var (
 	// defaultServicePath = "config/service.yaml"
 	version = app.Version // use version from app package
 )
+
+var storageEnvVarPattern = regexp.MustCompile(`\$\{([A-Za-z0-9_]+)(:-([^}]*))?\}`)
 
 var defaultConfig = `
 server:
@@ -343,18 +346,34 @@ func readStorageSettings(configPath string) config.StorageConfig {
 		return settings
 	}
 	if raw.Storage.Mode != "" {
-		settings.Mode = raw.Storage.Mode
+		settings.Mode = expandStorageEnvVars(raw.Storage.Mode)
 	}
 	if raw.Storage.SQLitePath != "" {
-		settings.SQLitePath = raw.Storage.SQLitePath
+		settings.SQLitePath = expandStorageEnvVars(raw.Storage.SQLitePath)
 	}
 	if raw.Storage.PostgresURL != "" {
-		settings.PostgresURL = raw.Storage.PostgresURL
+		settings.PostgresURL = expandStorageEnvVars(raw.Storage.PostgresURL)
 	}
 	if raw.Storage.MirrorFiles != nil {
 		settings.MirrorFiles = raw.Storage.MirrorFiles
 	}
 	return settings
+}
+
+func expandStorageEnvVars(input string) string {
+	return storageEnvVarPattern.ReplaceAllStringFunc(input, func(match string) string {
+		parts := storageEnvVarPattern.FindStringSubmatch(match)
+		if len(parts) < 2 {
+			return match
+		}
+		if value, ok := os.LookupEnv(parts[1]); ok && value != "" {
+			return value
+		}
+		if len(parts) >= 4 {
+			return parts[3]
+		}
+		return ""
+	})
 }
 
 func configRedactedPostgresURL(raw string) string {

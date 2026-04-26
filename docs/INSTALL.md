@@ -128,7 +128,7 @@ This generates the same compose/config scaffold automatically, plus:
 - `config/service.yaml` for service and route definitions
 - `iket-docker.service` if `--with-systemd` is used
 
-The generated Docker scaffold also runs the container with the host UID/GID by default. That is important because Iket auto-generates certs and writes SQLite/log files into mounted host directories, and the container user must be able to write to those paths.
+The generated Docker scaffold also runs the container with the host UID/GID by default. That is important because Iket auto-generates certs and writes cert/log files into mounted host directories, and the container user must be able to write to those paths.
 
 Create `docker-compose.yaml`:
 
@@ -216,6 +216,38 @@ If the certs do not appear, check `.env` and confirm the container is running wi
 
 The generated Docker stack also includes an internal `postgres` service for Iket itself. It is only reachable on the Docker network by default, so it does not consume a host PostgreSQL port unless you choose to publish one yourself.
 
+If startup fails with:
+
+```text
+failed to prepare bootstrap TLS assets from /app/config/config.yaml: open /app/certs/ca.key: permission denied
+```
+
+that means the host-mounted `./certs` directory is not writable by the container user. This commonly happens if:
+- `docker compose` was run with `sudo` and created root-owned files
+- `IKET_UID` / `IKET_GID` in `.env` do not match the intended host user
+- stale root-owned files already exist in `certs/` or `logs/`
+
+Recommended recovery:
+
+```bash
+cd ~/iket-docker
+grep '^IKET_UID=' .env
+grep '^IKET_GID=' .env
+id -u
+id -g
+
+sudo rm -f certs/ca.crt certs/ca.key certs/server.crt certs/server.key certs/client.crt certs/client.key
+sudo chown -R $(id -u):$(id -g) certs logs
+sudo chmod 700 certs
+sudo chmod 755 logs
+sudo chmod -R u+rwX certs logs
+
+docker compose up -d --force-recreate
+docker logs iket --tail 100
+```
+
+Prefer running `docker compose` as the same user that owns the deployment folder whenever possible.
+
 ### 1b. Repo-Based Docker Compose
 If you do have the repository checked out on the remote server, you can also use the bundled compose files:
 
@@ -245,6 +277,7 @@ iket server doctor --mode docker --output ~/iket-docker --context remote-prod
 ```
 
 `server doctor --mode docker` now also checks:
+- `certs/` and `logs/` ownership against `IKET_UID` / `IKET_GID`
 - container health/status via Docker
 - local reachability of the published HTTP, admin TLS, and enrollment TLS ports
 - TLS handshakes against the generated CA when possible
