@@ -1,5 +1,10 @@
+ARG TARGETPLATFORM
+ARG BUILDPLATFORM
+ARG TARGETOS
+ARG TARGETARCH
+
 # Build stage
-FROM golang:1.23.8-alpine AS builder
+FROM --platform=$TARGETPLATFORM golang:1.23.8-alpine AS builder
 
 # Install build dependencies
 RUN apk add --no-cache git ca-certificates tzdata make build-base linux-headers
@@ -15,8 +20,6 @@ COPY . .
 
 # Build binaries
 ARG VERSION=dev
-ARG TARGETOS
-ARG TARGETARCH
 
 RUN CGO_ENABLED=1 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
     go build -ldflags="-w -s -X github.com/bhangun/iket/pkg/app.Version=${VERSION}" \
@@ -27,7 +30,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
     -o /bin/iket ./cmd/iket-cli
 
 # Runtime stage
-FROM alpine:3.19
+FROM --platform=$TARGETPLATFORM alpine:3.19
 
 # Add basic security
 RUN adduser -D -u 10001 iketuser

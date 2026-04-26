@@ -6,8 +6,19 @@ on:
       - 'v*'
 
 jobs:
-  docker:
-    runs-on: ubuntu-latest
+  docker-build:
+    name: Build and push ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            platform: linux/amd64
+            arch_tag: amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            arch_tag: arm64
+    runs-on: ${{ matrix.runner }}
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
@@ -16,14 +27,8 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-        with:
-          driver-opts: |
-            image=moby/buildkit:latest
 
       - name: Login to DockerHub
         uses: docker/login-action@v3
@@ -32,20 +37,53 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Get version from git tag
-        id: get_version
         run: echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_ENV
 
-      - name: Build and push multi-arch image
+      - name: Build and push arch image
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./docker/Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.platform }}
           push: true
+          provenance: false
           tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/iket:latest
-            ${{ secrets.DOCKERHUB_USERNAME }}/iket:${{ env.VERSION }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/iket:latest-${{ matrix.arch_tag }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/iket:${{ env.VERSION }}-${{ matrix.arch_tag }}
           build-args: |
             VERSION=${{ env.VERSION }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=docker-${{ matrix.arch_tag }}
+          cache-to: type=gha,mode=max,scope=docker-${{ matrix.arch_tag }}
+
+  docker-manifest:
+    name: Publish multi-arch manifest
+    needs: docker-build
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Get version from git tag
+        run: echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_ENV
+
+      - name: Create and push latest manifest
+        run: |
+          docker buildx imagetools create \
+            --tag ${{ secrets.DOCKERHUB_USERNAME }}/iket:latest \
+            ${{ secrets.DOCKERHUB_USERNAME }}/iket:latest-amd64 \
+            ${{ secrets.DOCKERHUB_USERNAME }}/iket:latest-arm64
+
+      - name: Create and push versioned manifest
+        run: |
+          docker buildx imagetools create \
+            --tag ${{ secrets.DOCKERHUB_USERNAME }}/iket:${VERSION} \
+            ${{ secrets.DOCKERHUB_USERNAME }}/iket:${VERSION}-amd64 \
+            ${{ secrets.DOCKERHUB_USERNAME }}/iket:${VERSION}-arm64
