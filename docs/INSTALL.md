@@ -16,11 +16,21 @@ curl -fsSL https://raw.githubusercontent.com/bhangun/iket/main/scripts/install.s
 curl -fsSL https://raw.githubusercontent.com/bhangun/iket/main/scripts/install.sh | bash -s -- --cli-only
 ```
 
+**From Source (optional):**
+```bash
+curl -fsSL https://raw.githubusercontent.com/bhangun/iket/main/scripts/install.sh | bash -s -- --from-source
+```
+
+Prebuilt release assets are published for:
+- `iket` client: Linux, macOS, and Windows
+- `iket-server`: Linux, macOS, and Windows
+
 This script automates everything for you:
-*   **Auto-Dependency Check**: Detects and installs missing tools (`git`, `go`, `make`, `openssl`).
+*   **Auto-Dependency Check**: Detects and installs only the tools needed for the selected mode.
 *   **Platform Detection**: Auto-detects Linux (Debian, Ubuntu, Fedora, RHEL, CentOS, Arch) or macOS.
-*   **Source Preparation**: Clones the latest code from GitHub.
-*   **Building**: Compiles `iket-server` and `iket` (or just `iket` in CLI mode).
+*   **Prebuilt by Default**: Downloads the latest released `iket-server` and `iket` binaries.
+*   **Source Preparation**: Clones the latest code from GitHub only when `--from-source` is used.
+*   **Building**: Compiles `iket-server` and `iket` only in `--from-source` mode.
 *   **Installation**: Moves binaries to `/usr/local/bin`.
 *   **Security (mTLS)**: Generates CA, Server, and Client certificates in `~/.iket/certs` (Full mode only).
 *   **Configuration**: Creates default `config.yaml` and `cli-config.yaml`.
@@ -34,7 +44,10 @@ This script automates everything for you:
 Installs the Iket Gateway server, the CLI tool, generates certificates, and sets up a system service. Use this on the machine that will act as your API Gateway.
 
 ### 2. CLI-Only Setup (`--cli-only`)
-Installs only the `iket` client binary and creates the configuration directory. Use this on your local machine or admin workstation to manage a remote Iket Gateway.
+Installs only the `iket` client binary and creates the configuration directory. Use this on your local machine or admin workstation to manage a remote Iket Gateway. By default this mode downloads a prebuilt binary and does not require Go.
+
+### 3. Source Build Setup (`--from-source`)
+Uses the local toolchain to clone and build from source. Use this if you are contributing, testing unreleased changes, or explicitly do not want prebuilt release binaries.
 
 ---
 

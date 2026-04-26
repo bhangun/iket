@@ -167,14 +167,23 @@ release: ## Create release build
 	@version=$$(git describe --tags --always --dirty); \
 	echo "Building version: $$version"; \
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-		-ldflags="-w -s -X iket/internal/app.Version=$$version" \
-		-o releases/iket-$$version-linux-amd64 ./; \
+		-ldflags="-w -s -X github.com/bhangun/iket/pkg/app.Version=$$version" \
+		-o releases/iket-linux-amd64 ./cmd/iket-cli; \
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build \
+		-ldflags="-w -s -X github.com/bhangun/iket/pkg/app.Version=$$version" \
+		-o releases/iket-linux-arm64 ./cmd/iket-cli; \
 	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build \
-		-ldflags="-w -s -X iket/internal/app.Version=$$version" \
-		-o releases/iket-$$version-darwin-amd64 ./; \
+		-ldflags="-w -s -X github.com/bhangun/iket/pkg/app.Version=$$version" \
+		-o releases/iket-darwin-amd64 ./cmd/iket-cli; \
+	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build \
+		-ldflags="-w -s -X github.com/bhangun/iket/pkg/app.Version=$$version" \
+		-o releases/iket-darwin-arm64 ./cmd/iket-cli; \
 	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build \
-		-ldflags="-w -s -X iket/internal/app.Version=$$version" \
-		-o releases/iket-$$version-windows-amd64.exe ./; \
+		-ldflags="-w -s -X github.com/bhangun/iket/pkg/app.Version=$$version" \
+		-o releases/iket-windows-amd64.exe ./cmd/iket-cli; \
+	CGO_ENABLED=1 GOOS=$$(go env GOOS) GOARCH=$$(go env GOARCH) go build \
+		-ldflags="-w -s -X github.com/bhangun/iket/pkg/app.Version=$$version" \
+		-o releases/iket-server-$$(go env GOOS)-$$(go env GOARCH) ./cmd/iket; \
 	echo "Release builds complete in releases/"
 
 # Monitoring targets

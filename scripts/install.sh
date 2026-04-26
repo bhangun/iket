@@ -45,10 +45,13 @@ ARCH=""
 ORIGINAL_USER="${SUDO_USER:-$(whoami)}"
 ORIGINAL_HOME=$(eval echo "~$ORIGINAL_USER")
 REPO_URL="https://github.com/bhangun/iket.git"
+RELEASE_BASE_URL="https://github.com/bhangun/iket/releases/latest/download"
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="$ORIGINAL_HOME/.iket"
 HAS_SYSTEMD=false
 CLI_ONLY=false
+FROM_SOURCE=false
+DOWNLOADER=""
 
 # Parse arguments
 parse_args() {
@@ -56,6 +59,10 @@ parse_args() {
         case $1 in
             --cli-only)
                 CLI_ONLY=true
+                shift
+                ;;
+            --from-source)
+                FROM_SOURCE=true
                 shift
                 ;;
             *)
@@ -88,7 +95,18 @@ detect_platform() {
 preflight_checks() {
     print_step "Checking Dependencies"
 
-    local tools=("git" "go" "make" "openssl")
+    local tools=()
+    if [ "$FROM_SOURCE" = true ]; then
+        tools=("git" "go" "make")
+    else
+        if command -v curl &> /dev/null; then
+            DOWNLOADER="curl"
+        elif command -v wget &> /dev/null; then
+            DOWNLOADER="wget"
+        else
+            tools=("curl")
+        fi
+    fi
     local missing_tools=()
 
     for tool in "${tools[@]}"; do
@@ -112,16 +130,32 @@ preflight_checks() {
             if command -v apt-get &> /dev/null; then
                 print_info "${PKG} Detected Debian/Ubuntu (apt-get). Installing..."
                 $SUDO_CMD apt-get update -qq
-                $SUDO_CMD apt-get install -y -qq git golang-go make openssl
+                if [ "$FROM_SOURCE" = true ]; then
+                    $SUDO_CMD apt-get install -y -qq git golang-go make
+                else
+                    $SUDO_CMD apt-get install -y -qq curl
+                fi
             elif command -v dnf &> /dev/null; then
                 print_info "${PKG} Detected Fedora/RHEL (dnf). Installing..."
-                $SUDO_CMD dnf install -y git golang make openssl
+                if [ "$FROM_SOURCE" = true ]; then
+                    $SUDO_CMD dnf install -y git golang make
+                else
+                    $SUDO_CMD dnf install -y curl
+                fi
             elif command -v yum &> /dev/null; then
                 print_info "${PKG} Detected CentOS/RHEL (yum). Installing..."
-                $SUDO_CMD yum install -y git golang make openssl
+                if [ "$FROM_SOURCE" = true ]; then
+                    $SUDO_CMD yum install -y git golang make
+                else
+                    $SUDO_CMD yum install -y curl
+                fi
             elif command -v pacman &> /dev/null; then
                 print_info "${PKG} Detected Arch Linux (pacman). Installing..."
-                $SUDO_CMD pacman -Sy --noconfirm git go make openssl
+                if [ "$FROM_SOURCE" = true ]; then
+                    $SUDO_CMD pacman -Sy --noconfirm git go make
+                else
+                    $SUDO_CMD pacman -Sy --noconfirm curl
+                fi
             else
                 print_error "Unsupported package manager. Please manually install: ${missing_tools[*]}"
                 exit 1
@@ -129,7 +163,11 @@ preflight_checks() {
         elif [ "$OS" == "darwin" ]; then
             if command -v brew &>/dev/null; then
                 print_info "${PKG} Detected macOS (Homebrew). Installing..."
-                brew install git go make openssl
+                if [ "$FROM_SOURCE" = true ]; then
+                    brew install git go make
+                else
+                    brew install curl
+                fi
             else
                 print_error "Homebrew not found. Please install Homebrew or manually install: ${missing_tools[*]}"
                 exit 1
@@ -143,6 +181,17 @@ preflight_checks() {
         print_success "All prerequisites met."
     fi
 
+    if [ "$FROM_SOURCE" != true ] && [ -z "$DOWNLOADER" ]; then
+        if command -v curl &> /dev/null; then
+            DOWNLOADER="curl"
+        elif command -v wget &> /dev/null; then
+            DOWNLOADER="wget"
+        else
+            print_error "A downloader is required. Please install curl or wget, or rerun with --from-source."
+            exit 1
+        fi
+    fi
+
     # Check for systemd
     if [ "$OS" == "linux" ] && pidof systemd &>/dev/null; then
         HAS_SYSTEMD=true
@@ -151,6 +200,9 @@ preflight_checks() {
 
 # 3. Handle Repository (for curl | bash mode)
 prepare_source() {
+    if [ "$FROM_SOURCE" != true ]; then
+        return 0
+    fi
     if [ ! -f "Makefile" ]; then
         print_step "Cloning Repository"
         local tmp_repo=$(mktemp -d)
@@ -160,27 +212,83 @@ prepare_source() {
     fi
 }
 
+download_file() {
+    local url="$1"
+    local output="$2"
+    if [ "$DOWNLOADER" = "curl" ]; then
+        curl -fsSL "$url" -o "$output"
+    else
+        wget -qO "$output" "$url"
+    fi
+}
+
+download_prebuilt_binaries() {
+    print_step "Downloading Prebuilt Binaries"
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    local cli_asset="iket-${OS}-${ARCH}"
+    local server_asset="iket-server-${OS}-${ARCH}"
+    local cli_path="$tmp_dir/$cli_asset"
+    local server_path="$tmp_dir/$server_asset"
+
+    print_info "Downloading CLI binary (${cli_asset})..."
+    if ! download_file "${RELEASE_BASE_URL}/${cli_asset}" "$cli_path"; then
+        print_error "Failed to download ${cli_asset} from ${RELEASE_BASE_URL}."
+        print_error "If you want to build locally instead, rerun the installer with --from-source."
+        exit 1
+    fi
+    chmod +x "$cli_path"
+
+    if [ "$CLI_ONLY" != true ]; then
+        print_info "Downloading gateway binary (${server_asset})..."
+        if ! download_file "${RELEASE_BASE_URL}/${server_asset}" "$server_path"; then
+            print_error "Failed to download ${server_asset} from ${RELEASE_BASE_URL}."
+            print_error "If you want to build locally instead, rerun the installer with --from-source."
+            exit 1
+        fi
+        chmod +x "$server_path"
+    fi
+
+    PREBUILT_TMP_DIR="$tmp_dir"
+    PREBUILT_CLI_PATH="$cli_path"
+    PREBUILT_SERVER_PATH="$server_path"
+    print_success "Prebuilt binaries downloaded."
+}
+
 # 4. Build and Install
 build_and_install() {
-    print_step "Building & Installing"
-    
     SUDO_CMD=""
     if [ "$EUID" -ne 0 ] && command -v sudo &>/dev/null; then SUDO_CMD="sudo"; fi
 
-    if [ "$CLI_ONLY" = true ]; then
-        print_info "${BUILD} Building CLI binary..."
-        make build-cli > /dev/null
-        print_info "Moving iket to $INSTALL_DIR..."
-        $SUDO_CMD install -m 755 bin/iket "$INSTALL_DIR/iket"
-        $SUDO_CMD install -m 755 bin/iket "$INSTALL_DIR/iket-cli"
+    if [ "$FROM_SOURCE" = true ]; then
+        print_step "Building & Installing"
+        if [ "$CLI_ONLY" = true ]; then
+            print_info "${BUILD} Building CLI binary..."
+            make build-cli > /dev/null
+            print_info "Moving iket to $INSTALL_DIR..."
+            $SUDO_CMD install -m 755 bin/iket "$INSTALL_DIR/iket"
+            $SUDO_CMD install -m 755 bin/iket "$INSTALL_DIR/iket-cli"
+        else
+            print_info "${BUILD} Building binaries (this may take a minute)..."
+            make build build-cli > /dev/null
+            print_info "Moving binaries to $INSTALL_DIR..."
+            $SUDO_CMD install -m 755 bin/iket-server "$INSTALL_DIR/iket-server"
+            $SUDO_CMD install -m 755 bin/iket "$INSTALL_DIR/iket"
+            $SUDO_CMD install -m 755 bin/iket "$INSTALL_DIR/iket-cli"
+            $SUDO_CMD install -m 755 bin/iket-server "$INSTALL_DIR/iket-gateway"
+        fi
     else
-        print_info "${BUILD} Building binaries (this may take a minute)..."
-        make build build-cli > /dev/null
-        print_info "Moving binaries to $INSTALL_DIR..."
-        $SUDO_CMD install -m 755 bin/iket-server "$INSTALL_DIR/iket-server"
-        $SUDO_CMD install -m 755 bin/iket "$INSTALL_DIR/iket"
-        $SUDO_CMD install -m 755 bin/iket "$INSTALL_DIR/iket-cli"
-        $SUDO_CMD install -m 755 bin/iket-server "$INSTALL_DIR/iket-gateway"
+        download_prebuilt_binaries
+        print_step "Installing Binaries"
+        print_info "Installing prebuilt CLI binary to $INSTALL_DIR..."
+        $SUDO_CMD install -m 755 "$PREBUILT_CLI_PATH" "$INSTALL_DIR/iket"
+        $SUDO_CMD install -m 755 "$PREBUILT_CLI_PATH" "$INSTALL_DIR/iket-cli"
+        if [ "$CLI_ONLY" != true ]; then
+            print_info "Installing prebuilt gateway binary to $INSTALL_DIR..."
+            $SUDO_CMD install -m 755 "$PREBUILT_SERVER_PATH" "$INSTALL_DIR/iket-server"
+            $SUDO_CMD install -m 755 "$PREBUILT_SERVER_PATH" "$INSTALL_DIR/iket-gateway"
+        fi
     fi
     
     print_success "Binaries installed successfully."
@@ -288,6 +396,11 @@ main() {
     echo "  🧶  IKET GATEWAY INSTALLER"
     if [ "$CLI_ONLY" = true ]; then
         echo "  (CLI ONLY MODE)"
+    fi
+    if [ "$FROM_SOURCE" = true ]; then
+        echo "  (FROM SOURCE MODE)"
+    else
+        echo "  (PREBUILT RELEASE MODE)"
     fi
     echo "  ──────────────────────────"
     echo -e "${NC}"

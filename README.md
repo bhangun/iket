@@ -39,7 +39,12 @@ curl -fsSL https://raw.githubusercontent.com/bhangun/iket/main/scripts/install.s
 curl -fsSL https://raw.githubusercontent.com/bhangun/iket/main/scripts/install.sh | bash -s -- --cli-only
 ```
 
-This script automates platform detection, builds the latest binaries, generates mTLS certificates (in full mode), and sets up your initial configuration.
+**Optional Source Build:**
+```bash
+curl -fsSL https://raw.githubusercontent.com/bhangun/iket/main/scripts/install.sh | bash -s -- --from-source
+```
+
+By default, the installer downloads prebuilt release binaries. `--from-source` is only needed if you explicitly want a local source build. In full mode it also generates mTLS certificates and sets up your initial configuration.
 
 For detailed instructions and manual installation, see [docs/INSTALL.md](docs/INSTALL.md).
 
