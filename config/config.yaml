@@ -8,17 +8,84 @@ security:
   tls:
     enabled: true
     port: 8443
+    http3Enabled: true
+    http3Port: 8443
+    http3Datagrams: true
     enrollmentPort: 9443
     enrollmentMaxActive: 10
     certFile: "${IKET_CERTS_DIR:-./certs}/server.crt"
     keyFile: "${IKET_CERTS_DIR:-./certs}/server.key"
     clientCAFile: "${IKET_CERTS_DIR:-./certs}/ca.crt"
     clientAuthType: "RequireAndVerifyClientCert"
-    minVersion: "TLS1.2"
+    minVersion: "TLS1.3"
     serverNames: ["localhost", "iket"]
     serverIPs: ["127.0.0.1"]
     autoGenerate: true
     generateSharedClient: false
+  mutationPolicy:
+    enabled: false
+    enforcedScopes: ["all"]
+    requireLabel: true
+    requireNoteForHighImpact: true
+    requireChangeRefForHighImpact: true
+    requireDifferentReviewerForProposals: false
+    minApproversForHighImpactProposals: 0
+    requireNotBeforeForHighImpactProposals: false
+    requireVerificationForPromotedHighImpactProposals: false
+    requireShadowEvaluationForPromotedHighImpactProposals: false
+    minShadowHealthyVerificationsForPromotedHighImpactProposals: 0
+    maxProposalAge: ""
+    maxApprovalAge: ""
+    blockedApplyWindows: []
+    proposalQueue:
+      defaultUrgency:
+        readyAgingAfter: "1h"
+        readyOverdueAfter: "4h"
+        blockedAgingAfter: "4h"
+        blockedOverdueAfter: "24h"
+      environmentUrgency:
+        prod:
+          readyAgingAfter: "30m"
+          readyOverdueAfter: "2h"
+      notifications:
+        enabled: false
+        interval: "15m"
+        minNotificationInterval: "5m"
+        onlyOnSLABreach: true
+        onlyOnChange: true
+        environments: ["prod"]
+    policyAlertNotifications:
+      enabled: false
+      interval: "5m"
+      minNotificationInterval: "2m"
+      onlyOnChange: true
+      window: "5m"
+      minCount: 3
+      minSeverity: "warning"
+  notificationWebhooks:
+    - name: "ops-events"
+      url: "https://ops.example.com/hooks/iket"
+      format: "slack"
+      events: ["proposal.applied", "proposal.canary_aborted", "proposal.digest", "proposal.sla_stage_changed", "proposal.sla_resolved", "gateway.policy_alert_digest", "gateway.policy_alert", "gateway.policy_alert_opened", "gateway.policy_alert_stage_changed", "gateway.policy_alert_resolved"]
+      environments: ["prod", "staging"]
+      timeout: "3s"
+      retryCount: 2
+      retryBackoff: "2s"
+      signingSecret: "replace-me"
+      signatureHeader: "X-Iket-Signature"
+      timestampHeader: "X-Iket-Timestamp"
+    - name: "ops-escalation"
+      url: "https://pager.example.com/hooks/iket"
+      events: ["proposal.sla_breach"]
+      environments: ["prod"]
+      minSLABreachTier: "critical"
+      minSLABreachCount: 2
+      minConsecutiveSLABreaches: 3
+      minSLABreachDuration: "15m"
+      slaBreachCooldown: "30m"
+      timeout: "3s"
+      retryCount: 2
+      retryBackoff: "2s"
 
 storage:
   mode: "postgres"
@@ -36,11 +103,133 @@ services:
         routes:
           - path: "/iam/{rest:.*}"
             methods: ["GET"]
+            protocol: "http"
+            requestHeaders:
+              X-Tenant-Realm: "{{realm}}"
+            removeRequestHeaders: ["X-Legacy-Client"]
+            requestRedactHeaders: ["Authorization"]
+            requiredRequestHeaders: ["X-Agent-Session"]
+            requiredRequestHeaderRegex:
+              Authorization: "^Bearer .+"
+            transformWhenHeaders:
+              X-Transform-Mode: "beta"
+            transformWhenQueryParams:
+              transform: "1"
+            transformWhenHeaderRegex:
+              X-Env: "^prod-[a-z]+$"
+            transformWhenQueryRegex:
+              mode: "^(preview|staging)$"
+            transformMethods: ["POST", "PATCH"]
+            transformScopes: ["request_json", "response_json"]
+            responseTransformStatusClasses: ["2xx", "5xx"]
+            responseTransformWhenHeaders:
+              Content-Type: "application/problem+json"
+            successResponseFields:
+              data.status: "{{response_body}}"
+              data.content_type: "{{response_header.Content-Type}}"
+              status: "success"
+              request_id: "{{request_id}}"
+            errorResponseFields:
+              error.status: "json:{{response_status}}"
+              error.message: "{{response_body}}"
+              error.content_type: "{{response_header.Content-Type}}"
+              request_id: "{{request_id}}"
+            requestJSONFields:
+              meta.realm: "{{realm}}"
+              meta.request_id: "{{request_id}}"
+              meta.enabled: "json:true"
+              meta.count: "json:123"
+            removeRequestJSONFields: ["legacy", "user.profile.legacy"]
+            requestRedactJSONFields: ["messages[0].content", "tools[0].arguments.api_key"]
+            requestBodyBlockRegex: ["(?i)ignore\\s+previous\\s+instructions"]
+            requestBodyRequireRegex: ["SAFE_SYSTEM_PROMPT"]
+            requestPIIBlockTypes: ["email", "api_key"]
+            queryParams:
+              realm: "{{realm}}"
+              trace: "{{request_id}}"
+            removeQueryParams: ["legacy"]
+            responseHeaders:
+              X-Edge-Policy: "{{query.mode}}-{{request_id}}"
+            removeResponseHeaders: ["X-Powered-By"]
+            redactionValue: "***"
+            responseRedactHeaders: ["Authorization", "Set-Cookie"]
+            maxRequestBodyBytes: 65536
+            maxResponseBodyBytes: 262144
+            allowedModels: ["gpt-4.1-mini", "gpt-4.1"]
+            modelField: "model"
+            allowedToolNames: ["web_search", "file_lookup"]
+            toolField: "tools[].name"
+            maxMessages: 12
+            messagesField: "messages"
+            maxToolCalls: 4
+            toolCallsField: "tools"
+            maxInputTokens: 4096
+            inputTokensField: "max_prompt_tokens"
+            maxOutputTokens: 512
+            outputTokensField: "max_tokens"
+            allowedUpstreamHosts: ["api.openai.com", "api.anthropic.com"]
+            responseJSONFields:
+              meta.realm: "{{realm}}"
+              meta.request_id: "{{request_id}}"
+              meta.content_type: "{{response_header.Content-Type}}"
+              meta.enabled: "json:true"
+              meta.count: "json:123"
+            responseRedactJSONFields: ["meta.token", "meta.api_key"]
+            responseBodyBlockRegex: ["(?i)api_key"]
+            responseBodyRequireRegex: ["SAFE_OUTPUT"]
+            responsePIIBlockTypes: ["api_key", "email"]
+            removeResponseJSONFields: ["legacy", "user.profile.legacy"]
+            cors:
+              allowedOrigins: ["https://app.example.com"]
+              allowedMethods: ["GET", "POST"]
+              allowedHeaders: ["Authorization", "Content-Type"]
+              exposedHeaders: ["X-Trace-Id"]
+              allowCredentials: true
+              maxAge: 600
+            retryCount: 1
+            retryBackoff: "100ms"
+            retryJitter: "25ms"
+            retryStatusCodes: [502, 503, 504]
+            hedgeDelay: "20ms"
+            adaptiveLatencyRouting: true
+            shadowTrafficPercent: 10
+            shadowMinRequests: 50
+            shadowMaxErrorRate: 0.02
+            shadowMaxLatencyDelta: "40ms"
             requireAuth: false
             stripPath: true
             enabled: true
             backend:
               - url_pattern: "/api/{rest:.*}"
+          - path: "/ai/stream"
+            methods: ["GET", "POST"]
+            protocol: "sse"
+            responseHeaders:
+              Cache-Control: "no-cache"
+              X-Stream-Policy: "edge"
+            backend:
+              - url_pattern: "/stream"
+          - path: "/rpc.AgentService/Chat"
+            methods: ["POST"]
+            protocol: "grpc-web"
+            backend:
+              - url_pattern: "/rpc.AgentService/Chat"
+                timeout: "750ms"
+          - path: "/ai/graphql"
+            methods: ["POST"]
+            protocol: "graphql"
+            graphqlAllowIntrospection: false
+            graphqlRequirePersistedQuery: true
+            maxRequestBodyBytes: 262144
+            allowedUpstreamHosts: ["api.openai.com"]
+            backend:
+              - url_pattern: "/v1/graphql"
+          - path: "/ai/grpc.ChatService/Stream"
+            methods: ["POST"]
+            protocol: "grpc"
+            allowedUpstreamHosts: ["grpc.example.internal"]
+            backend:
+              - url_pattern: "/grpc.ChatService/Stream"
 
 plugins:
   billing:

@@ -75,14 +75,8 @@ func EnsureTLSAssets(tlsCfg TLSConfig) error {
 		return err
 	}
 
-	hosts := []string{"localhost", "iket"}
-	ips := []net.IP{net.ParseIP("127.0.0.1")}
-	if len(tlsCfg.ServerNames) > 0 {
-		hosts = normalizeServerNames(tlsCfg.ServerNames)
-	}
-	if len(tlsCfg.ServerIPs) > 0 {
-		ips = parseServerIPs(tlsCfg.ServerIPs)
-	}
+	hosts := EffectiveServerNames(tlsCfg)
+	ips := EffectiveServerIPs(tlsCfg)
 	if serverAssetsExist {
 		serverMatches, err := existingServerCertMatches(tlsCfg.CertFile, "iket-server", hosts, ips)
 		if err == nil && serverMatches && (!tlsCfg.ShouldGenerateSharedClient() || sharedClientExists) {
@@ -99,6 +93,22 @@ func EnsureTLSAssets(tlsCfg TLSConfig) error {
 	}
 
 	return nil
+}
+
+func EffectiveServerNames(tlsCfg TLSConfig) []string {
+	hosts := []string{"localhost", "iket"}
+	if len(tlsCfg.ServerNames) > 0 {
+		hosts = normalizeServerNames(tlsCfg.ServerNames)
+	}
+	return hosts
+}
+
+func EffectiveServerIPs(tlsCfg TLSConfig) []net.IP {
+	ips := []net.IP{net.ParseIP("127.0.0.1")}
+	if len(tlsCfg.ServerIPs) > 0 {
+		ips = parseServerIPs(tlsCfg.ServerIPs)
+	}
+	return ips
 }
 
 func ensureCA(keyPath, certPath string) (*rsa.PrivateKey, *x509.Certificate, error) {

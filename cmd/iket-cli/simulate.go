@@ -156,7 +156,7 @@ func simulateFromLocalFiles(requestPath, method, configPath, servicesPath string
 					decision.URLPattern = route.Backends[0].URLPattern
 				}
 
-				vars, matched := gateway.MatchRouteTemplate(route, method, requestPath)
+				vars, matched := gateway.MatchRouteTemplate(route, method, requestPath, nil)
 				decision.Matched = matched
 				if matched {
 					decision.RouteVars = vars

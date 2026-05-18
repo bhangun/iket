@@ -9,13 +9,16 @@ security:
   tls:
     enabled: true
     port: 8443
+    http3Enabled: true
+    http3Port: 8443
+    http3Datagrams: true
     enrollmentPort: 9443
     enrollmentMaxActive: 10
     certFile: "/app/certs/server.crt"
     keyFile: "/app/certs/server.key"
     clientCAFile: "/app/certs/ca.crt"
     clientAuthType: "RequireAndVerifyClientCert"
-    minVersion: "TLS1.2"
+    minVersion: "TLS1.3"
     serverNames: ["localhost", "iket"]
     serverIPs: ["127.0.0.1"]
     autoGenerate: true
@@ -23,6 +26,70 @@ security:
   enableBasicAuth: true
   basicAuthUsers:
     admin: "change-this-password"
+  mutationPolicy:
+    enabled: false
+    enforcedScopes: ["all"]
+    requireLabel: true
+    requireNoteForHighImpact: true
+    requireChangeRefForHighImpact: true
+    requireDifferentReviewerForProposals: false
+    minApproversForHighImpactProposals: 0
+    requireNotBeforeForHighImpactProposals: false
+    requireVerificationForPromotedHighImpactProposals: false
+    requireShadowEvaluationForPromotedHighImpactProposals: false
+    minShadowHealthyVerificationsForPromotedHighImpactProposals: 0
+    maxProposalAge: ""
+    maxApprovalAge: ""
+    blockedApplyWindows: []
+    proposalQueue:
+      defaultUrgency:
+        readyAgingAfter: "1h"
+        readyOverdueAfter: "4h"
+        blockedAgingAfter: "4h"
+        blockedOverdueAfter: "24h"
+      environmentUrgency:
+        prod:
+          readyAgingAfter: "30m"
+          readyOverdueAfter: "2h"
+      notifications:
+        enabled: false
+        interval: "15m"
+        minNotificationInterval: "5m"
+        onlyOnSLABreach: true
+        onlyOnChange: true
+        environments: ["prod"]
+    policyAlertNotifications:
+      enabled: false
+      interval: "5m"
+      minNotificationInterval: "2m"
+      onlyOnChange: true
+      window: "5m"
+      minCount: 3
+      minSeverity: "warning"
+  notificationWebhooks:
+    - name: "ops-events"
+      url: "https://ops.example.com/hooks/iket"
+      format: "slack"
+      events: ["proposal.applied", "proposal.canary_aborted", "proposal.digest", "proposal.sla_stage_changed", "proposal.sla_resolved", "gateway.policy_alert_digest", "gateway.policy_alert", "gateway.policy_alert_opened", "gateway.policy_alert_stage_changed", "gateway.policy_alert_resolved"]
+      environments: ["prod", "staging"]
+      timeout: "3s"
+      retryCount: 2
+      retryBackoff: "2s"
+      signingSecret: "replace-me"
+      signatureHeader: "X-Iket-Signature"
+      timestampHeader: "X-Iket-Timestamp"
+    - name: "ops-escalation"
+      url: "https://pager.example.com/hooks/iket"
+      events: ["proposal.sla_breach"]
+      environments: ["prod"]
+      minSLABreachTier: "critical"
+      minSLABreachCount: 2
+      minConsecutiveSLABreaches: 3
+      minSLABreachDuration: "15m"
+      slaBreachCooldown: "30m"
+      timeout: "3s"
+      retryCount: 2
+      retryBackoff: "2s"
 
 storage:
   mode: "postgres"

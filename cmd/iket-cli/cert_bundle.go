@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -351,6 +352,26 @@ func verifyCLIContext(ctx Context) error {
 		return err
 	}
 	_, err = client.Do("GET", "/api/v1/gateway/status", nil)
+	if err == nil {
+		return nil
+	}
+	return annotateVerifyContextError(ctx, err)
+}
+
+func annotateVerifyContextError(ctx Context, err error) error {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		msg := urlErr.Err.Error()
+		if strings.Contains(msg, "certificate is valid for") {
+			return fmt.Errorf("%w. Hint: the server certificate SAN does not match %s; update security.tls.serverNames/serverIPs on the gateway, regenerate server.crt, or use a matching hostname/IP", err, ctx.ServerURL)
+		}
+		if strings.Contains(msg, "certificate signed by unknown authority") {
+			return fmt.Errorf("%w. Hint: the CA in this context does not trust the server currently presented by %s; recopy ca.crt from the server's active cert directory and re-import the bundle", err, ctx.ServerURL)
+		}
+	}
+	if strings.Contains(err.Error(), "private key does not match public key") {
+		return fmt.Errorf("%w. Hint: recopy client.crt and client.key together from the same server-side bundle before importing", err)
+	}
 	return err
 }
 

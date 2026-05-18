@@ -6,6 +6,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"io/ioutil"
+	"net/http"
 	"os"
 	"reflect"
 	"regexp"
@@ -61,30 +62,185 @@ type ServerConfig struct {
 
 // SecurityConfig represents security configuration
 type SecurityConfig struct {
-	TLS             TLSConfig         `yaml:"tls"`
-	EnableBasicAuth bool              `yaml:"enableBasicAuth"`
-	BasicAuthUsers  map[string]string `yaml:"basicAuthUsers"`
-	IPWhitelist     []string          `yaml:"ipWhitelist"`
-	Headers         map[string]string `yaml:"headers"`
-	Clients         map[string]string `yaml:"clients"` // clientID: clientSecret
-	Jwt             JWTConfig         `yaml:"jwt"`
+	TLS                  TLSConfig             `yaml:"tls"`
+	EnableBasicAuth      bool                  `yaml:"enableBasicAuth"`
+	BasicAuthUsers       map[string]string     `yaml:"basicAuthUsers"`
+	IPWhitelist          []string              `yaml:"ipWhitelist"`
+	Headers              map[string]string     `yaml:"headers"`
+	Clients              map[string]string     `yaml:"clients"` // clientID: clientSecret
+	Jwt                  JWTConfig             `yaml:"jwt"`
+	MutationPolicy       MutationPolicy        `yaml:"mutationPolicy,omitempty"`
+	NotificationWebhooks []NotificationWebhook `yaml:"notificationWebhooks,omitempty"`
+}
+
+type MutationPolicy struct {
+	Enabled                                                     bool                          `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	EnforcedScopes                                              []string                      `yaml:"enforcedScopes,omitempty" json:"enforcedScopes,omitempty"`
+	RequireLabel                                                bool                          `yaml:"requireLabel,omitempty" json:"requireLabel,omitempty"`
+	RequireNoteForHighImpact                                    bool                          `yaml:"requireNoteForHighImpact,omitempty" json:"requireNoteForHighImpact,omitempty"`
+	RequireChangeRefForHighImpact                               bool                          `yaml:"requireChangeRefForHighImpact,omitempty" json:"requireChangeRefForHighImpact,omitempty"`
+	RequireDifferentReviewerForProposals                        bool                          `yaml:"requireDifferentReviewerForProposals,omitempty" json:"requireDifferentReviewerForProposals,omitempty"`
+	MinApproversForHighImpactProposals                          int                           `yaml:"minApproversForHighImpactProposals,omitempty" json:"minApproversForHighImpactProposals,omitempty"`
+	RequireNotBeforeForHighImpactProposals                      bool                          `yaml:"requireNotBeforeForHighImpactProposals,omitempty" json:"requireNotBeforeForHighImpactProposals,omitempty"`
+	RequireVerificationForPromotedHighImpactProposals           bool                          `yaml:"requireVerificationForPromotedHighImpactProposals,omitempty" json:"requireVerificationForPromotedHighImpactProposals,omitempty"`
+	RequireShadowEvaluationForPromotedHighImpactProposals       bool                          `yaml:"requireShadowEvaluationForPromotedHighImpactProposals,omitempty" json:"requireShadowEvaluationForPromotedHighImpactProposals,omitempty"`
+	MinShadowHealthyVerificationsForPromotedHighImpactProposals int                           `yaml:"minShadowHealthyVerificationsForPromotedHighImpactProposals,omitempty" json:"minShadowHealthyVerificationsForPromotedHighImpactProposals,omitempty"`
+	MaxProposalAge                                              string                        `yaml:"maxProposalAge,omitempty" json:"maxProposalAge,omitempty"`
+	MaxApprovalAge                                              string                        `yaml:"maxApprovalAge,omitempty" json:"maxApprovalAge,omitempty"`
+	BlockedApplyWindows                                         []MutationApplyWindow         `yaml:"blockedApplyWindows,omitempty" json:"blockedApplyWindows,omitempty"`
+	ProposalQueue                                               ProposalQueuePolicy           `yaml:"proposalQueue,omitempty" json:"proposalQueue,omitempty"`
+	PolicyAlertNotifications                                    PolicyAlertNotificationPolicy `yaml:"policyAlertNotifications,omitempty" json:"policyAlertNotifications,omitempty"`
+}
+
+type ProposalQueuePolicy struct {
+	DefaultUrgency     ProposalQueueUrgencyThresholds            `yaml:"defaultUrgency,omitempty" json:"defaultUrgency,omitempty"`
+	EnvironmentUrgency map[string]ProposalQueueUrgencyThresholds `yaml:"environmentUrgency,omitempty" json:"environmentUrgency,omitempty"`
+	Notifications      ProposalQueueNotificationPolicy           `yaml:"notifications,omitempty" json:"notifications,omitempty"`
+}
+
+type ProposalQueueUrgencyThresholds struct {
+	ReadyAgingAfter     string `yaml:"readyAgingAfter,omitempty" json:"readyAgingAfter,omitempty"`
+	ReadyOverdueAfter   string `yaml:"readyOverdueAfter,omitempty" json:"readyOverdueAfter,omitempty"`
+	BlockedAgingAfter   string `yaml:"blockedAgingAfter,omitempty" json:"blockedAgingAfter,omitempty"`
+	BlockedOverdueAfter string `yaml:"blockedOverdueAfter,omitempty" json:"blockedOverdueAfter,omitempty"`
+}
+
+type ProposalQueueNotificationPolicy struct {
+	Enabled                 bool     `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Interval                string   `yaml:"interval,omitempty" json:"interval,omitempty"`
+	MinNotificationInterval string   `yaml:"minNotificationInterval,omitempty" json:"minNotificationInterval,omitempty"`
+	OnlyOnSLABreach         bool     `yaml:"onlyOnSLABreach,omitempty" json:"onlyOnSLABreach,omitempty"`
+	OnlyOnChange            bool     `yaml:"onlyOnChange,omitempty" json:"onlyOnChange,omitempty"`
+	Environments            []string `yaml:"environments,omitempty" json:"environments,omitempty"`
+}
+
+type PolicyAlertNotificationPolicy struct {
+	Enabled                 bool   `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Interval                string `yaml:"interval,omitempty" json:"interval,omitempty"`
+	MinNotificationInterval string `yaml:"minNotificationInterval,omitempty" json:"minNotificationInterval,omitempty"`
+	OnlyOnChange            bool   `yaml:"onlyOnChange,omitempty" json:"onlyOnChange,omitempty"`
+	Window                  string `yaml:"window,omitempty" json:"window,omitempty"`
+	MinCount                int    `yaml:"minCount,omitempty" json:"minCount,omitempty"`
+	MinSeverity             string `yaml:"minSeverity,omitempty" json:"minSeverity,omitempty"`
+}
+
+type MutationApplyWindow struct {
+	Name     string   `yaml:"name,omitempty" json:"name,omitempty"`
+	Days     []string `yaml:"days,omitempty" json:"days,omitempty"`
+	Start    string   `yaml:"start" json:"start"`
+	End      string   `yaml:"end" json:"end"`
+	Timezone string   `yaml:"timezone,omitempty" json:"timezone,omitempty"`
+	Scopes   []string `yaml:"scopes,omitempty" json:"scopes,omitempty"`
+}
+
+type NotificationWebhook struct {
+	Name                      string            `yaml:"name,omitempty" json:"name,omitempty"`
+	URL                       string            `yaml:"url" json:"url"`
+	Format                    string            `yaml:"format,omitempty" json:"format,omitempty"`
+	Events                    []string          `yaml:"events,omitempty" json:"events,omitempty"`
+	Environments              []string          `yaml:"environments,omitempty" json:"environments,omitempty"`
+	MinSLABreachCount         int               `yaml:"minSLABreachCount,omitempty" json:"minSLABreachCount,omitempty"`
+	MinConsecutiveSLABreaches int               `yaml:"minConsecutiveSLABreaches,omitempty" json:"minConsecutiveSLABreaches,omitempty"`
+	MinSLABreachDuration      string            `yaml:"minSLABreachDuration,omitempty" json:"minSLABreachDuration,omitempty"`
+	MinSLABreachTier          string            `yaml:"minSLABreachTier,omitempty" json:"minSLABreachTier,omitempty"`
+	SLABreachCooldown         string            `yaml:"slaBreachCooldown,omitempty" json:"slaBreachCooldown,omitempty"`
+	Headers                   map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+	Timeout                   string            `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+	RetryCount                int               `yaml:"retryCount,omitempty" json:"retryCount,omitempty"`
+	RetryBackoff              string            `yaml:"retryBackoff,omitempty" json:"retryBackoff,omitempty"`
+	SigningSecret             string            `yaml:"signingSecret,omitempty" json:"signingSecret,omitempty"`
+	SignatureHeader           string            `yaml:"signatureHeader,omitempty" json:"signatureHeader,omitempty"`
+	TimestampHeader           string            `yaml:"timestampHeader,omitempty" json:"timestampHeader,omitempty"`
+	InsecureSkipVerify        bool              `yaml:"insecureSkipVerify,omitempty" json:"insecureSkipVerify,omitempty"`
 }
 
 // RouterConfig represents a route configuration
 type RouterConfig struct {
-	Path           string            `yaml:"path"`
-	Methods        []string          `yaml:"methods"`
-	Method         string            `yaml:"method"` // Single method for new format
-	RequireAuth    bool              `yaml:"requireAuth"`
-	RateLimit      *int              `yaml:"rateLimit"`
-	Timeout        *time.Duration    `yaml:"timeout"`
-	Headers        map[string]string `yaml:"headers"`
-	StripPath      bool              `yaml:"stripPath"`
-	ValidateSchema string            `yaml:"validateSchema"`
-	WebSocket      *WebSocketOptions `yaml:"websocket,omitempty"`
-	RequireJwt     bool              `yaml:"requireJwt"`
-	Enabled        *bool             `yaml:"enabled"`
-	AuthPlugin     string            `yaml:"auth_plugin,omitempty" json:"auth_plugin,omitempty"`
+	Path                           string            `yaml:"path"`
+	Methods                        []string          `yaml:"methods"`
+	Method                         string            `yaml:"method"` // Single method for new format
+	MatchHeaders                   map[string]string `yaml:"matchHeaders,omitempty" json:"matchHeaders,omitempty"`
+	MatchPercent                   int               `yaml:"matchPercent,omitempty" json:"matchPercent,omitempty"`
+	RetryCount                     int               `yaml:"retryCount,omitempty" json:"retryCount,omitempty"`
+	RetryBackoff                   string            `yaml:"retryBackoff,omitempty" json:"retryBackoff,omitempty"`
+	RetryJitter                    string            `yaml:"retryJitter,omitempty" json:"retryJitter,omitempty"`
+	RetryStatuses                  []int             `yaml:"retryStatusCodes,omitempty" json:"retryStatusCodes,omitempty"`
+	RetryUnsafe                    bool              `yaml:"retryUnsafeMethods,omitempty" json:"retryUnsafeMethods,omitempty"`
+	HedgeDelay                     string            `yaml:"hedgeDelay,omitempty" json:"hedgeDelay,omitempty"`
+	HedgeUnsafe                    bool              `yaml:"hedgeUnsafeMethods,omitempty" json:"hedgeUnsafeMethods,omitempty"`
+	AdaptiveLatencyRouting         bool              `yaml:"adaptiveLatencyRouting,omitempty" json:"adaptive_latency_routing,omitempty"`
+	ShadowTrafficPercent           int               `yaml:"shadowTrafficPercent,omitempty" json:"shadow_traffic_percent,omitempty"`
+	ShadowUnsafe                   bool              `yaml:"shadowUnsafeMethods,omitempty" json:"shadow_unsafe_methods,omitempty"`
+	ShadowMinRequests              int               `yaml:"shadowMinRequests,omitempty" json:"shadow_min_requests,omitempty"`
+	ShadowMaxErrorRate             float64           `yaml:"shadowMaxErrorRate,omitempty" json:"shadow_max_error_rate,omitempty"`
+	ShadowMaxLatencyDelta          string            `yaml:"shadowMaxLatencyDelta,omitempty" json:"shadow_max_latency_delta,omitempty"`
+	RequireAuth                    bool              `yaml:"requireAuth"`
+	RateLimit                      *int              `yaml:"rateLimit"`
+	Timeout                        *time.Duration    `yaml:"timeout"`
+	Headers                        map[string]string `yaml:"headers"`
+	RequestHeaders                 map[string]string `yaml:"requestHeaders,omitempty" json:"request_headers,omitempty"`
+	RemoveRequestHeaders           []string          `yaml:"removeRequestHeaders,omitempty" json:"remove_request_headers,omitempty"`
+	RequestRedactHeaders           []string          `yaml:"requestRedactHeaders,omitempty" json:"request_redact_headers,omitempty"`
+	RequiredRequestHeaders         []string          `yaml:"requiredRequestHeaders,omitempty" json:"required_request_headers,omitempty"`
+	RequiredRequestHeaderRegex     map[string]string `yaml:"requiredRequestHeaderRegex,omitempty" json:"required_request_header_regex,omitempty"`
+	RequestJSONFields              map[string]string `yaml:"requestJSONFields,omitempty" json:"request_json_fields,omitempty"`
+	RemoveRequestJSONFields        []string          `yaml:"removeRequestJSONFields,omitempty" json:"remove_request_json_fields,omitempty"`
+	RequestRedactJSONFields        []string          `yaml:"requestRedactJSONFields,omitempty" json:"request_redact_json_fields,omitempty"`
+	RequestBodyBlockRegex          []string          `yaml:"requestBodyBlockRegex,omitempty" json:"request_body_block_regex,omitempty"`
+	RequestBodyRequireRegex        []string          `yaml:"requestBodyRequireRegex,omitempty" json:"request_body_require_regex,omitempty"`
+	RequestPIIBlockTypes           []string          `yaml:"requestPIIBlockTypes,omitempty" json:"request_pii_block_types,omitempty"`
+	QueryParams                    map[string]string `yaml:"queryParams,omitempty" json:"query_params,omitempty"`
+	RemoveQueryParams              []string          `yaml:"removeQueryParams,omitempty" json:"remove_query_params,omitempty"`
+	Protocol                       string            `yaml:"protocol,omitempty" json:"protocol,omitempty"`
+	GraphQLAllowIntrospection      *bool             `yaml:"graphqlAllowIntrospection,omitempty" json:"graphql_allow_introspection,omitempty"`
+	GraphQLRequirePersistedQuery   bool              `yaml:"graphqlRequirePersistedQuery,omitempty" json:"graphql_require_persisted_query,omitempty"`
+	GraphQLPersistedQueryField     string            `yaml:"graphqlPersistedQueryField,omitempty" json:"graphql_persisted_query_field,omitempty"`
+	GraphQLAllowedOperations       []string          `yaml:"graphqlAllowedOperations,omitempty" json:"graphql_allowed_operations,omitempty"`
+	GraphQLOperationNameRequired   bool              `yaml:"graphqlOperationNameRequired,omitempty" json:"graphql_operation_name_required,omitempty"`
+	AllowedModels                  []string          `yaml:"allowedModels,omitempty" json:"allowed_models,omitempty"`
+	ModelField                     string            `yaml:"modelField,omitempty" json:"model_field,omitempty"`
+	AllowedToolNames               []string          `yaml:"allowedToolNames,omitempty" json:"allowed_tool_names,omitempty"`
+	ToolField                      string            `yaml:"toolField,omitempty" json:"tool_field,omitempty"`
+	MaxMessages                    int               `yaml:"maxMessages,omitempty" json:"max_messages,omitempty"`
+	MessagesField                  string            `yaml:"messagesField,omitempty" json:"messages_field,omitempty"`
+	MaxToolCalls                   int               `yaml:"maxToolCalls,omitempty" json:"max_tool_calls,omitempty"`
+	ToolCallsField                 string            `yaml:"toolCallsField,omitempty" json:"tool_calls_field,omitempty"`
+	MaxInputTokens                 int               `yaml:"maxInputTokens,omitempty" json:"max_input_tokens,omitempty"`
+	InputTokensField               string            `yaml:"inputTokensField,omitempty" json:"input_tokens_field,omitempty"`
+	MaxOutputTokens                int               `yaml:"maxOutputTokens,omitempty" json:"max_output_tokens,omitempty"`
+	OutputTokensField              string            `yaml:"outputTokensField,omitempty" json:"output_tokens_field,omitempty"`
+	AllowedUpstreamHosts           []string          `yaml:"allowedUpstreamHosts,omitempty" json:"allowed_upstream_hosts,omitempty"`
+	TransformWhenHeaders           map[string]string `yaml:"transformWhenHeaders,omitempty" json:"transform_when_headers,omitempty"`
+	TransformWhenQueryParams       map[string]string `yaml:"transformWhenQueryParams,omitempty" json:"transform_when_query_params,omitempty"`
+	TransformWhenHeaderRegex       map[string]string `yaml:"transformWhenHeaderRegex,omitempty" json:"transform_when_header_regex,omitempty"`
+	TransformWhenQueryRegex        map[string]string `yaml:"transformWhenQueryRegex,omitempty" json:"transform_when_query_regex,omitempty"`
+	TransformMethods               []string          `yaml:"transformMethods,omitempty" json:"transform_methods,omitempty"`
+	TransformScopes                []string          `yaml:"transformScopes,omitempty" json:"transform_scopes,omitempty"`
+	ResponseTransformStatusCodes   []int             `yaml:"responseTransformStatusCodes,omitempty" json:"response_transform_status_codes,omitempty"`
+	ResponseTransformStatusClasses []string          `yaml:"responseTransformStatusClasses,omitempty" json:"response_transform_status_classes,omitempty"`
+	ResponseTransformWhenHeaders   map[string]string `yaml:"responseTransformWhenHeaders,omitempty" json:"response_transform_when_headers,omitempty"`
+	ResponseTransformHeaderRegex   map[string]string `yaml:"responseTransformHeaderRegex,omitempty" json:"response_transform_header_regex,omitempty"`
+	ResponseHeaders                map[string]string `yaml:"responseHeaders,omitempty" json:"response_headers,omitempty"`
+	RemoveResponseHeaders          []string          `yaml:"removeResponseHeaders,omitempty" json:"remove_response_headers,omitempty"`
+	RedactionValue                 string            `yaml:"redactionValue,omitempty" json:"redaction_value,omitempty"`
+	ResponseRedactHeaders          []string          `yaml:"responseRedactHeaders,omitempty" json:"response_redact_headers,omitempty"`
+	SuccessResponseFields          map[string]string `yaml:"successResponseFields,omitempty" json:"success_response_fields,omitempty"`
+	ErrorResponseFields            map[string]string `yaml:"errorResponseFields,omitempty" json:"error_response_fields,omitempty"`
+	ResponseJSONFields             map[string]string `yaml:"responseJSONFields,omitempty" json:"response_json_fields,omitempty"`
+	RemoveResponseJSONFields       []string          `yaml:"removeResponseJSONFields,omitempty" json:"remove_response_json_fields,omitempty"`
+	ResponseRedactJSONFields       []string          `yaml:"responseRedactJSONFields,omitempty" json:"response_redact_json_fields,omitempty"`
+	ResponseBodyBlockRegex         []string          `yaml:"responseBodyBlockRegex,omitempty" json:"response_body_block_regex,omitempty"`
+	ResponseBodyRequireRegex       []string          `yaml:"responseBodyRequireRegex,omitempty" json:"response_body_require_regex,omitempty"`
+	ResponsePIIBlockTypes          []string          `yaml:"responsePIIBlockTypes,omitempty" json:"response_pii_block_types,omitempty"`
+	MaxRequestBodyBytes            int64             `yaml:"maxRequestBodyBytes,omitempty" json:"max_request_body_bytes,omitempty"`
+	MaxResponseBodyBytes           int64             `yaml:"maxResponseBodyBytes,omitempty" json:"max_response_body_bytes,omitempty"`
+	StripPath                      bool              `yaml:"stripPath"`
+	ValidateSchema                 string            `yaml:"validateSchema"`
+	WebSocket                      *WebSocketOptions `yaml:"websocket,omitempty"`
+	CORS                           *CORSConfig       `yaml:"cors,omitempty" json:"cors,omitempty"`
+	RequireJwt                     bool              `yaml:"requireJwt"`
+	Enabled                        *bool             `yaml:"enabled"`
+	AuthPlugin                     string            `yaml:"auth_plugin,omitempty" json:"auth_plugin,omitempty"`
 	// New fields for enhanced configuration
 	Name            string    `yaml:"name,omitempty" json:"name,omitempty"`
 	Description     string    `yaml:"description,omitempty" json:"description,omitempty"`
@@ -96,12 +252,26 @@ type RouterConfig struct {
 	Backends        []Backend `yaml:"backend" json:"backend"`
 	Roles           []string  `yaml:"roles,omitempty" json:"roles,omitempty"`
 	Scopes          []string  `yaml:"scopes,omitempty" json:"scopes,omitempty"`
+	ServiceName     string    `yaml:"-" json:"service_name,omitempty"`
+	ServiceHost     string    `yaml:"-" json:"service_host,omitempty"`
+}
+
+type CORSConfig struct {
+	AllowedOrigins   []string `yaml:"allowedOrigins,omitempty" json:"allowed_origins,omitempty"`
+	AllowedMethods   []string `yaml:"allowedMethods,omitempty" json:"allowed_methods,omitempty"`
+	AllowedHeaders   []string `yaml:"allowedHeaders,omitempty" json:"allowed_headers,omitempty"`
+	ExposedHeaders   []string `yaml:"exposedHeaders,omitempty" json:"exposed_headers,omitempty"`
+	AllowCredentials bool     `yaml:"allowCredentials,omitempty" json:"allow_credentials,omitempty"`
+	MaxAge           int      `yaml:"maxAge,omitempty" json:"max_age,omitempty"`
 }
 
 // TLSConfig represents TLS configuration
 type TLSConfig struct {
 	Enabled              bool     `yaml:"enabled"`
 	Port                 int      `yaml:"port,omitempty"`
+	HTTP3Enabled         bool     `yaml:"http3Enabled,omitempty"`
+	HTTP3Port            int      `yaml:"http3Port,omitempty"`
+	HTTP3Datagrams       bool     `yaml:"http3Datagrams,omitempty"`
 	EnrollmentPort       int      `yaml:"enrollmentPort,omitempty"`
 	EnrollmentMaxActive  int      `yaml:"enrollmentMaxActive,omitempty"`
 	CertFile             string   `yaml:"certFile"`
@@ -130,6 +300,10 @@ type WebSocketOptions struct {
 	WriteBufferSize     int               `json:"write_buffer_size"`
 	EnableCompression   bool              `json:"enable_compression"`
 	CheckOrigin         bool              `json:"check_origin"`
+	// InsecureSkipVerify allows the gateway to connect to upstream wss:// backends
+	// with self-signed certificates (common for internal services).
+	// Prefer proper CA trust in production whenever possible.
+	InsecureSkipVerify bool `yaml:"insecureSkipVerify,omitempty" json:"insecureSkipVerify,omitempty"`
 }
 
 // JWTConfig holds JWT auth settings
@@ -163,7 +337,20 @@ type Service struct {
 
 // Backend represents a backend configuration for routes
 type Backend struct {
-	URLPattern string `yaml:"url_pattern" json:"url_pattern"`
+	URLPattern                      string `yaml:"url_pattern" json:"url_pattern"`
+	Host                            string `yaml:"host,omitempty" json:"host,omitempty"`
+	Weight                          int    `yaml:"weight,omitempty" json:"weight,omitempty"`
+	Timeout                         string `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+	FailureThreshold                int    `yaml:"failureThreshold,omitempty" json:"failureThreshold,omitempty"`
+	Cooldown                        string `yaml:"cooldown,omitempty" json:"cooldown,omitempty"`
+	HalfOpenMaxRequests             int    `yaml:"halfOpenMaxRequests,omitempty" json:"halfOpenMaxRequests,omitempty"`
+	RecoverySuccessThreshold        int    `yaml:"recoverySuccessThreshold,omitempty" json:"recoverySuccessThreshold,omitempty"`
+	OutlierLatencyThreshold         string `yaml:"outlierLatencyThreshold,omitempty" json:"outlierLatencyThreshold,omitempty"`
+	OutlierConsecutiveSlowResponses int    `yaml:"outlierConsecutiveSlowResponses,omitempty" json:"outlierConsecutiveSlowResponses,omitempty"`
+	OutlierCooldown                 string `yaml:"outlierCooldown,omitempty" json:"outlierCooldown,omitempty"`
+	HealthCheckPath                 string `yaml:"healthCheckPath,omitempty" json:"healthCheckPath,omitempty"`
+	HealthInterval                  string `yaml:"healthInterval,omitempty" json:"healthInterval,omitempty"`
+	HealthTimeout                   string `yaml:"healthTimeout,omitempty" json:"healthTimeout,omitempty"`
 }
 
 func (r RouterConfig) IsEnabled() bool {
@@ -178,6 +365,24 @@ func (r RouterConfig) EffectiveMethods() []string {
 		return []string{strings.ToUpper(r.Method)}
 	}
 	return nil
+}
+
+func (r RouterConfig) EffectiveMethodsForRegistration() []string {
+	methods := append([]string(nil), r.EffectiveMethods()...)
+	if r.CORS == nil {
+		return methods
+	}
+	hasOptions := false
+	for _, method := range methods {
+		if strings.EqualFold(strings.TrimSpace(method), http.MethodOptions) {
+			hasOptions = true
+			break
+		}
+	}
+	if !hasOptions {
+		methods = append(methods, http.MethodOptions)
+	}
+	return methods
 }
 
 func (r RouterConfig) SupportsMethod(method string) bool {
@@ -231,6 +436,8 @@ func cloneRouteWithService(route RouterConfig, service Service) RouterConfig {
 	cloned := route
 	cloned.Path = service.EffectiveRoutePath(route)
 	cloned.Methods = route.EffectiveMethods()
+	cloned.ServiceName = service.Name
+	cloned.ServiceHost = service.Host
 	return cloned
 }
 
@@ -243,6 +450,13 @@ func (t TLSConfig) EffectivePort(defaultPort int) int {
 		return t.Port
 	}
 	return defaultPort
+}
+
+func (t TLSConfig) EffectiveHTTP3Port(defaultTLSPort int) int {
+	if t.HTTP3Port > 0 {
+		return t.HTTP3Port
+	}
+	return defaultTLSPort
 }
 
 func (t TLSConfig) EffectiveEnrollmentPort() int {
@@ -684,17 +898,32 @@ func (c *Config) RemoveService(name string) error {
 }
 
 // Add helper to find parent service for a route
-func (c *Config) FindServiceForRoute(path string, method string) *Service {
+func (c *Config) FindServiceForRoute(path string, method string, matchHeaders map[string]string) *Service {
 	for _, serviceConfig := range c.Services {
 		for _, service := range serviceConfig.Services {
 			for _, route := range service.Routes {
-				if service.EffectiveRoutePath(route) == path && route.SupportsMethod(method) {
+				if service.EffectiveRoutePath(route) == path && route.SupportsMethod(method) && routeHeaderMatcherMatches(route.MatchHeaders, matchHeaders) {
 					return &service
 				}
 			}
 		}
 	}
 	return nil
+}
+
+func routeHeaderMatcherMatches(expected, actual map[string]string) bool {
+	if len(expected) == 0 {
+		return true
+	}
+	if len(actual) == 0 {
+		return false
+	}
+	for key, value := range expected {
+		if actualValue, ok := actual[key]; !ok || !strings.EqualFold(strings.TrimSpace(actualValue), strings.TrimSpace(value)) {
+			return false
+		}
+	}
+	return true
 }
 
 var envVarPattern = regexp.MustCompile(`\$\{([A-Za-z0-9_]+)(:-([^}]*))?\}`)

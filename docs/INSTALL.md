@@ -175,11 +175,26 @@ security:
     clientCAFile: "/app/certs/ca.crt"
     clientAuthType: "RequireAndVerifyClientCert"
     minVersion: "TLS1.2"
+    serverNames: ["localhost", "iket"]
+    serverIPs: ["127.0.0.1"]
     autoGenerate: true
     generateSharedClient: false
   enableBasicAuth: true
   basicAuthUsers:
     admin: "change-this-password"
+  mutationPolicy:
+    enabled: false
+    enforcedScopes: ["all"]
+    requireLabel: true
+    requireNoteForHighImpact: true
+    requireChangeRefForHighImpact: true
+    requireDifferentReviewerForProposals: false
+    minApproversForHighImpactProposals: 0
+    requireNotBeforeForHighImpactProposals: false
+    requireVerificationForPromotedHighImpactProposals: false
+    maxProposalAge: ""
+    maxApprovalAge: ""
+    blockedApplyWindows: []
 
 storage:
   mode: "postgres"
@@ -200,6 +215,45 @@ On first start, Iket will auto-generate the TLS assets in `./certs` if they do n
 - `server.key`
 
 These are generated in the server-side Docker cert volume, not automatically in the CLI's `~/.iket/certs`. For example, if your deployment folder is `~/iket-docker`, the generated files are written to `~/iket-docker/certs/`.
+
+For remote administration, make sure the auto-generated server certificate includes the real hostname or IP that your laptop will use. Add them before first boot or before regenerating `server.crt`:
+
+```yaml
+security:
+  tls:
+    serverNames: ["localhost", "iket", "gateway.example.com"]
+    serverIPs: ["127.0.0.1", "103.16.199.4"]
+```
+
+If the configured SANs change later, Iket now regenerates `server.crt` automatically on startup to match them.
+
+If you want the gateway itself to enforce change metadata for all API clients, not just the `iket` CLI, enable the mutation policy:
+
+```yaml
+security:
+  mutationPolicy:
+    enabled: true
+    enforcedScopes: ["config", "services", "high_impact"]
+    requireLabel: true
+    requireNoteForHighImpact: true
+    requireChangeRefForHighImpact: true
+    requireDifferentReviewerForProposals: true
+    minApproversForHighImpactProposals: 2
+    requireNotBeforeForHighImpactProposals: true
+    requireVerificationForPromotedHighImpactProposals: true
+    maxProposalAge: "72h"
+    maxApprovalAge: "12h"
+    blockedApplyWindows:
+      - name: "weekend-freeze"
+        days: ["sat", "sun"]
+        start: "00:00"
+        end: "06:00"
+        timezone: "Asia/Jakarta"
+        scopes: ["high_impact"]
+```
+
+With that enabled, high-impact admin mutations such as replace, delete, disable, and revision restore will be rejected unless the caller includes the required revision metadata.
+The supported scopes are `all`, `config`, `services`, `routes`, `plugins`, `clients`, `revisions`, and `high_impact`. When `requireDifferentReviewerForProposals: true`, the same `--proposer` identity cannot also be used as the `--reviewer` when approving, applying, or rejecting a proposal. When `minApproversForHighImpactProposals` is greater than zero, high-impact proposals must accumulate that many distinct approvals before `iket proposal apply` will succeed. When `requireNotBeforeForHighImpactProposals: true`, high-impact proposals must also carry a `--not-before` RFC3339 timestamp, and apply will be blocked until that time arrives. `requireVerificationForPromotedHighImpactProposals: true` blocks apply for promoted high-impact proposals unless lineage verification still passes. `maxProposalAge` expires old proposals entirely, while `maxApprovalAge` only counts still-fresh approvals toward the apply threshold. `blockedApplyWindows` adds recurring blackout periods with weekday names, `HH:MM` ranges, an IANA timezone, and optional scopes; if scopes are omitted, the blackout defaults to high-impact proposal apply only.
 
 The normal first bootstrap flow is:
 1. start the server
@@ -248,6 +302,82 @@ docker logs iket --tail 100
 
 Prefer running `docker compose` as the same user that owns the deployment folder whenever possible.
 
+If the error still persists after the quick recovery, treat it as a bind-mounted filesystem ownership mismatch on `certs/` rather than a database problem. The usual clues are:
+- Postgres is healthy
+- Iket reaches early startup
+- the failure is exactly on creating `/app/certs/ca.key`
+
+Most likely causes:
+- `certs/ca.key` already exists and is not writable
+- `certs/` is owned correctly now, but files inside it are still root-owned or too restrictive
+- `.env` has `IKET_UID` / `IKET_GID` that do not match the host directory owner
+- the container is running as a different UID/GID than you expect
+
+Run these checks:
+
+```bash
+cd /home/bhangun/Infra/Iket
+
+cat .env
+ls -ld certs logs
+ls -la certs
+docker inspect iket --format '{{.Config.User}}'
+docker compose config | grep -A3 'user:'
+```
+
+Then apply the practical cleanup:
+
+```bash
+cd /home/bhangun/Infra/Iket
+
+sudo rm -f certs/ca.crt certs/ca.key certs/server.crt certs/server.key certs/client.crt certs/client.key
+sudo chown -R $(id -u):$(id -g) certs logs
+sudo chmod 700 certs
+sudo chmod 755 logs
+sudo chmod -R u+rwX certs logs
+```
+
+Also confirm `.env` matches your actual host user:
+
+```bash
+cd /home/bhangun/Infra/Iket
+grep '^IKET_UID=' .env
+grep '^IKET_GID=' .env
+id -u
+id -g
+```
+
+If they do not match, correct them:
+
+```bash
+sed -i "s/^IKET_UID=.*/IKET_UID=$(id -u)/" .env
+sed -i "s/^IKET_GID=.*/IKET_GID=$(id -g)/" .env
+```
+
+Then recreate the stack:
+
+```bash
+sudo docker compose -f /home/bhangun/Infra/Iket/docker-compose.yaml down
+sudo docker compose -f /home/bhangun/Infra/Iket/docker-compose.yaml up -d --force-recreate
+docker logs --tail 100 iket
+ls -la /home/bhangun/Infra/Iket/certs
+```
+
+If it still fails, the next most useful outputs are:
+
+```bash
+cd /home/bhangun/Infra/Iket
+cat .env
+ls -ld certs
+ls -la certs
+docker inspect iket --format '{{.Config.User}}'
+```
+
+Those will usually pinpoint whether the remaining problem is:
+- wrong UID/GID inside the container
+- stale root-owned files
+- directory mode still blocking writes
+
 ### 1b. Repo-Based Docker Compose
 If you do have the repository checked out on the remote server, you can also use the bundled compose files:
 
@@ -274,6 +404,7 @@ You can re-check the deployment scaffold and local runtime state at any time wit
 ```bash
 iket server doctor --mode docker --output ~/iket-docker
 iket server doctor --mode docker --output ~/iket-docker --context remote-prod
+iket server doctor --mode docker --output ~/iket-docker --url https://103.16.199.4:8443
 ```
 
 `server doctor --mode docker` now also checks:
@@ -281,6 +412,8 @@ iket server doctor --mode docker --output ~/iket-docker --context remote-prod
 - container health/status via Docker
 - local reachability of the published HTTP, admin TLS, and enrollment TLS ports
 - TLS handshakes against the generated CA when possible
+- whether the generated `server.crt` SANs actually cover the configured `security.tls.serverNames` / `serverIPs`
+- whether the generated `server.crt` covers a real target admin URL when `--url` is provided
 
 ## 🖥️ Host Installation Scaffold
 
@@ -361,6 +494,11 @@ Then you can import that bundle into a named context:
 iket cert import --name remote-prod --cert-dir ./certs --url https://<server-ip>:8443
 ```
 
+Important:
+- `./certs` in that example means the server deployment's Docker cert directory.
+- `~/.iket/certs` is the local CLI-managed certificate store on your laptop or workstation.
+- If you run `iket cert import --cert-dir ~/.iket/certs ...`, you are importing from your local machine's existing files, not directly from the remote Docker host.
+
 When `generateSharedClient: true` is enabled, Iket writes the shared client bundle into the same server-side Docker cert directory:
 - `./certs/client.crt`
 - `./certs/client.key`
@@ -387,6 +525,45 @@ iket cert import \
 
 Use `https://` for port `8443`. `http://<server-ip>:8443` is invalid because that port serves TLS.
 
+If `iket cert import` fails with an error like:
+
+```text
+x509: certificate is valid for 127.0.0.1, not 103.16.199.4
+```
+
+the server certificate does not include the remote IP or hostname in its SANs yet. Update `serverNames` / `serverIPs` in `config/config.yaml`, then recreate the server so Iket regenerates `server.crt`.
+
+Newer `iket cert import` builds also attach a direct hint to that verification error so the fix is easier to spot.
+
+Example:
+
+```yaml
+security:
+  tls:
+    serverNames: ["localhost", "iket"]
+    serverIPs: ["127.0.0.1", "103.16.199.4"]
+```
+
+Then on the server:
+
+```bash
+cd ~/iket-docker
+docker compose up -d --force-recreate
+ls -la certs
+```
+
+After that, re-copy or re-import the fresh `ca.crt`, `client.crt`, and `client.key` before testing from your laptop again.
+
+If you want a deterministic operator workflow instead of relying on auto-regeneration, run this on the trusted server host:
+
+```bash
+cd ~/iket-docker
+iket cert regenerate-server --config ./config/config.yaml --cert-dir ./certs --ca-dir ./certs
+docker compose up -d --force-recreate
+```
+
+That explicitly rebuilds `server.crt` and `server.key` from the local CA using the SANs from `security.tls.serverNames` / `serverIPs`.
+
 Option 3: Enrollment for additional remote admins
 
 This is the preferred path for extra laptops or admin machines after the first admin already has access.
@@ -411,6 +588,12 @@ ls -la ./certs
 
 # Inside the running container
 docker exec iket ls -la /app/certs
+```
+
+If you need to confirm the generated server certificate contains the expected remote IP or hostname:
+
+```bash
+openssl x509 -in ./certs/server.crt -noout -text | grep -A2 "Subject Alternative Name"
 ```
 
 Expected files by mode:
@@ -541,17 +724,121 @@ iket plugin disable ratelimit --force
 Maintain your configuration locally in Git and sync it to your gateways.
 
 ```bash
-# Export local services to remote (merge existing)
-iket push services local_service.yaml --strategy merge
+# Merge local gateway config into remote
+iket config apply local_config.yaml --merge
 
-# Replace remote services with local definition
-iket push services local_service.yaml --strategy replace
+# Replace the full remote gateway config
+iket config apply local_config.yaml --replace
+
+# Preview the remote gateway changes before applying them
+iket config diff local_config.yaml --merge
+
+# Attach human metadata to the recorded revision when you actually apply it
+iket config apply local_config.yaml --merge --label "prod-rollout" --note "Switch tenant routes and TLS bootstrap settings" --change-ref "CHG-9001"
+
+# Merge local services into remote
+iket service apply local_service.yaml --merge
+
+# Replace the full remote services set
+iket service apply local_service.yaml --replace
+
+# Preview the remote service changes before applying them
+iket service diff local_service.yaml --replace
+
+# Create a pending proposal first, then approve it later
+iket service propose local_service.yaml --replace --proposer "deploy-bot" --env "staging" --not-before "2026-05-18T02:00:00Z" --canary-service "identity" --canary-header "X-Iket-Canary=identity-v2" --label "tenant-cutover" --note "Queue full service replacement for approval" --change-ref "CHG-9003"
+iket proposal list
+iket proposal approve prp-20260517-101530.123 --reviewer "ops-lead" --review-note "Approved after staging verification"
+iket proposal promote prp-20260517-101530.123 --proposer "platform-admin" --env "prod" --not-before "2026-05-19T02:00:00Z" --canary-route "identity:/auth/{rest:.*}" --canary-percent 10 --canary-step 10 --canary-step 25 --canary-step 50 --canary-step 100 --canary-min-requests 50 --canary-max-error-rate 0.02 --canary-max-p95-latency 400ms
+iket proposal verify prp-20260519-020000.123
+iket proposal apply prp-20260519-020000.123 --reviewer "platform-admin" --review-note "Final apply approval"
+iket proposal canary status prp-20260519-020000.123
+iket proposal canary evaluate prp-20260519-020000.123
+iket proposal canary advance prp-20260519-020000.123 --reviewer "platform-admin" --review-note "Canary healthy, move to next step"
+iket proposal canary reconcile prp-20260519-020000.123 --reviewer "platform-admin" --review-note "Evaluate and take the next rollout action automatically"
+iket proposal canary expand prp-20260519-020000.123 --reviewer "platform-admin" --canary-service "billing" --canary-percent 25
+iket proposal canary complete prp-20260519-020000.123 --reviewer "platform-admin" --review-note "Canary healthy, finish rollout"
+iket service propose ./config/service.yaml --replace --canary-service "identity" --canary-percent 10 --canary-step 10 --canary-step 25 --canary-step 50 --canary-step 100 --canary-auto --canary-auto-interval 30s --canary-auto-reviewer "canary-controller"
+
+# proposal canary reconcile can evaluate the active canary and then advance, complete, or roll it back automatically.
+# canary-auto can let the gateway perform that reconcile loop in the background at the chosen interval.
+# If canary guards fail during advance, reconcile, or completion, Iket now restores the pre-canary baseline automatically
+# and marks the proposal as canary_aborted.
+
+# security.notificationWebhooks can push rollout events to external systems.
+# Events include proposal.approved, proposal.applied, proposal.promoted, proposal.rejected,
+# proposal.canary_started, proposal.canary_advanced, proposal.canary_completed, and proposal.canary_aborted.
+# notificationWebhooks also support format: generic, slack, or teams.
+# Webhooks can also be HMAC-signed with signingSecret, signatureHeader, and timestampHeader,
+# retried with retryCount and retryBackoff, and later inspected or replayed with
+# iket notification deliveries / show / replay / replay-failed.
+
+# Service routes can also define multiple weighted backends. Each backend can keep
+# its own url_pattern and optionally override the upstream host:
+# backend:
+#   - url_pattern: "/api/{rest:.*}"
+#     host: "http://identity-v1:8080"
+#     weight: 1
+#     timeout: "750ms"
+#     failureThreshold: 1
+#     cooldown: "30s"
+#     halfOpenMaxRequests: 2
+#     recoverySuccessThreshold: 2
+#     outlierLatencyThreshold: "200ms"
+#     outlierConsecutiveSlowResponses: 3
+#     outlierCooldown: "2m"
+#     healthCheckPath: "/health"
+#     healthInterval: "15s"
+#     healthTimeout: "2s"
+#   - url_pattern: "/api/{rest:.*}"
+#     host: "http://identity-v2:8080"
+#     weight: 3
+# retryCount: 2
+# retryBackoff: "100ms"
+# retryJitter: "25ms"
+# retryStatusCodes: [429, 502, 503, 504]
+# retryUnsafeMethods: false
+# hedgeDelay: "20ms"
+# hedgeUnsafeMethods: false
+# adaptiveLatencyRouting: true
+# shadowTrafficPercent: 10
+# shadowUnsafeMethods: false
+# cooldown now feeds a configurable half-open circuit recovery flow too:
+# after the cooldown expires, up to halfOpenMaxRequests can probe the backend,
+# and recoverySuccessThreshold controls how many successes are required
+# before reopening the backend to full traffic again.
+# Repeated slow responses can also eject a backend even when it is not hard-failing,
+# using outlierLatencyThreshold, outlierConsecutiveSlowResponses, and outlierCooldown.
+
+# Preview targeted admin changes before applying them
+iket plugin diff-config rate_limit ./plugin-rate-limit.yaml
+iket route diff-update route-abc123 ./route-update.yaml
+
+# Inspect and restore recorded config revisions
+iket revision list
+iket revision show rev-20260517-101530.123
+iket revision diff rev-20260517-101530.123 current
+iket revision restore rev-20260517-101530.123
+
+# In strict contexts, high-impact changes should include both label and note
+iket service apply local_service.yaml --replace --label "tenant-cutover" --note "Replace remote routes after maintenance window starts" --change-ref "CHG-9002"
 
 # Pull remote config to local file
 iket pull config my_config.yaml
 
 # Pull remote services to local file in JSON format
 iket pull services current_services.json --format json
+```
+
+For log following, `iket logs tail` now prefers live SSE streaming and automatically falls back to polling when streaming is unavailable:
+
+```bash
+iket logs tail
+iket logs tail --poll-interval 5s
+iket logs tail --service identity --route /jahsy/auth/{rest:.*}
+iket logs list --request-id 4a92f0c8f0db4e70
+iket logs trace --service identity
+# prints a one-line request summary before following
 ```
 
 #### Recommended Directory Structure for Certificates

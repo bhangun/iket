@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	iketconfig "github.com/bhangun/iket/pkg/config"
 	"github.com/spf13/cobra"
 )
 
@@ -22,6 +23,9 @@ var (
 	caDir          string
 	serverHostname string
 	serverIP       string
+	serverNames    []string
+	serverIPs      []string
+	certConfigPath string
 	caDays         int
 	certDays       int
 	keySize        int
@@ -64,11 +68,28 @@ Examples:
 	genCmd.Flags().StringVar(&caDir, "ca-dir", "", "CA directory (default: same as cert-dir)")
 	genCmd.Flags().StringVar(&serverHostname, "server-hostname", "localhost", "Server hostname")
 	genCmd.Flags().StringVar(&serverIP, "server-ip", "127.0.0.1", "Server IP address")
+	genCmd.Flags().StringSliceVar(&serverNames, "server-name", nil, "Additional server DNS SANs (repeatable)")
+	genCmd.Flags().StringSliceVar(&serverIPs, "server-ip-alt", nil, "Additional server IP SANs (repeatable)")
 	genCmd.Flags().IntVar(&caDays, "ca-days", 3650, "CA certificate validity in days")
 	genCmd.Flags().IntVar(&certDays, "cert-days", 365, "Server/client certificate validity in days")
 	genCmd.Flags().IntVar(&keySize, "key-size", 4096, "RSA key size in bits")
 
 	certCmd.AddCommand(genCmd)
+
+	regenerateServerCmd := &cobra.Command{
+		Use:   "regenerate-server",
+		Short: "Regenerate the server certificate from the local CA",
+		Long:  "Rebuild server.crt and server.key using the local CA material and the provided SAN hostnames/IPs, or load SANs from a config.yaml file.",
+		RunE:  runRegenerateServerCert,
+	}
+	regenerateServerCmd.Flags().StringVar(&certDir, "cert-dir", "", "Certificate directory containing server.crt/server.key")
+	regenerateServerCmd.Flags().StringVar(&caDir, "ca-dir", "", "CA directory containing ca.crt/ca.key (default: same as cert-dir)")
+	regenerateServerCmd.Flags().StringVar(&certConfigPath, "config", "", "Optional config.yaml to read security.tls.serverNames/serverIPs from")
+	regenerateServerCmd.Flags().StringVar(&serverHostname, "server-hostname", "localhost", "Primary server hostname")
+	regenerateServerCmd.Flags().StringVar(&serverIP, "server-ip", "127.0.0.1", "Primary server IP address")
+	regenerateServerCmd.Flags().StringSliceVar(&serverNames, "server-name", nil, "Additional server DNS SANs (repeatable)")
+	regenerateServerCmd.Flags().StringSliceVar(&serverIPs, "server-ip-alt", nil, "Additional server IP SANs (repeatable)")
+	certCmd.AddCommand(regenerateServerCmd)
 
 	// Certificate status
 	statusCmd := &cobra.Command{
@@ -255,13 +276,40 @@ func generateCA(caDir string) error {
 }
 
 func generateServerCert(certDir, caDir string) error {
-	fmt.Printf("Generating server certificate for %s (%s)...\n", serverHostname, serverIP)
-	return generateCert(certDir, caDir, "server", serverHostname, serverIP, true)
+	names, ips := resolveServerSANs()
+	fmt.Printf("Generating server certificate for names=%v ips=%v...\n", names, ips)
+	return generateServerCertWithSANs(certDir, caDir, names, ips)
 }
 
 func generateClientCert(certDir, caDir string) error {
 	fmt.Println("Generating client certificate...")
 	return generateCert(certDir, caDir, "client", "iket", "", false)
+}
+
+func runRegenerateServerCert(cmd *cobra.Command, args []string) error {
+	certDir := getDefaultCertDir()
+	caDir := getDefaultCADir()
+
+	if err := os.MkdirAll(certDir, 0700); err != nil {
+		return err
+	}
+
+	serverCertPath := filepath.Join(certDir, "server.crt")
+	serverKeyPath := filepath.Join(certDir, "server.key")
+	_ = os.Remove(serverCertPath)
+	_ = os.Remove(serverKeyPath)
+
+	names, ips, err := resolveServerSANsFromInput(certConfigPath)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Regenerating server certificate in %s for names=%v ips=%v...\n", certDir, names, ips)
+	if err := generateServerCertWithSANs(certDir, caDir, names, ips); err != nil {
+		return err
+	}
+	fmt.Printf("Regenerated %s and %s\n", serverCertPath, serverKeyPath)
+	return nil
 }
 
 func generateCert(certDir, caDir, name, hostname, ip string, isServer bool) error {
@@ -308,6 +356,106 @@ func generateCert(certDir, caDir, name, hostname, ip string, isServer bool) erro
 
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
 	return os.WriteFile(filepath.Join(certDir, name+".crt"), certPEM, 0644)
+}
+
+func generateServerCertWithSANs(certDir, caDir string, names []string, ips []string) error {
+	caKey, caCert, err := loadCA(caDir)
+	if err != nil {
+		return err
+	}
+
+	key, err := rsa.GenerateKey(rand.Reader, keySize)
+	if err != nil {
+		return err
+	}
+
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		Subject: pkix.Name{
+			CommonName:   "iket-server",
+			Organization: []string{"Iket"},
+		},
+		NotBefore:   time.Now(),
+		NotAfter:    time.Now().AddDate(0, 0, certDays),
+		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+		DNSNames:    names,
+	}
+	for _, raw := range ips {
+		if ip := net.ParseIP(strings.TrimSpace(raw)); ip != nil {
+			template.IPAddresses = append(template.IPAddresses, ip)
+		}
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, template, caCert, &key.PublicKey, caKey)
+	if err != nil {
+		return err
+	}
+
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	if err := os.WriteFile(filepath.Join(certDir, "server.key"), keyPEM, 0600); err != nil {
+		return err
+	}
+
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	return os.WriteFile(filepath.Join(certDir, "server.crt"), certPEM, 0644)
+}
+
+func resolveServerSANs() ([]string, []string) {
+	names, ips, _ := resolveServerSANsFromInput("")
+	return names, ips
+}
+
+func resolveServerSANsFromInput(configPath string) ([]string, []string, error) {
+	if strings.TrimSpace(configPath) != "" {
+		tlsCfg, err := iketconfig.ReadBootstrapTLSConfig(configPath)
+		if err != nil {
+			return nil, nil, err
+		}
+		names := iketconfig.EffectiveServerNames(tlsCfg)
+		ips := make([]string, 0, len(iketconfig.EffectiveServerIPs(tlsCfg)))
+		for _, ip := range iketconfig.EffectiveServerIPs(tlsCfg) {
+			ips = append(ips, ip.String())
+		}
+		return names, ips, nil
+	}
+
+	namesMap := map[string]struct{}{}
+	names := []string{}
+	addName := func(v string) {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return
+		}
+		if _, ok := namesMap[v]; ok {
+			return
+		}
+		namesMap[v] = struct{}{}
+		names = append(names, v)
+	}
+	addName(serverHostname)
+	for _, v := range serverNames {
+		addName(v)
+	}
+
+	ipsMap := map[string]struct{}{}
+	ips := []string{}
+	addIP := func(v string) {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return
+		}
+		if _, ok := ipsMap[v]; ok {
+			return
+		}
+		ipsMap[v] = struct{}{}
+		ips = append(ips, v)
+	}
+	addIP(serverIP)
+	for _, v := range serverIPs {
+		addIP(v)
+	}
+	return names, ips, nil
 }
 
 func loadCA(caDir string) (*rsa.PrivateKey, *x509.Certificate, error) {

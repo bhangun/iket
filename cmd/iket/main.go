@@ -194,6 +194,15 @@ func main() {
 
 	logger.Info("Iket Gateway version", logging.String("version", version))
 	logger.Info("Starting Iket Gateway")
+	logger.Info("Bootstrap TLS settings",
+		logging.String("cert_file", bootstrapTLS.CertFile),
+		logging.String("key_file", bootstrapTLS.KeyFile),
+		logging.String("client_ca_file", bootstrapTLS.ClientCAFile),
+		logging.Any("server_names", config.EffectiveServerNames(bootstrapTLS)),
+		logging.Any("server_ips", config.EffectiveServerIPs(bootstrapTLS)),
+		logging.Bool("auto_generate", bootstrapTLS.ShouldAutoGenerate()),
+		logging.Bool("generate_shared_client", bootstrapTLS.ShouldGenerateSharedClient()),
+	)
 
 	fileProvider := config.NewFileProvider(*configPath, *servicesPath, logger)
 	var provider config.Provider

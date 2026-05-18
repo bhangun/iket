@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -75,13 +77,16 @@ security:
   tls:
     enabled: true
     port: 8443
+    http3Enabled: true
+    http3Port: 8443
+    http3Datagrams: true
     enrollmentPort: 9443
     enrollmentMaxActive: 10
     certFile: "/app/certs/server.crt"
     keyFile: "/app/certs/server.key"
     clientCAFile: "/app/certs/ca.crt"
     clientAuthType: "RequireAndVerifyClientCert"
-    minVersion: "TLS1.2"
+    minVersion: "TLS1.3"
     serverNames: ["localhost", "iket"]
     serverIPs: ["127.0.0.1"]
     autoGenerate: true
@@ -89,6 +94,68 @@ security:
   enableBasicAuth: true
   basicAuthUsers:
     admin: "%s"
+  mutationPolicy:
+    enabled: false
+    enforcedScopes: ["all"]
+    requireLabel: true
+    requireNoteForHighImpact: true
+    requireChangeRefForHighImpact: true
+    requireDifferentReviewerForProposals: false
+    minApproversForHighImpactProposals: 0
+    requireNotBeforeForHighImpactProposals: false
+    requireVerificationForPromotedHighImpactProposals: false
+    maxProposalAge: ""
+    maxApprovalAge: ""
+    blockedApplyWindows: []
+    proposalQueue:
+      defaultUrgency:
+        readyAgingAfter: "1h"
+        readyOverdueAfter: "4h"
+        blockedAgingAfter: "4h"
+        blockedOverdueAfter: "24h"
+      environmentUrgency:
+        prod:
+          readyAgingAfter: "30m"
+          readyOverdueAfter: "2h"
+      notifications:
+        enabled: false
+        interval: "15m"
+        minNotificationInterval: "5m"
+        onlyOnSLABreach: true
+        onlyOnChange: true
+        environments: ["prod"]
+    policyAlertNotifications:
+      enabled: false
+      interval: "5m"
+      minNotificationInterval: "2m"
+      onlyOnChange: true
+      window: "5m"
+      minCount: 3
+      minSeverity: "warning"
+  notificationWebhooks:
+    - name: "ops-events"
+      url: "https://ops.example.com/hooks/iket"
+      format: "slack"
+      events: ["proposal.applied", "proposal.canary_aborted", "proposal.digest", "proposal.sla_stage_changed", "proposal.sla_resolved", "gateway.policy_alert_digest", "gateway.policy_alert", "gateway.policy_alert_opened", "gateway.policy_alert_stage_changed", "gateway.policy_alert_resolved"]
+      environments: ["prod", "staging"]
+      timeout: "3s"
+      retryCount: 2
+      retryBackoff: "2s"
+      signingSecret: "replace-me"
+      signatureHeader: "X-Iket-Signature"
+      timestampHeader: "X-Iket-Timestamp"
+    - name: "ops-escalation"
+      url: "https://pager.example.com/hooks/iket"
+      events: ["proposal.sla_breach"]
+      environments: ["prod"]
+      minSLABreachTier: "critical"
+      minSLABreachCount: 2
+      minConsecutiveSLABreaches: 3
+      minSLABreachDuration: "15m"
+      slaBreachCooldown: "30m"
+      timeout: "3s"
+      retryCount: 2
+      retryBackoff: "2s"
 
 storage:
   mode: "postgres"
@@ -153,13 +220,16 @@ security:
   tls:
     enabled: true
     port: %s
+    http3Enabled: true
+    http3Port: %s
+    http3Datagrams: true
     enrollmentPort: %s
     enrollmentMaxActive: 10
     certFile: "%s"
     keyFile: "%s"
     clientCAFile: "%s"
     clientAuthType: "RequireAndVerifyClientCert"
-    minVersion: "TLS1.2"
+    minVersion: "TLS1.3"
     serverNames: ["localhost"]
     serverIPs: ["127.0.0.1"]
     autoGenerate: true
@@ -167,6 +237,68 @@ security:
   enableBasicAuth: true
   basicAuthUsers:
     admin: "%s"
+  mutationPolicy:
+    enabled: false
+    enforcedScopes: ["all"]
+    requireLabel: true
+    requireNoteForHighImpact: true
+    requireChangeRefForHighImpact: true
+    requireDifferentReviewerForProposals: false
+    minApproversForHighImpactProposals: 0
+    requireNotBeforeForHighImpactProposals: false
+    requireVerificationForPromotedHighImpactProposals: false
+    maxProposalAge: ""
+    maxApprovalAge: ""
+    blockedApplyWindows: []
+    proposalQueue:
+      defaultUrgency:
+        readyAgingAfter: "1h"
+        readyOverdueAfter: "4h"
+        blockedAgingAfter: "4h"
+        blockedOverdueAfter: "24h"
+      environmentUrgency:
+        prod:
+          readyAgingAfter: "30m"
+          readyOverdueAfter: "2h"
+      notifications:
+        enabled: false
+        interval: "15m"
+        minNotificationInterval: "5m"
+        onlyOnSLABreach: true
+        onlyOnChange: true
+        environments: ["prod"]
+    policyAlertNotifications:
+      enabled: false
+      interval: "5m"
+      minNotificationInterval: "2m"
+      onlyOnChange: true
+      window: "5m"
+      minCount: 3
+      minSeverity: "warning"
+  notificationWebhooks:
+    - name: "ops-events"
+      url: "https://ops.example.com/hooks/iket"
+      format: "slack"
+      events: ["proposal.applied", "proposal.canary_aborted", "proposal.digest", "proposal.sla_stage_changed", "proposal.sla_resolved", "gateway.policy_alert_digest", "gateway.policy_alert", "gateway.policy_alert_opened", "gateway.policy_alert_stage_changed", "gateway.policy_alert_resolved"]
+      environments: ["prod", "staging"]
+      timeout: "3s"
+      retryCount: 2
+      retryBackoff: "2s"
+      signingSecret: "replace-me"
+      signatureHeader: "X-Iket-Signature"
+      timestampHeader: "X-Iket-Timestamp"
+    - name: "ops-escalation"
+      url: "https://pager.example.com/hooks/iket"
+      events: ["proposal.sla_breach"]
+      environments: ["prod"]
+      minSLABreachTier: "critical"
+      minSLABreachCount: 2
+      minConsecutiveSLABreaches: 3
+      minSLABreachDuration: "15m"
+      slaBreachCooldown: "30m"
+      timeout: "3s"
+      retryCount: 2
+      retryBackoff: "2s"
 
 storage:
   mode: "postgres"
@@ -343,6 +475,7 @@ func initServerCmd(rootCmd *cobra.Command) {
 		doctorDir        string
 		doctorSystemd    string
 		doctorContext    string
+		doctorURL        string
 		doctorSkipDocker bool
 	)
 	doctorCmd := &cobra.Command{
@@ -364,9 +497,9 @@ func initServerCmd(rootCmd *cobra.Command) {
 			layout := newServerScaffoldLayout(rootDir, selectedSystemdName)
 			switch selectedMode {
 			case "docker":
-				return runDockerDoctor(layout, doctorContext, doctorSkipDocker)
+				return runDockerDoctor(layout, doctorContext, doctorURL, doctorSkipDocker)
 			case "host":
-				return runHostDoctor(layout, doctorContext)
+				return runHostDoctor(layout, doctorContext, doctorURL)
 			default:
 				return fmt.Errorf("unsupported server mode: %s", selectedMode)
 			}
@@ -392,6 +525,7 @@ func initServerCmd(rootCmd *cobra.Command) {
 	doctorCmd.Flags().StringVar(&doctorDir, "output", ".", "Directory containing the deployment scaffold")
 	doctorCmd.Flags().StringVar(&doctorSystemd, "systemd-name", "", "Expected filename for the generated systemd unit")
 	doctorCmd.Flags().StringVar(&doctorContext, "context", "", "Optional CLI context name to verify against the running gateway")
+	doctorCmd.Flags().StringVar(&doctorURL, "url", "", "Optional target admin URL to verify against the generated server certificate SANs")
 	doctorCmd.Flags().BoolVar(&doctorSkipDocker, "skip-docker", false, "Skip docker/docker compose runtime checks")
 
 	serverCmd.AddCommand(initCmd, doctorCmd)
@@ -480,6 +614,7 @@ func writeHostScaffold(layout serverScaffoldLayout, adminPassword, httpPort, htt
 		hostConfigTemplate,
 		httpPort,
 		httpsPort,
+		httpsPort,
 		enrollmentPort,
 		filepath.Join(layout.certsDir, "server.crt"),
 		filepath.Join(layout.certsDir, "server.key"),
@@ -534,7 +669,7 @@ func writeHostScaffold(layout serverScaffoldLayout, adminPassword, httpPort, htt
 	return nil
 }
 
-func runDockerDoctor(layout serverScaffoldLayout, doctorContext string, doctorSkipDocker bool) error {
+func runDockerDoctor(layout serverScaffoldLayout, doctorContext string, doctorURL string, doctorSkipDocker bool) error {
 	status := &doctorStatus{}
 	checkPath := doctorCheckPathFn(status)
 
@@ -558,6 +693,7 @@ func runDockerDoctor(layout serverScaffoldLayout, doctorContext string, doctorSk
 	}
 	checkDockerOwnership(status, layout)
 	checkCertFiles(status, layout.certsDir, readExpectedSharedClient(layout.configPath))
+	checkTargetAdminURL(status, layout.certsDir, doctorContext, doctorURL)
 
 	if !doctorSkipDocker {
 		if _, err := exec.LookPath("docker"); err != nil {
@@ -678,7 +814,7 @@ func checkOwnershipPath(status *doctorStatus, label, path string, expectedUID, e
 	}
 }
 
-func runHostDoctor(layout serverScaffoldLayout, doctorContext string) error {
+func runHostDoctor(layout serverScaffoldLayout, doctorContext string, doctorURL string) error {
 	status := &doctorStatus{}
 	checkPath := doctorCheckPathFn(status)
 
@@ -700,6 +836,7 @@ func runHostDoctor(layout serverScaffoldLayout, doctorContext string) error {
 		status.addWarn("systemd unit not present: %s", layout.systemdPath)
 	}
 	checkCertFiles(status, layout.certsDir, readExpectedSharedClient(layout.configPath))
+	checkTargetAdminURL(status, layout.certsDir, doctorContext, doctorURL)
 
 	if _, err := exec.LookPath("iket-server"); err != nil {
 		status.addWarn("iket-server binary not found in PATH")
@@ -757,6 +894,8 @@ func checkCertFiles(status *doctorStatus, certsDir string, expectSharedClient bo
 			status.lines = append(status.lines, "INFO shared client credential not present (default hardened mode): "+certPath)
 		}
 	}
+
+	checkServerCertSANs(status, certsDir)
 }
 
 func readExpectedSharedClient(configPath string) bool {
@@ -796,6 +935,135 @@ func checkDoctorContext(status *doctorStatus, doctorContext string) {
 		return
 	}
 	status.addOK("CLI context %q verified successfully", doctorContext)
+}
+
+func checkTargetAdminURL(status *doctorStatus, certsDir string, doctorContext string, doctorURL string) {
+	target := strings.TrimSpace(doctorURL)
+	if target == "" && strings.TrimSpace(doctorContext) != "" {
+		cfg, err := loadCLIConfig()
+		if err == nil {
+			if ctx, ok := cfg.Contexts[doctorContext]; ok {
+				target = strings.TrimSpace(ctx.ServerURL)
+			}
+		}
+	}
+	if target == "" {
+		return
+	}
+
+	normalized, err := normalizeAdminURL(target)
+	if err != nil {
+		status.addWarn("target admin URL is invalid for SAN verification: %v", err)
+		return
+	}
+
+	serverName, err := hostnameFromURL(normalized)
+	if err != nil {
+		status.addWarn("could not parse target admin URL %q for SAN verification: %v", normalized, err)
+		return
+	}
+
+	certPath := filepath.Join(certsDir, "server.crt")
+	pemBytes, err := os.ReadFile(certPath)
+	if err != nil {
+		status.addWarn("target URL SAN verification skipped; could not read %s: %v", certPath, err)
+		return
+	}
+	block, _ := pem.Decode(pemBytes)
+	if block == nil {
+		status.addWarn("target URL SAN verification skipped; invalid PEM in %s", certPath)
+		return
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		status.addWarn("target URL SAN verification skipped; parse failed for %s: %v", certPath, err)
+		return
+	}
+
+	if err := cert.VerifyHostname(serverName); err != nil {
+		status.addWarn("server certificate does not cover target admin URL %s (hostname/IP %s): %v", normalized, serverName, err)
+		return
+	}
+	status.addOK("server certificate covers target admin URL %s", normalized)
+}
+
+func hostnameFromURL(raw string) (string, error) {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "", err
+	}
+	host := strings.TrimSpace(parsed.Hostname())
+	if host == "" {
+		return "", fmt.Errorf("missing hostname")
+	}
+	return host, nil
+}
+
+func checkServerCertSANs(status *doctorStatus, certsDir string) {
+	configPath := filepath.Join(filepath.Dir(certsDir), "config", "config.yaml")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		status.addWarn("could not read config for SAN verification: %v", err)
+		return
+	}
+
+	var cfg struct {
+		Security struct {
+			TLS iketconfig.TLSConfig `yaml:"tls"`
+		} `yaml:"security"`
+	}
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		status.addWarn("could not parse config for SAN verification: %v", err)
+		return
+	}
+
+	expectedNames := iketconfig.EffectiveServerNames(cfg.Security.TLS)
+	expectedIPs := iketconfig.EffectiveServerIPs(cfg.Security.TLS)
+
+	certPath := filepath.Join(certsDir, "server.crt")
+	pemBytes, err := os.ReadFile(certPath)
+	if err != nil {
+		status.addWarn("server certificate SAN verification skipped; could not read %s: %v", certPath, err)
+		return
+	}
+	block, _ := pem.Decode(pemBytes)
+	if block == nil {
+		status.addWarn("server certificate SAN verification skipped; invalid PEM in %s", certPath)
+		return
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		status.addWarn("server certificate SAN verification skipped; parse failed for %s: %v", certPath, err)
+		return
+	}
+
+	missingNames := []string{}
+	for _, name := range expectedNames {
+		if err := cert.VerifyHostname(name); err != nil {
+			missingNames = append(missingNames, name)
+		}
+	}
+	missingIPs := []string{}
+	for _, ip := range expectedIPs {
+		if err := cert.VerifyHostname(ip.String()); err != nil {
+			missingIPs = append(missingIPs, ip.String())
+		}
+	}
+
+	if len(missingNames) == 0 && len(missingIPs) == 0 {
+		status.addOK("server certificate SANs cover configured names=%v ips=%v", expectedNames, stringifyIPs(expectedIPs))
+		return
+	}
+
+	status.addWarn("server certificate SAN mismatch: configured names=%v ips=%v, missing names=%v missing ips=%v. Regenerate server.crt or update security.tls.serverNames/serverIPs", expectedNames, stringifyIPs(expectedIPs), missingNames, missingIPs)
+}
+
+func stringifyIPs(ips []net.IP) []string {
+	out := make([]string, 0, len(ips))
+	for _, ip := range ips {
+		out = append(out, ip.String())
+	}
+	return out
 }
 
 func finishDoctor(status *doctorStatus, commandName string) error {

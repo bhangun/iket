@@ -1,8 +1,11 @@
 package main
 
 import (
+	"errors"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -89,5 +92,17 @@ func TestTopLevelCommandName(t *testing.T) {
 
 	if got := topLevelCommandName(docker); got != "setup" {
 		t.Fatalf("expected top-level command name setup, got %q", got)
+	}
+}
+
+func TestAnnotateVerifyContextErrorAddsSANHint(t *testing.T) {
+	ctx := Context{ServerURL: "https://103.16.199.4:8443"}
+	err := annotateVerifyContextError(ctx, &url.Error{
+		Op:  "Get",
+		URL: ctx.ServerURL,
+		Err: errors.New(`tls: failed to verify certificate: x509: certificate is valid for 127.0.0.1, not 103.16.199.4`),
+	})
+	if !strings.Contains(err.Error(), "serverNames/serverIPs") {
+		t.Fatalf("expected SAN guidance in error, got: %v", err)
 	}
 }

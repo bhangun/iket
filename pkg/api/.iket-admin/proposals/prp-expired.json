@@ -1,0 +1,88 @@
+{
+  "id": "prp-expired",
+  "action": "services_replace",
+  "status": "expired",
+  "canary_last_reconciled": "0001-01-01T00:00:00Z",
+  "canary_next_reconcile": "0001-01-01T00:00:00Z",
+  "shadow_last_verified_at": "0001-01-01T00:00:00Z",
+  "shadow_ready_at": "0001-01-01T00:00:00Z",
+  "created_at": "2026-05-18T04:56:22.235357Z",
+  "not_before": "0001-01-01T00:00:00Z",
+  "reviewed_at": "0001-01-01T00:00:00Z",
+  "applied_at": "0001-01-01T00:00:00Z",
+  "expired_at": "2026-05-18T06:56:22.235358Z",
+  "expiration_reason": "proposal exceeded max age of 1h0m0s",
+  "config": {
+    "Server": {
+      "Port": 8080,
+      "ReadTimeout": "",
+      "WriteTimeout": "",
+      "IdleTimeout": "",
+      "PluginsDir": "",
+      "EnableLogging": false,
+      "TLS": {
+        "Enabled": false,
+        "Port": 0,
+        "HTTP3Enabled": false,
+        "HTTP3Port": 0,
+        "HTTP3Datagrams": false,
+        "EnrollmentPort": 0,
+        "EnrollmentMaxActive": 0,
+        "CertFile": "",
+        "KeyFile": "",
+        "ClientCAFile": "",
+        "ClientAuthType": "",
+        "MinVersion": "",
+        "Ciphers": null,
+        "ServerNames": null,
+        "ServerIPs": null,
+        "AutoGenerate": null,
+        "GenerateSharedClient": null
+      }
+    },
+    "Security": {
+      "TLS": {
+        "Enabled": false,
+        "Port": 0,
+        "HTTP3Enabled": false,
+        "HTTP3Port": 0,
+        "HTTP3Datagrams": false,
+        "EnrollmentPort": 0,
+        "EnrollmentMaxActive": 0,
+        "CertFile": "",
+        "KeyFile": "",
+        "ClientCAFile": "",
+        "ClientAuthType": "",
+        "MinVersion": "",
+        "Ciphers": null,
+        "ServerNames": null,
+        "ServerIPs": null,
+        "AutoGenerate": null,
+        "GenerateSharedClient": null
+      },
+      "EnableBasicAuth": false,
+      "BasicAuthUsers": null,
+      "IPWhitelist": null,
+      "Headers": null,
+      "Clients": null,
+      "Jwt": {
+        "Enabled": false,
+        "Secret": "",
+        "Algorithms": null,
+        "PublicKeyFile": "",
+        "Required": false
+      },
+      "MutationPolicy": {
+        "proposalQueue": {
+          "defaultUrgency": {},
+          "notifications": {}
+        },
+        "policyAlertNotifications": {}
+      },
+      "NotificationWebhooks": null
+    },
+    "Storage": {},
+    "Services": null,
+    "Plugins": null
+  }
+}
