@@ -1,0 +1,50 @@
+package gateway
+
+import (
+	"context"
+	"crypto/tls"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
+
+type http3TransportStub struct {
+	setHeaders func(http.Header) error
+}
+
+func (s *http3TransportStub) ListenAndServe() error { return nil }
+
+func (s *http3TransportStub) Shutdown(context.Context) error { return nil }
+
+func (s *http3TransportStub) SetQUICHeaders(h http.Header) error {
+	if s.setHeaders != nil {
+		return s.setHeaders(h)
+	}
+	return nil
+}
+
+func TestWrapHandlerWithHTTP3AdvertisementOnlyAddsAltSvcForTLSRequests(t *testing.T) {
+	wrapped := wrapHandlerWithHTTP3Advertisement(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}), &http3TransportStub{
+		setHeaders: func(h http.Header) error {
+			h.Set("Alt-Svc", `h3=":8443"; ma=2592000`)
+			return nil
+		},
+	})
+
+	tlsReq := httptest.NewRequest(http.MethodGet, "https://gateway.local/auth", nil)
+	tlsReq.TLS = &tls.ConnectionState{}
+	tlsRec := httptest.NewRecorder()
+	wrapped.ServeHTTP(tlsRec, tlsReq)
+	if got := tlsRec.Header().Get("Alt-Svc"); got == "" {
+		t.Fatalf("expected Alt-Svc header on TLS request")
+	}
+
+	plainReq := httptest.NewRequest(http.MethodGet, "http://gateway.local/auth", nil)
+	plainRec := httptest.NewRecorder()
+	wrapped.ServeHTTP(plainRec, plainReq)
+	if got := plainRec.Header().Get("Alt-Svc"); got != "" {
+		t.Fatalf("expected no Alt-Svc header on plain HTTP request, got %q", got)
+	}
+}

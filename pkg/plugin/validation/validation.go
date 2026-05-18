@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	coreerrors "github.com/bhangun/iket/pkg/core/errors"
 	"github.com/bhangun/iket/pkg/plugin"
 )
 
@@ -95,7 +96,7 @@ func (v *ValidationPlugin) validateRequest(r *http.Request) error {
 
 	// Validate request body
 	if err := v.validateRequestBody(r); err != nil {
-		return fmt.Errorf("request body validation failed: %w", err)
+		return coreerrors.NewConfigError("request body validation failed", err)
 	}
 
 	return nil
@@ -109,7 +110,7 @@ func (v *ValidationPlugin) validateRequestBody(r *http.Request) error {
 	// Read body
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		return fmt.Errorf("failed to read request body: %w", err)
+		return coreerrors.NewValidationError("request.body", "failed to read request body")
 	}
 
 	// Restore body for downstream handlers
@@ -122,7 +123,7 @@ func (v *ValidationPlugin) validateRequestBody(r *http.Request) error {
 	// Basic JSON validation
 	var jsonData interface{}
 	if err := json.Unmarshal(body, &jsonData); err != nil {
-		return fmt.Errorf("invalid JSON in request body: %w", err)
+		return coreerrors.NewCodeError(coreerrors.CodeValidationError, "invalid JSON in request body", err)
 	}
 
 	// Additional validation can be added here
@@ -158,7 +159,7 @@ func (v *ValidationPlugin) Tags() map[string]string {
 func (v *ValidationPlugin) Health() error {
 	// Validation plugin is always healthy if enabled
 	if !v.enabled {
-		return fmt.Errorf("validation plugin is disabled")
+		return coreerrors.NewCodeError(coreerrors.CodePluginUnsupported, "validation plugin is disabled", nil)
 	}
 	return nil
 }

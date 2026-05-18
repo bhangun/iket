@@ -132,11 +132,35 @@ security:
       window: "5m"
       minCount: 3
       minSeverity: "warning"
+    limitAlertNotifications:
+      enabled: false
+      interval: "5m"
+      minNotificationInterval: "2m"
+      onlyOnChange: true
+      window: "5m"
+      minCount: 3
+      minSeverity: "warning"
+      limitTypePolicies:
+        concurrency_queue_full:
+          warningCount: 2
+          elevatedCount: 3
+          criticalCount: 4
+  limitAlertBucketClasses:
+    vip-jwt:
+      keyType: "jwt_sub"
+      bucketRegex: "^vip-"
+  limitAlertProfiles:
+    vip-jwt-buckets:
+      minLimitAlertSeverity: "critical"
+      limitAlertTypes: ["concurrency_queue_full"]
+      limitAlertKeyTypes: ["jwt_sub"]
+      limitAlertBucketClasses: ["vip-jwt"]
+      limitAlertCooldown: "30m"
   notificationWebhooks:
     - name: "ops-events"
       url: "https://ops.example.com/hooks/iket"
       format: "slack"
-      events: ["proposal.applied", "proposal.canary_aborted", "proposal.digest", "proposal.sla_stage_changed", "proposal.sla_resolved", "gateway.policy_alert_digest", "gateway.policy_alert", "gateway.policy_alert_opened", "gateway.policy_alert_stage_changed", "gateway.policy_alert_resolved"]
+      events: ["proposal.applied", "proposal.canary_aborted", "proposal.digest", "proposal.sla_stage_changed", "proposal.sla_resolved", "gateway.limit_alert_digest", "gateway.limit_alert", "gateway.limit_alert_opened", "gateway.limit_alert_stage_changed", "gateway.limit_alert_resolved", "gateway.policy_alert_digest", "gateway.policy_alert", "gateway.policy_alert_opened", "gateway.policy_alert_stage_changed", "gateway.policy_alert_resolved"]
       environments: ["prod", "staging"]
       timeout: "3s"
       retryCount: 2
@@ -146,8 +170,14 @@ security:
       timestampHeader: "X-Iket-Timestamp"
     - name: "ops-escalation"
       url: "https://pager.example.com/hooks/iket"
-      events: ["proposal.sla_breach"]
+      events: ["proposal.sla_breach", "gateway.limit_alert"]
       environments: ["prod"]
+      limitAlertProfile: "vip-jwt-buckets"
+      minLimitAlertSeverity: "critical"
+      limitAlertTypes: ["concurrency_queue_full"]
+      limitAlertKeyTypes: ["jwt_sub"]
+      limitAlertBucketClasses: ["vip-jwt"]
+      limitAlertCooldown: "30m"
       minSLABreachTier: "critical"
       minSLABreachCount: 2
       minConsecutiveSLABreaches: 3
@@ -275,11 +305,35 @@ security:
       window: "5m"
       minCount: 3
       minSeverity: "warning"
+    limitAlertNotifications:
+      enabled: false
+      interval: "5m"
+      minNotificationInterval: "2m"
+      onlyOnChange: true
+      window: "5m"
+      minCount: 3
+      minSeverity: "warning"
+      limitTypePolicies:
+        concurrency_queue_full:
+          warningCount: 2
+          elevatedCount: 3
+          criticalCount: 4
+  limitAlertBucketClasses:
+    vip-jwt:
+      keyType: "jwt_sub"
+      bucketRegex: "^vip-"
+  limitAlertProfiles:
+    vip-jwt-buckets:
+      minLimitAlertSeverity: "critical"
+      limitAlertTypes: ["concurrency_queue_full"]
+      limitAlertKeyTypes: ["jwt_sub"]
+      limitAlertBucketClasses: ["vip-jwt"]
+      limitAlertCooldown: "30m"
   notificationWebhooks:
     - name: "ops-events"
       url: "https://ops.example.com/hooks/iket"
       format: "slack"
-      events: ["proposal.applied", "proposal.canary_aborted", "proposal.digest", "proposal.sla_stage_changed", "proposal.sla_resolved", "gateway.policy_alert_digest", "gateway.policy_alert", "gateway.policy_alert_opened", "gateway.policy_alert_stage_changed", "gateway.policy_alert_resolved"]
+      events: ["proposal.applied", "proposal.canary_aborted", "proposal.digest", "proposal.sla_stage_changed", "proposal.sla_resolved", "gateway.limit_alert_digest", "gateway.limit_alert", "gateway.limit_alert_opened", "gateway.limit_alert_stage_changed", "gateway.limit_alert_resolved", "gateway.policy_alert_digest", "gateway.policy_alert", "gateway.policy_alert_opened", "gateway.policy_alert_stage_changed", "gateway.policy_alert_resolved"]
       environments: ["prod", "staging"]
       timeout: "3s"
       retryCount: 2
@@ -289,8 +343,14 @@ security:
       timestampHeader: "X-Iket-Timestamp"
     - name: "ops-escalation"
       url: "https://pager.example.com/hooks/iket"
-      events: ["proposal.sla_breach"]
+      events: ["proposal.sla_breach", "gateway.limit_alert"]
       environments: ["prod"]
+      limitAlertProfile: "vip-jwt-buckets"
+      minLimitAlertSeverity: "critical"
+      limitAlertTypes: ["concurrency_queue_full"]
+      limitAlertKeyTypes: ["jwt_sub"]
+      limitAlertBucketClasses: ["vip-jwt"]
+      limitAlertCooldown: "30m"
       minSLABreachTier: "critical"
       minSLABreachCount: 2
       minConsecutiveSLABreaches: 3

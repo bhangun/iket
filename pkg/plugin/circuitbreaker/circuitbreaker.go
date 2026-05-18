@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	coreerrors "github.com/bhangun/iket/pkg/core/errors"
 	"github.com/bhangun/iket/pkg/plugin"
 )
 
@@ -219,7 +220,7 @@ func (c *CircuitBreakerPlugin) Health() error {
 
 	// Circuit breaker is healthy if it's not stuck in open state for too long
 	if c.state == StateOpen && time.Since(c.lastFailureTime) > c.windowSize*2 {
-		return fmt.Errorf("circuit breaker stuck in open state")
+		return coreerrors.NewCodeError(coreerrors.CodeServiceUnavailable, "circuit breaker stuck in open state", nil)
 	}
 	return nil
 }

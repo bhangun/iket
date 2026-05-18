@@ -62,11 +62,50 @@ security:
       window: "5m"
       minCount: 3
       minSeverity: "warning"
+    limitAlertNotifications:
+      enabled: false
+      interval: "5m"
+      minNotificationInterval: "2m"
+      onlyOnChange: true
+      window: "5m"
+      minCount: 3
+      minSeverity: "warning"
+      limitTypePolicies:
+        concurrency_queue_full:
+          warningCount: 2
+          elevatedCount: 3
+          criticalCount: 4
+  limitAlertBucketClasses:
+    vip-jwt:
+      keyType: "jwt_sub"
+      bucketRegex: "^vip-"
+  limiterClassPresets:
+    vip-jwt:
+      bucketClass: "vip-jwt"
+      rateRequestsPerSecond: 20
+      rateBurst: 40
+      concurrencyMaxInFlight: 16
+      concurrencyQueueTimeout: "250ms"
+      concurrencyMaxQueueDepth: 32
+      alertMinCount: 2
+      alertMinSeverity: "critical"
+      alertLimitTypePolicies:
+        concurrency_queue_full:
+          warningCount: 2
+          elevatedCount: 2
+          criticalCount: 2
+  limitAlertProfiles:
+    vip-jwt-buckets:
+      minLimitAlertSeverity: "critical"
+      limitAlertTypes: ["concurrency_queue_full"]
+      limitAlertKeyTypes: ["jwt_sub"]
+      limitAlertBucketClasses: ["vip-jwt"]
+      limitAlertCooldown: "30m"
   notificationWebhooks:
     - name: "ops-events"
       url: "https://ops.example.com/hooks/iket"
       format: "slack"
-      events: ["proposal.applied", "proposal.canary_aborted", "proposal.digest", "proposal.sla_stage_changed", "proposal.sla_resolved", "gateway.policy_alert_digest", "gateway.policy_alert", "gateway.policy_alert_opened", "gateway.policy_alert_stage_changed", "gateway.policy_alert_resolved"]
+      events: ["proposal.applied", "proposal.canary_aborted", "proposal.digest", "proposal.sla_stage_changed", "proposal.sla_resolved", "gateway.limit_alert_digest", "gateway.limit_alert", "gateway.limit_alert_opened", "gateway.limit_alert_stage_changed", "gateway.limit_alert_resolved", "gateway.policy_alert_digest", "gateway.policy_alert", "gateway.policy_alert_opened", "gateway.policy_alert_stage_changed", "gateway.policy_alert_resolved"]
       environments: ["prod", "staging"]
       timeout: "3s"
       retryCount: 2
@@ -76,8 +115,14 @@ security:
       timestampHeader: "X-Iket-Timestamp"
     - name: "ops-escalation"
       url: "https://pager.example.com/hooks/iket"
-      events: ["proposal.sla_breach"]
+      events: ["proposal.sla_breach", "gateway.limit_alert"]
       environments: ["prod"]
+      limitAlertProfile: "vip-jwt-buckets"
+      minLimitAlertSeverity: "critical"
+      limitAlertTypes: ["concurrency_queue_full"]
+      limitAlertKeyTypes: ["jwt_sub"]
+      limitAlertBucketClasses: ["vip-jwt"]
+      limitAlertCooldown: "30m"
       minSLABreachTier: "critical"
       minSLABreachCount: 2
       minConsecutiveSLABreaches: 3
@@ -92,12 +137,25 @@ storage:
   postgres_url: "${IKET_POSTGRES_URL:-postgres://iket:iket@127.0.0.1:55432/iket?sslmode=disable}"
   mirror_files: true
 
+aiPolicyPresets:
+  org-safe-agent:
+    allowedModels: ["gpt-4.1-mini", "gpt-4.1"]
+    allowedUpstreamHosts: ["api.openai.com", "api.anthropic.com"]
+    requiredRequestHeaders: ["X-Agent-Session"]
+
 services:
   - version: 1
     services:
       - name: "Identity Service"
         description: "Identity & registration services"
         host: "http://127.0.0.1:7101"
+        aiPolicyPresets:
+          safe-agent:
+            allowedModels: ["gpt-4.1-mini", "gpt-4.1"]
+            allowedToolNames: ["web_search", "file_lookup"]
+            requiredRequestHeaders: ["X-Agent-Session"]
+            maxInputTokens: 4096
+            allowedUpstreamHosts: ["api.openai.com", "api.anthropic.com"]
         tags: ["public", "auth"]
         group: "miku"
         routes:
@@ -155,19 +213,17 @@ services:
             responseRedactHeaders: ["Authorization", "Set-Cookie"]
             maxRequestBodyBytes: 65536
             maxResponseBodyBytes: 262144
-            allowedModels: ["gpt-4.1-mini", "gpt-4.1"]
+            aiPolicyPreset: "org-safe-agent"
+            aiPolicyPresetChain: ["safe-agent"]
             modelField: "model"
-            allowedToolNames: ["web_search", "file_lookup"]
             toolField: "tools[].name"
             maxMessages: 12
             messagesField: "messages"
             maxToolCalls: 4
             toolCallsField: "tools"
-            maxInputTokens: 4096
             inputTokensField: "max_prompt_tokens"
             maxOutputTokens: 512
             outputTokensField: "max_tokens"
-            allowedUpstreamHosts: ["api.openai.com", "api.anthropic.com"]
             responseJSONFields:
               meta.realm: "{{realm}}"
               meta.request_id: "{{request_id}}"
@@ -190,6 +246,32 @@ services:
             retryBackoff: "100ms"
             retryJitter: "25ms"
             retryStatusCodes: [502, 503, 504]
+            rateLimitPolicy:
+              requestsPerSecond: 10
+              burst: 20
+              keyBy: "header"
+              keyHeader: "X-Agent-Session"
+              exemptMethods: ["OPTIONS"]
+              classPolicies:
+                - preset: "vip-jwt"
+            concurrencyLimitPolicy:
+              maxInFlight: 8
+              keyBy: "jwt_sub"
+              queueTimeout: "150ms"
+              maxQueueDepth: 16
+              exemptMethods: ["OPTIONS"]
+              classPolicies:
+                - preset: "vip-jwt"
+            limitAlertPolicy:
+              minCount: 2
+              groupBy: "bucket"
+              bucketPolicies:
+                - preset: "vip-jwt"
+              limitTypePolicies:
+                concurrency_queue_full:
+                  warningCount: 2
+                  elevatedCount: 3
+                  criticalCount: 3
             hedgeDelay: "20ms"
             adaptiveLatencyRouting: true
             shadowTrafficPercent: 10
@@ -220,6 +302,67 @@ services:
             protocol: "graphql"
             graphqlAllowIntrospection: false
             graphqlRequirePersistedQuery: true
+            graphqlAllowedPersistedQueries: ["abc123", "def456"]
+            graphqlAllowedOperations: ["ChatQuery", "SearchQuery"]
+            graphqlAllowedVariables: ["tenantId", "workspaceId"]
+            graphqlRequiredVariables: ["tenantId"]
+            graphqlVariableRegex:
+              tenantId: "^tenant_[0-9]+$"
+            graphqlVariableAllowedValues:
+              mode: ["safe", "preview"]
+            graphqlOperationPresets:
+              safe-chat:
+                requiredRequestHeaders: ["X-Agent-Session"]
+                allowedModels: ["gpt-4.1"]
+                allowedToolNames: ["web_search"]
+                maxInputTokens: 4096
+                inputTokensField: "max_prompt_tokens"
+            graphqlOperationPolicies:
+              ChatQuery:
+                preset: "safe-chat"
+                requiredRequestHeaderRegex:
+                  X-Agent-Session: "^sess-[a-z0-9]+$"
+                allowedUpstreamHosts: ["api.openai.com"]
+                maxMessages: 4
+                messagesField: "messages"
+                maxToolCalls: 2
+                toolCallsField: "tools"
+                requestBodyRequireRegex: ["SAFE_SYSTEM_PROMPT"]
+                requestPIIBlockTypes: ["api_key"]
+                maxOutputTokens: 512
+                outputTokensField: "max_tokens"
+                allowedPersistedQueries: ["chat-hash"]
+                maxDepth: 3
+                requestHeaders:
+                  X-Operation: "chat"
+                successResponseFields:
+                  operation: "chat"
+                  status: "ok"
+                responseHeaders:
+                  X-Operation: "chat"
+                responseTransformWhenHeaders:
+                  Content-Type: "application/problem+json"
+                responseJSONFields:
+                  meta.operation: "chat"
+              SearchQuery:
+                maxFields: 3
+                queryParams:
+                  mode: "safe"
+                transformWhenHeaders:
+                  X-Transform-Mode: "beta"
+                requiredVariables: ["mode"]
+                variableAllowedValues:
+                  mode: ["safe"]
+                responseTransformStatusClasses: ["4xx"]
+                responseBodyRequireRegex: ["SAFE_OUTPUT"]
+                errorResponseFields:
+                  operation: "search"
+                  status: "blocked"
+                removeResponseHeaders: ["X-Upstream-Legacy"]
+                responseRedactJSONFields: ["token"]
+            graphqlOperationNameRequired: true
+            graphqlMaxDepth: 3
+            graphqlMaxFields: 25
             maxRequestBodyBytes: 262144
             allowedUpstreamHosts: ["api.openai.com"]
             backend:

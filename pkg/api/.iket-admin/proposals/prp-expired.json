@@ -6,11 +6,11 @@
   "canary_next_reconcile": "0001-01-01T00:00:00Z",
   "shadow_last_verified_at": "0001-01-01T00:00:00Z",
   "shadow_ready_at": "0001-01-01T00:00:00Z",
-  "created_at": "2026-05-18T04:56:22.235357Z",
+  "created_at": "2026-05-18T13:07:20.760965Z",
   "not_before": "0001-01-01T00:00:00Z",
   "reviewed_at": "0001-01-01T00:00:00Z",
   "applied_at": "0001-01-01T00:00:00Z",
-  "expired_at": "2026-05-18T06:56:22.235358Z",
+  "expired_at": "2026-05-18T15:07:20.760966Z",
   "expiration_reason": "proposal exceeded max age of 1h0m0s",
   "config": {
     "Server": {
@@ -77,7 +77,9 @@
           "defaultUrgency": {},
           "notifications": {}
         },
-        "policyAlertNotifications": {}
+        "policyAlertNotifications": {},
+        "limitAlertNotifications": {},
+        "limitClassAlertNotifications": {}
       },
       "NotificationWebhooks": null
     },

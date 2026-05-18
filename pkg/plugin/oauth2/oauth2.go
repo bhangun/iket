@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	coreerrors "github.com/bhangun/iket/pkg/core/errors"
 	"github.com/bhangun/iket/pkg/plugin"
 )
 
@@ -101,11 +102,11 @@ func (o *OAuth2Plugin) Initialize(config map[string]interface{}) error {
 
 	// Validate required configuration
 	if o.introspectURL == "" {
-		return fmt.Errorf("introspect_url is required for OAuth2 plugin")
+		return coreerrors.NewRequiredFieldError("introspect_url is required for OAuth2 plugin")
 	}
 
 	if o.clientID == "" || o.clientSecret == "" {
-		return fmt.Errorf("client_id and client_secret are required for OAuth2 plugin")
+		return coreerrors.NewRequiredFieldError("client_id and client_secret are required for OAuth2 plugin")
 	}
 
 	return nil
@@ -150,11 +151,11 @@ func (o *OAuth2Plugin) validateToken(r *http.Request) (*Claims, error) {
 	// Extract token from Authorization header
 	authHeader := r.Header.Get("Authorization")
 	if authHeader == "" {
-		return nil, fmt.Errorf("missing authorization header")
+		return nil, coreerrors.NewCodeError(coreerrors.CodeAuthenticationRequired, "missing authorization header", nil)
 	}
 
 	if !strings.HasPrefix(authHeader, "Bearer ") {
-		return nil, fmt.Errorf("invalid authorization header format")
+		return nil, coreerrors.NewCodeError(coreerrors.CodeUnauthorized, "invalid authorization header format", nil)
 	}
 
 	tokenString := strings.TrimPrefix(authHeader, "Bearer ")
@@ -162,11 +163,11 @@ func (o *OAuth2Plugin) validateToken(r *http.Request) (*Claims, error) {
 	// Introspect token with OAuth2 server
 	introspection, err := o.introspectToken(tokenString)
 	if err != nil {
-		return nil, fmt.Errorf("failed to introspect token: %w", err)
+		return nil, coreerrors.NewCodeError(coreerrors.CodeUpstreamError, "failed to introspect token", err)
 	}
 
 	if !introspection.Active {
-		return nil, fmt.Errorf("token is not active")
+		return nil, coreerrors.NewCodeError(coreerrors.CodeUnauthorized, "token is not active", nil)
 	}
 
 	// Convert introspection response to claims
@@ -194,7 +195,7 @@ func (o *OAuth2Plugin) introspectToken(token string) (*IntrospectionResponse, er
 	// Create request
 	req, err := http.NewRequest("POST", o.introspectURL, strings.NewReader(data.Encode()))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return nil, coreerrors.NewConfigError("failed to create request", err)
 	}
 
 	// Set headers
@@ -204,18 +205,18 @@ func (o *OAuth2Plugin) introspectToken(token string) (*IntrospectionResponse, er
 	// Make request
 	resp, err := o.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to make request: %w", err)
+		return nil, coreerrors.NewCodeError(coreerrors.CodeUpstreamError, "failed to make request", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("introspection server returned status: %d", resp.StatusCode)
+		return nil, coreerrors.NewCodeError(coreerrors.CodeUpstreamError, fmt.Sprintf("introspection server returned status: %d", resp.StatusCode), nil)
 	}
 
 	// Parse response
 	var introspection IntrospectionResponse
 	if err := json.NewDecoder(resp.Body).Decode(&introspection); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
+		return nil, coreerrors.NewCodeError(coreerrors.CodeUpstreamError, "failed to decode response", err)
 	}
 
 	return &introspection, nil
@@ -259,18 +260,18 @@ func (o *OAuth2Plugin) Health() error {
 	defer o.mu.RUnlock()
 
 	if !o.enabled {
-		return fmt.Errorf("OAuth2 plugin is disabled")
+		return coreerrors.NewCodeError(coreerrors.CodePluginUnsupported, "OAuth2 plugin is disabled", nil)
 	}
 
 	// Check if introspection URL is accessible
 	if o.introspectURL == "" {
-		return fmt.Errorf("introspection URL not configured")
+		return coreerrors.NewRequiredFieldError("introspection URL not configured")
 	}
 
 	// Try to make a test request to the introspection endpoint
 	testReq, err := http.NewRequest("POST", o.introspectURL, strings.NewReader("token=test"))
 	if err != nil {
-		return fmt.Errorf("failed to create test request: %w", err)
+		return coreerrors.NewConfigError("failed to create test request", err)
 	}
 
 	testReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -278,13 +279,13 @@ func (o *OAuth2Plugin) Health() error {
 
 	resp, err := o.httpClient.Do(testReq)
 	if err != nil {
-		return fmt.Errorf("introspection endpoint not accessible: %w", err)
+		return coreerrors.NewCodeError(coreerrors.CodeUpstreamError, "introspection endpoint not accessible", err)
 	}
 	defer resp.Body.Close()
 
 	// We expect a 400 or 401 for invalid token, but not 500+ (server error)
 	if resp.StatusCode >= 500 {
-		return fmt.Errorf("introspection server error: %d", resp.StatusCode)
+		return coreerrors.NewCodeError(coreerrors.CodeUpstreamError, fmt.Sprintf("introspection server error: %d", resp.StatusCode), nil)
 	}
 
 	return nil

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	coreerrors "github.com/bhangun/iket/pkg/core/errors"
 	"github.com/bhangun/iket/pkg/plugin"
 )
 
@@ -106,7 +107,7 @@ func (m *MTLSPlugin) Initialize(config map[string]interface{}) error {
 
 	// Load CA certificate pool
 	if err := m.loadCACertPool(); err != nil {
-		return fmt.Errorf("failed to load CA certificate pool: %w", err)
+		return coreerrors.NewConfigError("failed to load CA certificate pool", err)
 	}
 
 	return nil
@@ -114,17 +115,17 @@ func (m *MTLSPlugin) Initialize(config map[string]interface{}) error {
 
 func (m *MTLSPlugin) loadCACertPool() error {
 	if m.caFile == "" {
-		return fmt.Errorf("ca_file is required for mTLS plugin")
+		return coreerrors.NewRequiredFieldError("ca_file is required for mTLS plugin")
 	}
 
 	caCert, err := os.ReadFile(m.caFile)
 	if err != nil {
-		return fmt.Errorf("failed to read CA certificate: %w", err)
+		return coreerrors.NewConfigError("failed to read CA certificate", err)
 	}
 
 	m.caPool = x509.NewCertPool()
 	if !m.caPool.AppendCertsFromPEM(caCert) {
-		return fmt.Errorf("failed to append CA certificate to pool")
+		return coreerrors.NewCodeError(coreerrors.CodeCertificatePEMInvalid, "failed to append CA certificate to pool", nil)
 	}
 
 	return nil
@@ -168,12 +169,12 @@ func (m *MTLSPlugin) shouldSkipValidation(path string) bool {
 func (m *MTLSPlugin) validateClientCert(r *http.Request) (*ClientCertInfo, error) {
 	// Check if TLS connection exists
 	if r.TLS == nil {
-		return nil, fmt.Errorf("no TLS connection")
+		return nil, coreerrors.NewCodeError(coreerrors.CodeUnauthorized, "no TLS connection", nil)
 	}
 
 	// Check if client certificate is present
 	if len(r.TLS.PeerCertificates) == 0 {
-		return nil, fmt.Errorf("no client certificate provided")
+		return nil, coreerrors.NewCodeError(coreerrors.CodeUnauthorized, "no client certificate provided", nil)
 	}
 
 	clientCert := r.TLS.PeerCertificates[0]
@@ -193,7 +194,7 @@ func (m *MTLSPlugin) validateClientCert(r *http.Request) (*ClientCertInfo, error
 
 	// Verify the certificate chain
 	if _, err := clientCert.Verify(opts); err != nil {
-		return nil, fmt.Errorf("certificate verification failed: %w", err)
+		return nil, coreerrors.NewCodeError(coreerrors.CodeUnauthorized, "certificate verification failed", err)
 	}
 
 	// Check allowed Common Names
@@ -206,7 +207,7 @@ func (m *MTLSPlugin) validateClientCert(r *http.Request) (*ClientCertInfo, error
 			}
 		}
 		if !cnAllowed {
-			return nil, fmt.Errorf("common name not allowed: %s", clientCert.Subject.CommonName)
+			return nil, coreerrors.NewCodeError(coreerrors.CodePermissionDenied, fmt.Sprintf("common name not allowed: %s", clientCert.Subject.CommonName), nil)
 		}
 	}
 
@@ -225,7 +226,7 @@ func (m *MTLSPlugin) validateClientCert(r *http.Request) (*ClientCertInfo, error
 			}
 		}
 		if !ouAllowed {
-			return nil, fmt.Errorf("organizational unit not allowed")
+			return nil, coreerrors.NewCodeError(coreerrors.CodePermissionDenied, "organizational unit not allowed", nil)
 		}
 	}
 
@@ -291,19 +292,19 @@ func (m *MTLSPlugin) Health() error {
 	defer m.mu.RUnlock()
 
 	if !m.enabled {
-		return fmt.Errorf("mTLS plugin is disabled")
+		return coreerrors.NewCodeError(coreerrors.CodePluginUnsupported, "mTLS plugin is disabled", nil)
 	}
 
 	// Check if CA file exists
 	if m.caFile != "" {
 		if _, err := os.Stat(m.caFile); os.IsNotExist(err) {
-			return fmt.Errorf("CA file not found: %s", m.caFile)
+			return coreerrors.NewConfigError(fmt.Sprintf("CA file not found: %s", m.caFile), nil)
 		}
 	}
 
 	// Check if CA pool is loaded
 	if m.caPool == nil {
-		return fmt.Errorf("CA certificate pool not loaded")
+		return coreerrors.NewConfigError("CA certificate pool not loaded", nil)
 	}
 
 	return nil

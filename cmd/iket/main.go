@@ -147,7 +147,7 @@ func main() {
 	flag.Parse()
 
 	if *printVersion {
-		helper.PrintBanner(version)
+		helper.PrintBannerWithEdition(version, app.CurrentEdition().DisplayName)
 		os.Exit(0)
 	}
 
@@ -187,12 +187,13 @@ func main() {
 	logger := logging.NewLoggerFromEnv()
 	defer logger.Sync()
 
-	helper.PrintBanner(version)
+	edition := app.CurrentEdition()
+	helper.PrintBannerWithEdition(version, edition.DisplayName)
 
 	printFileIfExists("config/config.yaml", "Default Config")
 	printFileIfExists("config/service.yaml", "Default Service Config")
 
-	logger.Info("Iket Gateway version", logging.String("version", version))
+	logger.Info("Iket Gateway version", logging.String("version", version), logging.String("edition", edition.Edition))
 	logger.Info("Starting Iket Gateway")
 	logger.Info("Bootstrap TLS settings",
 		logging.String("cert_file", bootstrapTLS.CertFile),

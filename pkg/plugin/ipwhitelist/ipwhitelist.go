@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	coreerrors "github.com/bhangun/iket/pkg/core/errors"
 	"github.com/bhangun/iket/pkg/plugin"
 )
 
@@ -19,7 +20,7 @@ func (p *IPWhitelistPlugin) Init(config map[string]interface{}) error {
 	p.allowedNets = nil
 	list, ok := config["list"]
 	if !ok {
-		return fmt.Errorf("ip_whitelist: missing 'list' in config")
+		return coreerrors.NewRequiredFieldError("ip_whitelist: missing 'list' in config")
 	}
 
 	var entries []string
@@ -35,7 +36,7 @@ func (p *IPWhitelistPlugin) Init(config map[string]interface{}) error {
 	case string:
 		entries = strings.Split(v, ",")
 	default:
-		return fmt.Errorf("ip_whitelist: invalid 'list' type")
+		return coreerrors.NewCodeError(coreerrors.CodeValidationError, "ip_whitelist: invalid 'list' type", nil)
 	}
 
 	for _, entry := range entries {
@@ -48,7 +49,7 @@ func (p *IPWhitelistPlugin) Init(config map[string]interface{}) error {
 		}
 		_, ipnet, err := net.ParseCIDR(entry)
 		if err != nil {
-			return fmt.Errorf("ip_whitelist: invalid CIDR or IP: %s", entry)
+			return coreerrors.NewCodeError(coreerrors.CodeValidationError, fmt.Sprintf("ip_whitelist: invalid CIDR or IP: %s", entry), err)
 		}
 		p.allowedNets = append(p.allowedNets, ipnet)
 	}

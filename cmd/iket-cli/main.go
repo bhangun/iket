@@ -97,49 +97,64 @@ func topLevelCommandName(cmd *cobra.Command) string {
 
 func isDangerousCommandPath(cmdPath string, args []string) bool {
 	safeCommandPaths := map[string]bool{
-		"iket gateway status":           true,
-		"iket gateway self-test":        true,
-		"iket gateway metrics":          true,
-		"iket gateway system":           true,
-		"iket gateway backends":         true,
-		"iket gateway policy-hits":      true,
-		"iket gateway policy-alerts":    true,
-		"iket gateway shadow-report":    true,
-		"iket gateway shadow-evaluate":  true,
-		"iket simulate":                 true,
-		"iket test":                     true,
-		"iket service list":             true,
-		"iket route list":               true,
-		"iket route get":                true,
-		"iket logs tail":                true,
-		"iket logs list":                true,
-		"iket logs trace":               true,
-		"iket plugin list":              true,
-		"iket plugin get":               true,
-		"iket plugin status":            true,
-		"iket plugin health":            true,
-		"iket plugin diff-config":       true,
-		"iket context list":             true,
-		"iket context test":             true,
-		"iket cert status":              true,
-		"iket cert list-remote":         true,
-		"iket backup list":              true,
-		"iket revision list":            true,
-		"iket revision show":            true,
-		"iket revision diff":            true,
-		"iket notification deliveries":  true,
-		"iket notification show":        true,
-		"iket proposal list":            true,
-		"iket proposal queue":           true,
-		"iket proposal show":            true,
-		"iket proposal readiness":       true,
-		"iket proposal verify":          true,
-		"iket proposal canary status":   true,
-		"iket proposal canary evaluate": true,
-		"iket config diff":              true,
-		"iket service diff":             true,
-		"iket route diff-create":        true,
-		"iket route diff-update":        true,
+		"iket gateway status":                    true,
+		"iket gateway edition":                   true,
+		"iket gateway capabilities":              true,
+		"iket gateway capability":                true,
+		"iket gateway extension":                 true,
+		"iket gateway extensions":                true,
+		"iket gateway self-test":                 true,
+		"iket gateway metrics":                   true,
+		"iket gateway system":                    true,
+		"iket gateway backends":                  true,
+		"iket gateway route-policy":              true,
+		"iket gateway route-policy-diff":         true,
+		"iket gateway limit-hits":                true,
+		"iket gateway limit-buckets":             true,
+		"iket gateway limit-classes":             true,
+		"iket gateway limit-class-alerts":        true,
+		"iket gateway limit-class-incidents":     true,
+		"iket gateway notify-limit-class-alerts": true,
+		"iket gateway limit-alerts":              true,
+		"iket gateway notify-limit-alerts":       true,
+		"iket gateway policy-hits":               true,
+		"iket gateway policy-alerts":             true,
+		"iket gateway shadow-report":             true,
+		"iket gateway shadow-evaluate":           true,
+		"iket simulate":                          true,
+		"iket test":                              true,
+		"iket service list":                      true,
+		"iket route list":                        true,
+		"iket route get":                         true,
+		"iket logs tail":                         true,
+		"iket logs list":                         true,
+		"iket logs trace":                        true,
+		"iket plugin list":                       true,
+		"iket plugin get":                        true,
+		"iket plugin status":                     true,
+		"iket plugin health":                     true,
+		"iket plugin diff-config":                true,
+		"iket context list":                      true,
+		"iket context test":                      true,
+		"iket cert status":                       true,
+		"iket cert list-remote":                  true,
+		"iket backup list":                       true,
+		"iket revision list":                     true,
+		"iket revision show":                     true,
+		"iket revision diff":                     true,
+		"iket notification deliveries":           true,
+		"iket notification show":                 true,
+		"iket proposal list":                     true,
+		"iket proposal queue":                    true,
+		"iket proposal show":                     true,
+		"iket proposal readiness":                true,
+		"iket proposal verify":                   true,
+		"iket proposal canary status":            true,
+		"iket proposal canary evaluate":          true,
+		"iket config diff":                       true,
+		"iket service diff":                      true,
+		"iket route diff-create":                 true,
+		"iket route diff-update":                 true,
 	}
 
 	if cmdPath == "iket gateway config" && len(args) == 0 {
@@ -239,6 +254,125 @@ func initGatewayCmd(rootCmd *cobra.Command) {
 			return nil
 		},
 	})
+
+	gatewayCmd.AddCommand(&cobra.Command{
+		Use:   "edition",
+		Short: "Get gateway edition and capabilities",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			resp, err := apiClient.Do("GET", "/api/v1/gateway/edition", nil)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	})
+
+	var capabilityCategory string
+	capabilitiesCmd := &cobra.Command{
+		Use:   "capabilities",
+		Short: "List active gateway capabilities",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			endpoint := "/api/v1/gateway/capabilities"
+			if strings.TrimSpace(capabilityCategory) != "" {
+				endpoint += "?category=" + url.QueryEscape(capabilityCategory)
+			}
+			resp, err := apiClient.Do("GET", endpoint, nil)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	}
+	capabilitiesCmd.Flags().StringVar(&capabilityCategory, "category", "", "Filter capabilities by category")
+	gatewayCmd.AddCommand(capabilitiesCmd)
+
+	gatewayCmd.AddCommand(&cobra.Command{
+		Use:   "capability <key>",
+		Short: "Check whether the active gateway edition supports a capability",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			resp, err := apiClient.Do("GET", "/api/v1/gateway/capabilities/"+url.PathEscape(args[0]), nil)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	})
+
+	gatewayCmd.AddCommand(&cobra.Command{
+		Use:   "extension <name>",
+		Short: "Get registered management route extension details",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			resp, err := apiClient.Do("GET", "/api/v1/gateway/extensions/"+url.PathEscape(args[0]), nil)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	})
+
+	var extensionCapability string
+	var extensionUnsupportedCapability string
+	var extensionCategory string
+	var extensionTag string
+	var extensionStatus string
+	var extensionsSupported bool
+	var extensionsUnsupported bool
+	extensionsCmd := &cobra.Command{
+		Use:   "extensions",
+		Short: "List registered management route extensions",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if extensionsSupported && extensionsUnsupported {
+				return fmt.Errorf("use only one of --supported or --unsupported")
+			}
+			endpoint := "/api/v1/gateway/extensions"
+			query := url.Values{}
+			if capability := strings.TrimSpace(extensionCapability); capability != "" {
+				query.Set("capability", capability)
+			}
+			if capability := strings.TrimSpace(extensionUnsupportedCapability); capability != "" {
+				query.Set("unsupported_capability", capability)
+			}
+			if category := strings.TrimSpace(extensionCategory); category != "" {
+				query.Set("category", category)
+			}
+			if tag := strings.TrimSpace(extensionTag); tag != "" {
+				query.Set("tag", tag)
+			}
+			if status := strings.TrimSpace(extensionStatus); status != "" {
+				query.Set("support_status", status)
+			}
+			if extensionsSupported {
+				query.Set("supported", "true")
+			}
+			if extensionsUnsupported {
+				query.Set("supported", "false")
+			}
+			if encoded := query.Encode(); encoded != "" {
+				endpoint += "?" + encoded
+			}
+
+			resp, err := apiClient.Do("GET", endpoint, nil)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	}
+	extensionsCmd.Flags().StringVar(&extensionCapability, "capability", "", "Filter extensions by required capability")
+	extensionsCmd.Flags().StringVar(&extensionUnsupportedCapability, "unsupported-capability", "", "Filter extensions blocked by an unsupported capability")
+	extensionsCmd.Flags().StringVar(&extensionCategory, "category", "", "Filter extensions by category")
+	extensionsCmd.Flags().StringVar(&extensionTag, "tag", "", "Filter extensions by tag")
+	extensionsCmd.Flags().StringVar(&extensionStatus, "status", "", "Filter extensions by support status")
+	extensionsCmd.Flags().BoolVar(&extensionsSupported, "supported", false, "Show only extensions supported by the active edition")
+	extensionsCmd.Flags().BoolVar(&extensionsUnsupported, "unsupported", false, "Show only extensions unavailable in the active edition")
+	gatewayCmd.AddCommand(extensionsCmd)
 
 	gatewayCmd.AddCommand(&cobra.Command{
 		Use:   "config",

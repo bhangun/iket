@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 
+	coreerrors "github.com/bhangun/iket/pkg/core/errors"
 	"github.com/bhangun/iket/pkg/plugin"
 	"github.com/golang-jwt/jwt/v4"
 )
@@ -69,7 +70,7 @@ func (j *JWTPlugin) Initialize(config map[string]interface{}) error {
 
 	if publicKeyFile, ok := config["public_key_file"].(string); ok && publicKeyFile != "" {
 		if err := j.loadPublicKey(publicKeyFile); err != nil {
-			return fmt.Errorf("failed to load public key: %w", err)
+			return coreerrors.NewConfigError("failed to load public key", err)
 		}
 	}
 
@@ -99,22 +100,22 @@ func (j *JWTPlugin) Initialize(config map[string]interface{}) error {
 func (j *JWTPlugin) loadPublicKey(filename string) error {
 	data, err := os.ReadFile(filename)
 	if err != nil {
-		return fmt.Errorf("failed to read public key file: %w", err)
+		return coreerrors.NewConfigError("failed to read public key file", err)
 	}
 
 	block, _ := pem.Decode(data)
 	if block == nil {
-		return fmt.Errorf("failed to decode PEM block")
+		return coreerrors.NewCodeError(coreerrors.CodeCertificatePEMInvalid, "failed to decode PEM block", nil)
 	}
 
 	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
 	if err != nil {
-		return fmt.Errorf("failed to parse public key: %w", err)
+		return coreerrors.NewConfigError("failed to parse public key", err)
 	}
 
 	rsaPub, ok := pub.(*rsa.PublicKey)
 	if !ok {
-		return fmt.Errorf("public key is not RSA")
+		return coreerrors.NewConfigError("public key is not RSA", nil)
 	}
 
 	j.publicKey = rsaPub
@@ -160,11 +161,11 @@ func (j *JWTPlugin) validateToken(r *http.Request) (*Claims, error) {
 	// Extract token from Authorization header
 	authHeader := r.Header.Get("Authorization")
 	if authHeader == "" {
-		return nil, fmt.Errorf("missing authorization header")
+		return nil, coreerrors.NewCodeError(coreerrors.CodeAuthenticationRequired, "missing authorization header", nil)
 	}
 
 	if !strings.HasPrefix(authHeader, "Bearer ") {
-		return nil, fmt.Errorf("invalid authorization header format")
+		return nil, coreerrors.NewCodeError(coreerrors.CodeUnauthorized, "invalid authorization header format", nil)
 	}
 
 	tokenString := strings.TrimPrefix(authHeader, "Bearer ")
@@ -172,21 +173,21 @@ func (j *JWTPlugin) validateToken(r *http.Request) (*Claims, error) {
 	// Parse and validate token
 	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, j.getKeyFunc())
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse token: %w", err)
+		return nil, coreerrors.NewCodeError(coreerrors.CodeUnauthorized, "failed to parse token", err)
 	}
 
 	if !token.Valid {
-		return nil, fmt.Errorf("invalid token")
+		return nil, coreerrors.NewCodeError(coreerrors.CodeUnauthorized, "invalid token", nil)
 	}
 
 	claims, ok := token.Claims.(*Claims)
 	if !ok {
-		return nil, fmt.Errorf("invalid claims type")
+		return nil, coreerrors.NewCodeError(coreerrors.CodeUnauthorized, "invalid claims type", nil)
 	}
 
 	// Validate issuer if configured
 	if j.issuer != "" && claims.Issuer != j.issuer {
-		return nil, fmt.Errorf("invalid issuer")
+		return nil, coreerrors.NewCodeError(coreerrors.CodeUnauthorized, "invalid issuer", nil)
 	}
 
 	// Validate audience if configured
@@ -199,7 +200,7 @@ func (j *JWTPlugin) validateToken(r *http.Request) (*Claims, error) {
 			}
 		}
 		if !validAudience {
-			return nil, fmt.Errorf("invalid audience")
+			return nil, coreerrors.NewCodeError(coreerrors.CodeUnauthorized, "invalid audience", nil)
 		}
 	}
 
@@ -219,23 +220,23 @@ func (j *JWTPlugin) getKeyFunc() jwt.Keyfunc {
 			}
 		}
 		if !validAlgo {
-			return nil, fmt.Errorf("unsupported algorithm: %s", algo)
+			return nil, coreerrors.NewCodeError(coreerrors.CodeUnauthorized, fmt.Sprintf("unsupported algorithm: %s", algo), nil)
 		}
 
 		// Return appropriate key based on algorithm
 		switch algo {
 		case "HS256", "HS384", "HS512":
 			if j.secret == "" {
-				return nil, fmt.Errorf("secret key required for HMAC algorithms")
+				return nil, coreerrors.NewRequiredFieldError("secret key required for HMAC algorithms")
 			}
 			return []byte(j.secret), nil
 		case "RS256", "RS384", "RS512":
 			if j.publicKey == nil {
-				return nil, fmt.Errorf("public key required for RSA algorithms")
+				return nil, coreerrors.NewRequiredFieldError("public key required for RSA algorithms")
 			}
 			return j.publicKey, nil
 		default:
-			return nil, fmt.Errorf("unsupported algorithm: %s", algo)
+			return nil, coreerrors.NewCodeError(coreerrors.CodeUnauthorized, fmt.Sprintf("unsupported algorithm: %s", algo), nil)
 		}
 	}
 }
@@ -272,12 +273,12 @@ func (j *JWTPlugin) Health() error {
 	defer j.mu.RUnlock()
 
 	if !j.enabled {
-		return fmt.Errorf("JWT plugin is disabled")
+		return coreerrors.NewCodeError(coreerrors.CodePluginUnsupported, "JWT plugin is disabled", nil)
 	}
 
 	// Check if we have either secret or public key
 	if j.secret == "" && j.publicKey == nil {
-		return fmt.Errorf("neither secret nor public key configured")
+		return coreerrors.NewRequiredFieldError("neither secret nor public key configured")
 	}
 
 	return nil

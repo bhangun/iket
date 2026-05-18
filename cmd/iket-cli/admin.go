@@ -14,8 +14,29 @@ import (
 )
 
 var gatewayPolicyHitsWindow string
+var gatewayLimitHitsWindow string
+var gatewayLimitBucketsWindow string
+var gatewayLimitBucketsMinCount int
+var gatewayLimitClassesWindow string
+var gatewayLimitClassesMinCount int
+var gatewayLimitClassAlertsWindow string
+var gatewayLimitClassAlertsMinCount int
+var gatewayLimitAlertsWindow string
+var gatewayLimitAlertsMinCount int
 var gatewayPolicyAlertsWindow string
 var gatewayPolicyAlertsMinCount int
+var gatewayRoutePolicyPath string
+var gatewayRoutePolicyMethod string
+var gatewayRoutePolicyHeaders []string
+var gatewayRoutePolicyBucketKey string
+var gatewayRoutePolicyDiffFromPath string
+var gatewayRoutePolicyDiffFromMethod string
+var gatewayRoutePolicyDiffFromHeaders []string
+var gatewayRoutePolicyDiffFromBucketKey string
+var gatewayRoutePolicyDiffToPath string
+var gatewayRoutePolicyDiffToMethod string
+var gatewayRoutePolicyDiffToHeaders []string
+var gatewayRoutePolicyDiffToBucketKey string
 
 func initAdminCoverageCmds(rootCmd *cobra.Command) {
 	initGatewayAdminCmds(rootCmd)
@@ -72,6 +93,273 @@ func initGatewayAdminCmds(rootCmd *cobra.Command) {
 			return nil
 		},
 	})
+
+	routePolicyCmd := &cobra.Command{
+		Use:   "route-policy",
+		Short: "Inspect the resolved AI guardrails and preset stack for a matched route",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if strings.TrimSpace(gatewayRoutePolicyPath) == "" {
+				return fmt.Errorf("--path is required")
+			}
+			values := url.Values{}
+			values.Set("path", strings.TrimSpace(gatewayRoutePolicyPath))
+			if strings.TrimSpace(gatewayRoutePolicyMethod) != "" {
+				values.Set("method", strings.ToUpper(strings.TrimSpace(gatewayRoutePolicyMethod)))
+			}
+			if strings.TrimSpace(gatewayRoutePolicyBucketKey) != "" {
+				values.Set("bucket_key", strings.TrimSpace(gatewayRoutePolicyBucketKey))
+			}
+			for _, header := range gatewayRoutePolicyHeaders {
+				if strings.TrimSpace(header) != "" {
+					values.Add("header", strings.TrimSpace(header))
+				}
+			}
+			path := "/api/v1/gateway/route-policy?" + values.Encode()
+			resp, err := apiClient.Do("GET", path, nil)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	}
+	routePolicyCmd.Flags().StringVar(&gatewayRoutePolicyPath, "path", "", "Route path to inspect")
+	routePolicyCmd.Flags().StringVar(&gatewayRoutePolicyMethod, "method", "GET", "HTTP method to match")
+	routePolicyCmd.Flags().StringSliceVar(&gatewayRoutePolicyHeaders, "header", nil, "Optional route-match header in Name:Value format; repeat as needed")
+	routePolicyCmd.Flags().StringVar(&gatewayRoutePolicyBucketKey, "bucket-key", "inspect", "Optional rollout bucket key for percent-gated routes")
+	gatewayCmd.AddCommand(routePolicyCmd)
+
+	routePolicyDiffCmd := &cobra.Command{
+		Use:   "route-policy-diff",
+		Short: "Compare the resolved AI guardrails for two matched routes",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if strings.TrimSpace(gatewayRoutePolicyDiffFromPath) == "" || strings.TrimSpace(gatewayRoutePolicyDiffToPath) == "" {
+				return fmt.Errorf("--from-path and --to-path are required")
+			}
+			values := url.Values{}
+			values.Set("from_path", strings.TrimSpace(gatewayRoutePolicyDiffFromPath))
+			values.Set("to_path", strings.TrimSpace(gatewayRoutePolicyDiffToPath))
+			values.Set("from_method", strings.ToUpper(strings.TrimSpace(gatewayRoutePolicyDiffFromMethod)))
+			values.Set("to_method", strings.ToUpper(strings.TrimSpace(gatewayRoutePolicyDiffToMethod)))
+			if strings.TrimSpace(gatewayRoutePolicyDiffFromBucketKey) != "" {
+				values.Set("from_bucket_key", strings.TrimSpace(gatewayRoutePolicyDiffFromBucketKey))
+			}
+			if strings.TrimSpace(gatewayRoutePolicyDiffToBucketKey) != "" {
+				values.Set("to_bucket_key", strings.TrimSpace(gatewayRoutePolicyDiffToBucketKey))
+			}
+			for _, header := range gatewayRoutePolicyDiffFromHeaders {
+				if strings.TrimSpace(header) != "" {
+					values.Add("from_header", strings.TrimSpace(header))
+				}
+			}
+			for _, header := range gatewayRoutePolicyDiffToHeaders {
+				if strings.TrimSpace(header) != "" {
+					values.Add("to_header", strings.TrimSpace(header))
+				}
+			}
+			path := "/api/v1/gateway/route-policy/diff?" + values.Encode()
+			resp, err := apiClient.Do("GET", path, nil)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	}
+	routePolicyDiffCmd.Flags().StringVar(&gatewayRoutePolicyDiffFromPath, "from-path", "", "First route path to inspect")
+	routePolicyDiffCmd.Flags().StringVar(&gatewayRoutePolicyDiffFromMethod, "from-method", "GET", "First route HTTP method")
+	routePolicyDiffCmd.Flags().StringSliceVar(&gatewayRoutePolicyDiffFromHeaders, "from-header", nil, "Optional first route-match header in Name:Value format; repeat as needed")
+	routePolicyDiffCmd.Flags().StringVar(&gatewayRoutePolicyDiffFromBucketKey, "from-bucket-key", "inspect", "Optional first rollout bucket key for percent-gated routes")
+	routePolicyDiffCmd.Flags().StringVar(&gatewayRoutePolicyDiffToPath, "to-path", "", "Second route path to inspect")
+	routePolicyDiffCmd.Flags().StringVar(&gatewayRoutePolicyDiffToMethod, "to-method", "GET", "Second route HTTP method")
+	routePolicyDiffCmd.Flags().StringSliceVar(&gatewayRoutePolicyDiffToHeaders, "to-header", nil, "Optional second route-match header in Name:Value format; repeat as needed")
+	routePolicyDiffCmd.Flags().StringVar(&gatewayRoutePolicyDiffToBucketKey, "to-bucket-key", "inspect", "Optional second rollout bucket key for percent-gated routes")
+	gatewayCmd.AddCommand(routePolicyDiffCmd)
+
+	gatewayCmd.AddCommand(&cobra.Command{
+		Use:   "limit-hits",
+		Short: "Get route rate/concurrency limiter hit counters by type and route",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path := "/api/v1/gateway/limit-hits"
+			if strings.TrimSpace(gatewayLimitHitsWindow) != "" {
+				path += "?window=" + url.QueryEscape(strings.TrimSpace(gatewayLimitHitsWindow))
+			}
+			resp, err := apiClient.Do("GET", path, nil)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	})
+	gatewayCmd.Commands()[len(gatewayCmd.Commands())-1].Flags().StringVar(&gatewayLimitHitsWindow, "window", "5m", "Recent window to summarize, such as 5m or 1h")
+
+	gatewayCmd.AddCommand(&cobra.Command{
+		Use:   "limit-buckets",
+		Short: "Show recent limiter pressure grouped by anonymized bucket",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			values := url.Values{}
+			if strings.TrimSpace(gatewayLimitBucketsWindow) != "" {
+				values.Set("window", strings.TrimSpace(gatewayLimitBucketsWindow))
+			}
+			if gatewayLimitBucketsMinCount > 0 {
+				values.Set("min_count", fmt.Sprintf("%d", gatewayLimitBucketsMinCount))
+			}
+			path := "/api/v1/gateway/limit-buckets"
+			if encoded := values.Encode(); encoded != "" {
+				path += "?" + encoded
+			}
+			resp, err := apiClient.Do("GET", path, nil)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	})
+	gatewayCmd.Commands()[len(gatewayCmd.Commands())-1].Flags().StringVar(&gatewayLimitBucketsWindow, "window", "5m", "Recent window to summarize, such as 5m or 1h")
+	gatewayCmd.Commands()[len(gatewayCmd.Commands())-1].Flags().IntVar(&gatewayLimitBucketsMinCount, "min-count", 1, "Minimum limiter hits in the window before a bucket appears")
+
+	gatewayCmd.AddCommand(&cobra.Command{
+		Use:   "limit-classes",
+		Short: "Show recent limiter pressure grouped by named bucket class",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			values := url.Values{}
+			if strings.TrimSpace(gatewayLimitClassesWindow) != "" {
+				values.Set("window", strings.TrimSpace(gatewayLimitClassesWindow))
+			}
+			if gatewayLimitClassesMinCount > 0 {
+				values.Set("min_count", fmt.Sprintf("%d", gatewayLimitClassesMinCount))
+			}
+			path := "/api/v1/gateway/limit-classes"
+			if encoded := values.Encode(); encoded != "" {
+				path += "?" + encoded
+			}
+			resp, err := apiClient.Do("GET", path, nil)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	})
+	gatewayCmd.Commands()[len(gatewayCmd.Commands())-1].Flags().StringVar(&gatewayLimitClassesWindow, "window", "5m", "Recent window to summarize, such as 5m or 1h")
+	gatewayCmd.Commands()[len(gatewayCmd.Commands())-1].Flags().IntVar(&gatewayLimitClassesMinCount, "min-count", 1, "Minimum limiter hits in the window before a class appears")
+
+	gatewayCmd.AddCommand(&cobra.Command{
+		Use:   "limit-class-alerts",
+		Short: "Detect recent limiter saturation spikes grouped by named bucket class",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			values := url.Values{}
+			if strings.TrimSpace(gatewayLimitClassAlertsWindow) != "" {
+				values.Set("window", strings.TrimSpace(gatewayLimitClassAlertsWindow))
+			}
+			if gatewayLimitClassAlertsMinCount > 0 {
+				values.Set("min_count", fmt.Sprintf("%d", gatewayLimitClassAlertsMinCount))
+			}
+			path := "/api/v1/gateway/limit-class-alerts"
+			if encoded := values.Encode(); encoded != "" {
+				path += "?" + encoded
+			}
+			resp, err := apiClient.Do("GET", path, nil)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	})
+	gatewayCmd.Commands()[len(gatewayCmd.Commands())-1].Flags().StringVar(&gatewayLimitClassAlertsWindow, "window", "5m", "Recent window to summarize, such as 5m or 1h")
+	gatewayCmd.Commands()[len(gatewayCmd.Commands())-1].Flags().IntVar(&gatewayLimitClassAlertsMinCount, "min-count", 3, "Minimum limiter hits in the window before a class alert appears")
+
+	gatewayCmd.AddCommand(&cobra.Command{
+		Use:   "limit-class-incidents",
+		Short: "Show currently open limiter incidents grouped by named bucket class",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			resp, err := apiClient.Do("GET", "/api/v1/gateway/limit-class-incidents", nil)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	})
+
+	gatewayCmd.AddCommand(&cobra.Command{
+		Use:   "notify-limit-class-alerts",
+		Short: "Emit gateway limiter class alert notifications through configured webhooks",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			values := url.Values{}
+			if strings.TrimSpace(gatewayLimitClassAlertsWindow) != "" {
+				values.Set("window", strings.TrimSpace(gatewayLimitClassAlertsWindow))
+			}
+			if gatewayLimitClassAlertsMinCount > 0 {
+				values.Set("min_count", fmt.Sprintf("%d", gatewayLimitClassAlertsMinCount))
+			}
+			path := "/api/v1/gateway/limit-class-alerts/notify"
+			if encoded := values.Encode(); encoded != "" {
+				path += "?" + encoded
+			}
+			resp, err := apiClient.Do("POST", path, nil)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	})
+
+	gatewayCmd.AddCommand(&cobra.Command{
+		Use:   "limit-alerts",
+		Short: "Detect recent limiter saturation spikes by route and limiter type",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			values := url.Values{}
+			if strings.TrimSpace(gatewayLimitAlertsWindow) != "" {
+				values.Set("window", strings.TrimSpace(gatewayLimitAlertsWindow))
+			}
+			if gatewayLimitAlertsMinCount > 0 {
+				values.Set("min_count", fmt.Sprintf("%d", gatewayLimitAlertsMinCount))
+			}
+			path := "/api/v1/gateway/limit-alerts"
+			if encoded := values.Encode(); encoded != "" {
+				path += "?" + encoded
+			}
+			resp, err := apiClient.Do("GET", path, nil)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	})
+	gatewayCmd.Commands()[len(gatewayCmd.Commands())-1].Flags().StringVar(&gatewayLimitAlertsWindow, "window", "5m", "Recent window to evaluate, such as 5m or 1h")
+	gatewayCmd.Commands()[len(gatewayCmd.Commands())-1].Flags().IntVar(&gatewayLimitAlertsMinCount, "min-count", 3, "Minimum limiter hits in the window before a route/type becomes an alert")
+
+	gatewayCmd.AddCommand(&cobra.Command{
+		Use:   "notify-limit-alerts",
+		Short: "Emit gateway limiter alert notifications through configured webhooks",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			values := url.Values{}
+			if strings.TrimSpace(gatewayLimitAlertsWindow) != "" {
+				values.Set("window", strings.TrimSpace(gatewayLimitAlertsWindow))
+			}
+			if gatewayLimitAlertsMinCount > 0 {
+				values.Set("min_count", fmt.Sprintf("%d", gatewayLimitAlertsMinCount))
+			}
+			path := "/api/v1/gateway/limit-alerts/notify"
+			if encoded := values.Encode(); encoded != "" {
+				path += "?" + encoded
+			}
+			resp, err := apiClient.Do("POST", path, nil)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	})
+	gatewayCmd.Commands()[len(gatewayCmd.Commands())-1].Flags().StringVar(&gatewayLimitAlertsWindow, "window", "5m", "Recent window to evaluate, such as 5m or 1h")
+	gatewayCmd.Commands()[len(gatewayCmd.Commands())-1].Flags().IntVar(&gatewayLimitAlertsMinCount, "min-count", 3, "Minimum limiter hits in the window before a route/type becomes an alert")
 
 	gatewayCmd.AddCommand(&cobra.Command{
 		Use:   "policy-hits",

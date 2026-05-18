@@ -91,6 +91,14 @@ func TestServiceChangeSummaryReportsAddedRemovedAndUpdated(t *testing.T) {
 				},
 			},
 		}},
+		Security: config.SecurityConfig{
+			LimitAlertBucketClasses: map[string]config.LimitAlertBucketClassConfig{
+				"vip-jwt": {
+					KeyType:     "jwt_sub",
+					BucketRegex: "^vip-",
+				},
+			},
+		},
 	}
 	next := &config.Config{
 		Services: []config.ServiceConfig{{
@@ -3045,6 +3053,387 @@ func TestGetGatewayBackendsReturnsBackendStatuses(t *testing.T) {
 	}
 }
 
+func TestGetGatewayRoutePolicyReturnsResolvedInspection(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		AIPolicyPresets: map[string]config.AIPolicyPreset{
+			"org-safe": {
+				AllowedModels: []string{"gpt-4.1-mini"},
+			},
+		},
+		Services: []config.ServiceConfig{{
+			Version: 1,
+			Services: []config.Service{{
+				Name: "agent",
+				Host: "http://agent-default:8080",
+				AIPolicyPresets: map[string]config.AIPolicyPreset{
+					"service-strict": {
+						RequiredRequestHeaders: []string{"X-Agent-Session"},
+					},
+				},
+				Routes: []config.RouterConfig{{
+					Path:                "/ai/chat",
+					Methods:             []string{"POST"},
+					AIPolicyPresetChain: []string{"org-safe"},
+					AIPolicyPreset:      "service-strict",
+					AllowedModels:       []string{"gpt-4.1"},
+					Backends: []config.Backend{
+						{URLPattern: "/"},
+					},
+				}},
+			}},
+		}},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/gateway/route-policy?path=/ai/chat&method=POST&bucket_key=inspect", nil)
+	resp := httptest.NewRecorder()
+	api.getGatewayRoutePolicy(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		Inspection struct {
+			ServiceName      string                   `json:"service_name"`
+			RoutePath        string                   `json:"route_path"`
+			Method           string                   `json:"method"`
+			AppliedPresets   []map[string]interface{} `json:"applied_presets"`
+			EffectivePolicy  map[string]interface{}   `json:"effective_policy"`
+			FieldSources     map[string]string        `json:"field_sources"`
+			AvailablePresets []string                 `json:"available_presets"`
+		} `json:"inspection"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.Inspection.ServiceName != "agent" || payload.Inspection.RoutePath != "/ai/chat" || payload.Inspection.Method != "POST" {
+		t.Fatalf("unexpected inspection identity: %+v", payload.Inspection)
+	}
+	if len(payload.Inspection.AppliedPresets) != 2 {
+		t.Fatalf("expected two applied presets, got %+v", payload.Inspection.AppliedPresets)
+	}
+	if payload.Inspection.FieldSources["AllowedModels"] != "route" {
+		t.Fatalf("expected AllowedModels source route, got %+v", payload.Inspection.FieldSources)
+	}
+	if payload.Inspection.FieldSources["RequiredRequestHeaders"] != "preset:service-strict" {
+		t.Fatalf("expected RequiredRequestHeaders source preset:service-strict, got %+v", payload.Inspection.FieldSources)
+	}
+	models, ok := payload.Inspection.EffectivePolicy["AllowedModels"].([]interface{})
+	if !ok || len(models) != 1 || models[0] != "gpt-4.1" {
+		t.Fatalf("expected route override models, got %+v", payload.Inspection.EffectivePolicy["AllowedModels"])
+	}
+}
+
+func TestDiffGatewayRoutePolicyReturnsChangedFields(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Services: []config.ServiceConfig{{
+			Version: 1,
+			Services: []config.Service{{
+				Name: "agent",
+				Host: "http://agent-default:8080",
+				Routes: []config.RouterConfig{
+					{
+						Path:          "/ai/chat",
+						Methods:       []string{"POST"},
+						AllowedModels: []string{"gpt-4.1"},
+						Backends: []config.Backend{
+							{URLPattern: "/"},
+						},
+					},
+					{
+						Path:                   "/ai/search",
+						Methods:                []string{"POST"},
+						AllowedModels:          []string{"gpt-4.1-mini"},
+						RequiredRequestHeaders: []string{"X-Agent-Session"},
+						Backends: []config.Backend{
+							{URLPattern: "/"},
+						},
+					},
+				},
+			}},
+		}},
+		Security: config.SecurityConfig{
+			LimitAlertBucketClasses: map[string]config.LimitAlertBucketClassConfig{
+				"vip-jwt": {
+					KeyType:     "jwt_sub",
+					BucketRegex: "^vip-",
+				},
+			},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/gateway/route-policy/diff?from_path=/ai/chat&from_method=POST&to_path=/ai/search&to_method=POST", nil)
+	resp := httptest.NewRecorder()
+	api.diffGatewayRoutePolicy(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		Diff struct {
+			ChangedFieldCount int `json:"changed_field_count"`
+			ChangedFields     []struct {
+				Field string `json:"field"`
+			} `json:"changed_fields"`
+		} `json:"diff"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.Diff.ChangedFieldCount < 2 {
+		t.Fatalf("expected at least two changed fields, got %+v", payload.Diff)
+	}
+	fieldNames := make(map[string]struct{}, len(payload.Diff.ChangedFields))
+	for _, entry := range payload.Diff.ChangedFields {
+		fieldNames[entry.Field] = struct{}{}
+	}
+	if _, ok := fieldNames["AllowedModels"]; !ok {
+		t.Fatalf("expected AllowedModels diff, got %+v", payload.Diff.ChangedFields)
+	}
+	if _, ok := fieldNames["RequiredRequestHeaders"]; !ok {
+		t.Fatalf("expected RequiredRequestHeaders diff, got %+v", payload.Diff.ChangedFields)
+	}
+}
+
+func TestGetGatewayLimitHitsReturnsAggregatedCounters(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Services: []config.ServiceConfig{{
+			Version: 1,
+			Services: []config.Service{{
+				Name: "agent",
+				Host: "http://agent-default:8080",
+				Routes: []config.RouterConfig{{
+					Path:    "/ai/chat",
+					Methods: []string{"POST"},
+					Backends: []config.Backend{
+						{URLPattern: "/"},
+					},
+				}},
+			}},
+		}},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	route := cfg.Services[0].Services[0].Routes[0]
+	route.ServiceName = "agent"
+	gw.RecordRouteLimitHit(route, "rate_limit", "header")
+	gw.RecordRouteLimitHit(route, "concurrency_limit", "jwt_sub")
+	gw.RecordRouteLimitHitWithWait(route, "concurrency_queued", "jwt_sub", 120*time.Millisecond)
+	gw.RecordRouteLimitHit(route, "concurrency_queue_full", "jwt_sub")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/gateway/limit-hits?window=5m", nil)
+	resp := httptest.NewRecorder()
+	api.getGatewayLimitHits(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		Total int `json:"total"`
+		Types []struct {
+			Type  string `json:"type"`
+			Count int    `json:"count"`
+		} `json:"types"`
+		Routes []struct {
+			RoutePath           string         `json:"route_path"`
+			ByType              map[string]int `json:"by_type"`
+			QueuedAdmissions    int            `json:"queued_admissions"`
+			QueueFullRejections int            `json:"queue_full_rejections"`
+			AverageQueueWaitMs  int64          `json:"average_queue_wait_ms"`
+			MaxQueueWaitMs      int64          `json:"max_queue_wait_ms"`
+		} `json:"routes"`
+		RecentWindow struct {
+			Total int `json:"total"`
+		} `json:"recent_window"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.Total != 4 || payload.RecentWindow.Total != 4 {
+		t.Fatalf("expected total 2 in both lifetime and recent window, got %+v", payload)
+	}
+	if len(payload.Types) != 4 {
+		t.Fatalf("expected four type summaries, got %+v", payload.Types)
+	}
+	if len(payload.Routes) != 1 || payload.Routes[0].RoutePath != "/ai/chat" {
+		t.Fatalf("unexpected route summaries: %+v", payload.Routes)
+	}
+	if payload.Routes[0].ByType["rate_limit"] != 1 || payload.Routes[0].ByType["concurrency_limit"] != 1 || payload.Routes[0].ByType["concurrency_queued"] != 1 || payload.Routes[0].ByType["concurrency_queue_full"] != 1 {
+		t.Fatalf("unexpected route type counters: %+v", payload.Routes[0].ByType)
+	}
+	if payload.Routes[0].QueuedAdmissions != 1 || payload.Routes[0].QueueFullRejections != 1 {
+		t.Fatalf("unexpected queue counters: %+v", payload.Routes[0])
+	}
+	if payload.Routes[0].AverageQueueWaitMs < 100 || payload.Routes[0].MaxQueueWaitMs < payload.Routes[0].AverageQueueWaitMs {
+		t.Fatalf("unexpected queue wait metrics: %+v", payload.Routes[0])
+	}
+}
+
+func TestGetGatewayLimitBucketsReturnsRecentBucketPressure(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Services: []config.ServiceConfig{{
+			Version: 1,
+			Services: []config.Service{{
+				Name: "agent",
+				Host: "http://agent-default:8080",
+				Routes: []config.RouterConfig{{
+					Path:    "/ai/chat",
+					Methods: []string{"POST"},
+					Backends: []config.Backend{
+						{URLPattern: "/"},
+					},
+				}},
+			}},
+		}},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	route := cfg.Services[0].Services[0].Routes[0]
+	route.ServiceName = "agent"
+	now := time.Now().UTC()
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "vip-a", 0, now.Add(-2*time.Minute))
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "vip-a", 0, now.Add(-90*time.Second))
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queued", "jwt_sub", "vip-a", 120*time.Millisecond, now.Add(-75*time.Second))
+	gw.RecordRouteLimitHitForBucketTest(route, "rate_limit", "header", "x-agent-session:tenant-b", 0, now.Add(-30*time.Second))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/gateway/limit-buckets?window=5m&min_count=1", nil)
+	resp := httptest.NewRecorder()
+	api.getGatewayLimitBuckets(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		Window       string `json:"window"`
+		MinCount     int    `json:"min_count"`
+		TotalBuckets int    `json:"total_buckets"`
+		TopBucketID  string `json:"top_bucket_id"`
+		Entries      []struct {
+			RoutePath           string `json:"route_path"`
+			LimitType           string `json:"limit_type"`
+			KeyType             string `json:"key_type"`
+			BucketID            string `json:"bucket_id"`
+			Count               int    `json:"count"`
+			QueuedAdmissions    int    `json:"queued_admissions"`
+			QueueFullRejections int    `json:"queue_full_rejections"`
+			AverageQueueWaitMs  int64  `json:"average_queue_wait_ms"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.Window != "5m" || payload.MinCount != 1 || payload.TotalBuckets != 3 {
+		t.Fatalf("unexpected bucket summary header: %+v", payload)
+	}
+	if len(payload.Entries) != 3 || payload.TopBucketID == "" {
+		t.Fatalf("expected three bucket entries with top bucket id, got %+v", payload)
+	}
+	if payload.Entries[0].BucketID == "" || payload.Entries[0].KeyType != "jwt_sub" || payload.Entries[0].Count != 2 || payload.Entries[0].QueueFullRejections != 2 {
+		t.Fatalf("unexpected top bucket entry: %+v", payload.Entries[0])
+	}
+	if payload.Entries[1].LimitType != "concurrency_queued" || payload.Entries[1].QueuedAdmissions != 1 || payload.Entries[1].AverageQueueWaitMs < 100 {
+		t.Fatalf("unexpected queued bucket entry: %+v", payload.Entries[1])
+	}
+}
+
+func TestGetGatewayLimitClassesReturnsRecentClassPressure(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitAlertBucketClasses: map[string]config.LimitAlertBucketClassConfig{
+				"vip-jwt": {
+					KeyType:     "jwt_sub",
+					BucketRegex: "^vip-",
+				},
+			},
+		},
+		Services: []config.ServiceConfig{{
+			Version: 1,
+			Services: []config.Service{{
+				Name: "agent",
+				Host: "http://agent-default:8080",
+				Routes: []config.RouterConfig{{
+					Path:    "/ai/chat",
+					Methods: []string{"POST"},
+					Backends: []config.Backend{
+						{URLPattern: "/"},
+					},
+				}},
+			}},
+		}},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	route := cfg.Services[0].Services[0].Routes[0]
+	route.ServiceName = "agent"
+	now := time.Now().UTC()
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "vip-a", 0, now.Add(-2*time.Minute))
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "vip-b", 0, now.Add(-90*time.Second))
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queued", "jwt_sub", "vip-a", 120*time.Millisecond, now.Add(-75*time.Second))
+	gw.RecordRouteLimitHitForBucketTest(route, "rate_limit", "api_key", "tenant-c", 0, now.Add(-30*time.Second))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/gateway/limit-classes?window=5m&min_count=1", nil)
+	resp := httptest.NewRecorder()
+	api.getGatewayLimitClasses(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		Window         string `json:"window"`
+		MinCount       int    `json:"min_count"`
+		TotalClasses   int    `json:"total_classes"`
+		TopBucketClass string `json:"top_bucket_class"`
+		Entries        []struct {
+			RoutePath           string `json:"route_path"`
+			LimitType           string `json:"limit_type"`
+			KeyType             string `json:"key_type"`
+			BucketClass         string `json:"bucket_class"`
+			Count               int    `json:"count"`
+			QueuedAdmissions    int    `json:"queued_admissions"`
+			QueueFullRejections int    `json:"queue_full_rejections"`
+			AverageQueueWaitMs  int64  `json:"average_queue_wait_ms"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.Window != "5m" || payload.MinCount != 1 || payload.TotalClasses != 2 || payload.TopBucketClass != "vip-jwt" {
+		t.Fatalf("unexpected class summary header: %+v", payload)
+	}
+	if len(payload.Entries) != 2 {
+		t.Fatalf("expected two class entries, got %+v", payload.Entries)
+	}
+	if payload.Entries[0].BucketClass != "vip-jwt" || payload.Entries[0].Count != 2 || payload.Entries[0].QueueFullRejections != 2 {
+		t.Fatalf("unexpected top class entry: %+v", payload.Entries[0])
+	}
+	if payload.Entries[1].LimitType != "concurrency_queued" || payload.Entries[1].QueuedAdmissions != 1 || payload.Entries[1].AverageQueueWaitMs < 100 {
+		t.Fatalf("unexpected queued class entry: %+v", payload.Entries[1])
+	}
+}
+
 func TestGetGatewayPolicyHitsReturnsAggregatedCounters(t *testing.T) {
 	cfg := &config.Config{
 		Server: config.ServerConfig{Port: 8080},
@@ -3131,6 +3520,85 @@ func TestGetGatewayPolicyHitsReturnsAggregatedCounters(t *testing.T) {
 	}
 }
 
+func TestGetGatewayLimitClassAlertsReturnsRecentClassSpikes(t *testing.T) {
+	cfg := &config.Config{
+		Security: config.SecurityConfig{
+			LimitAlertBucketClasses: map[string]config.LimitAlertBucketClassConfig{
+				"vip-jwt": {
+					KeyType:     "jwt_sub",
+					BucketRegex: "^vip-",
+				},
+			},
+		},
+		Server: config.ServerConfig{Port: 8080},
+		Services: []config.ServiceConfig{{
+			Version: 1,
+			Services: []config.Service{{
+				Name: "agent",
+				Host: "http://agent-default:8080",
+				Routes: []config.RouterConfig{{
+					Path:    "/ai/chat",
+					Methods: []string{"POST"},
+					Backends: []config.Backend{
+						{URLPattern: "/"},
+					},
+				}},
+			}},
+		}},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	route := cfg.Services[0].Services[0].Routes[0]
+	route.ServiceName = "agent"
+	now := time.Now().UTC()
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "vip-a", 0, now.Add(-2*time.Minute))
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "vip-b", 0, now.Add(-90*time.Second))
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "vip-c", 0, now.Add(-75*time.Second))
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queued", "jwt_sub", "vip-a", 140*time.Millisecond, now.Add(-45*time.Second))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/gateway/limit-class-alerts?window=5m&min_count=2", nil)
+	resp := httptest.NewRecorder()
+	api.getGatewayLimitClassAlerts(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		Window         string         `json:"window"`
+		MinCount       int            `json:"min_count"`
+		TotalAlerts    int            `json:"total_alerts"`
+		TopBucketClass string         `json:"top_bucket_class"`
+		BySeverity     map[string]int `json:"by_severity"`
+		Alerts         []struct {
+			Severity            string `json:"severity"`
+			RoutePath           string `json:"route_path"`
+			LimitType           string `json:"limit_type"`
+			KeyType             string `json:"key_type"`
+			BucketClass         string `json:"bucket_class"`
+			Count               int    `json:"count"`
+			QueueFullRejections int    `json:"queue_full_rejections"`
+		} `json:"alerts"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.Window != "5m" || payload.MinCount != 2 || payload.TotalAlerts != 1 || payload.TopBucketClass != "vip-jwt" {
+		t.Fatalf("unexpected class alert header: %+v", payload)
+	}
+	if payload.BySeverity["elevated"] != 1 {
+		t.Fatalf("expected one elevated class alert, got %+v", payload.BySeverity)
+	}
+	if len(payload.Alerts) != 1 {
+		t.Fatalf("expected one class alert, got %+v", payload.Alerts)
+	}
+	if payload.Alerts[0].BucketClass != "vip-jwt" || payload.Alerts[0].LimitType != "concurrency_queue_full" || payload.Alerts[0].Count != 3 || payload.Alerts[0].QueueFullRejections != 3 {
+		t.Fatalf("unexpected class alert entry: %+v", payload.Alerts[0])
+	}
+}
+
 func TestGetGatewayPolicyAlertsReturnsRecentSpikeAlerts(t *testing.T) {
 	cfg := &config.Config{
 		Server: config.ServerConfig{Port: 8080},
@@ -3201,6 +3669,306 @@ func TestGetGatewayPolicyAlertsReturnsRecentSpikeAlerts(t *testing.T) {
 	}
 	if payload.Alerts[0].RoutePath != "/ai/chat" || payload.Alerts[0].Reason != "request_content_policy" || payload.Alerts[0].Count != 4 {
 		t.Fatalf("unexpected alert entry: %+v", payload.Alerts[0])
+	}
+}
+
+func TestGetGatewayLimitAlertsReturnsRecentLimiterAlerts(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Services: []config.ServiceConfig{{
+			Version: 1,
+			Services: []config.Service{{
+				Name: "agent",
+				Host: "http://agent-default:8080",
+				Routes: []config.RouterConfig{
+					{
+						Path:    "/ai/chat",
+						Methods: []string{"POST"},
+						Backends: []config.Backend{
+							{URLPattern: "/"},
+						},
+					},
+				},
+			}},
+		}},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	route := cfg.Services[0].Services[0].Routes[0]
+	route.ServiceName = "agent"
+
+	now := time.Now().UTC()
+	gw.RecordRouteLimitHitForTest(route, "concurrency_queue_full", "jwt_sub", 0, now.Add(-4*time.Minute))
+	gw.RecordRouteLimitHitForTest(route, "concurrency_queue_full", "jwt_sub", 0, now.Add(-3*time.Minute))
+	gw.RecordRouteLimitHitForTest(route, "concurrency_queue_full", "jwt_sub", 0, now.Add(-2*time.Minute))
+	gw.RecordRouteLimitHitForTest(route, "concurrency_queued", "jwt_sub", 150*time.Millisecond, now.Add(-90*time.Second))
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/gateway/limit-alerts?window=5m&min_count=3", nil)
+	resp := httptest.NewRecorder()
+	api.getGatewayLimitAlerts(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		Window      string         `json:"window"`
+		MinCount    int            `json:"min_count"`
+		TotalAlerts int            `json:"total_alerts"`
+		BySeverity  map[string]int `json:"by_severity"`
+		Alerts      []struct {
+			Severity            string `json:"severity"`
+			RoutePath           string `json:"route_path"`
+			LimitType           string `json:"limit_type"`
+			Count               int    `json:"count"`
+			QueueFullRejections int    `json:"queue_full_rejections"`
+		} `json:"alerts"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.Window != "5m" || payload.MinCount != 3 || payload.TotalAlerts != 1 {
+		t.Fatalf("unexpected alert summary: %+v", payload)
+	}
+	if payload.BySeverity["elevated"] != 1 || len(payload.Alerts) != 1 {
+		t.Fatalf("unexpected alert severity payload: %+v", payload)
+	}
+	if payload.Alerts[0].RoutePath != "/ai/chat" || payload.Alerts[0].LimitType != "concurrency_queue_full" || payload.Alerts[0].Count != 3 || payload.Alerts[0].QueueFullRejections != 3 {
+		t.Fatalf("unexpected alert entry: %+v", payload.Alerts[0])
+	}
+}
+
+func TestGetGatewayLimitAlertsAppliesTypeSpecificSeverityThresholds(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Services: []config.ServiceConfig{{
+			Version: 1,
+			Services: []config.Service{{
+				Name: "agent",
+				Host: "http://agent-default:8080",
+				Routes: []config.RouterConfig{
+					{
+						Path:    "/ai/chat",
+						Methods: []string{"POST"},
+						Backends: []config.Backend{
+							{URLPattern: "/"},
+						},
+					},
+				},
+			}},
+		}},
+		Security: config.SecurityConfig{
+			MutationPolicy: config.MutationPolicy{
+				LimitAlertNotifications: config.PolicyAlertNotificationPolicy{
+					Enabled: true,
+					LimitTypePolicies: map[string]config.LimitAlertTypePolicy{
+						"concurrency_queue_full": {
+							WarningCount:  2,
+							ElevatedCount: 3,
+							CriticalCount: 4,
+						},
+					},
+				},
+			},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	route := cfg.Services[0].Services[0].Routes[0]
+	route.ServiceName = "agent"
+	now := time.Now().UTC()
+	gw.RecordRouteLimitHitForTest(route, "concurrency_queue_full", "jwt_sub", 0, now.Add(-4*time.Minute))
+	gw.RecordRouteLimitHitForTest(route, "concurrency_queue_full", "jwt_sub", 0, now.Add(-3*time.Minute))
+	gw.RecordRouteLimitHitForTest(route, "concurrency_queue_full", "jwt_sub", 0, now.Add(-2*time.Minute))
+	gw.RecordRouteLimitHitForTest(route, "concurrency_queue_full", "jwt_sub", 0, now.Add(-1*time.Minute))
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/gateway/limit-alerts?window=5m&min_count=3", nil)
+	resp := httptest.NewRecorder()
+	api.getGatewayLimitAlerts(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		TotalAlerts int `json:"total_alerts"`
+		Alerts      []struct {
+			Severity  string `json:"severity"`
+			LimitType string `json:"limit_type"`
+			Count     int    `json:"count"`
+		} `json:"alerts"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.TotalAlerts != 1 || len(payload.Alerts) != 1 {
+		t.Fatalf("expected one limit alert, got %+v", payload)
+	}
+	if payload.Alerts[0].LimitType != "concurrency_queue_full" || payload.Alerts[0].Count != 4 || payload.Alerts[0].Severity != "critical" {
+		t.Fatalf("expected critical queue-full alert after type policy override, got %+v", payload.Alerts[0])
+	}
+}
+
+func TestGetGatewayLimitAlertsAppliesRouteSpecificPolicyOverrides(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Services: []config.ServiceConfig{{
+			Version: 1,
+			Services: []config.Service{{
+				Name: "agent",
+				Host: "http://agent-default:8080",
+				Routes: []config.RouterConfig{
+					{
+						Path:    "/ai/chat",
+						Methods: []string{"POST"},
+						ConcurrencyLimitPolicy: &config.ConcurrencyLimitPolicyConfig{
+							MaxInFlight: 4,
+							KeyBy:       "global",
+						},
+						LimitAlertPolicy: &config.RouteLimitAlertPolicyConfig{
+							MinCount: 2,
+							LimitTypePolicies: map[string]config.LimitAlertTypePolicy{
+								"concurrency_queue_full": {
+									WarningCount:  2,
+									ElevatedCount: 3,
+									CriticalCount: 3,
+								},
+							},
+						},
+						Backends: []config.Backend{
+							{URLPattern: "/"},
+						},
+					},
+				},
+			}},
+		}},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	route := cfg.Services[0].Services[0].Routes[0]
+	route.ServiceName = "agent"
+	now := time.Now().UTC()
+	gw.RecordRouteLimitHitForTest(route, "concurrency_queue_full", "jwt_sub", 0, now.Add(-3*time.Minute))
+	gw.RecordRouteLimitHitForTest(route, "concurrency_queue_full", "jwt_sub", 0, now.Add(-2*time.Minute))
+	gw.RecordRouteLimitHitForTest(route, "concurrency_queue_full", "jwt_sub", 0, now.Add(-1*time.Minute))
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/gateway/limit-alerts?window=5m&min_count=5", nil)
+	resp := httptest.NewRecorder()
+	api.getGatewayLimitAlerts(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		TotalAlerts int `json:"total_alerts"`
+		Alerts      []struct {
+			Severity  string `json:"severity"`
+			LimitType string `json:"limit_type"`
+			Count     int    `json:"count"`
+		} `json:"alerts"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.TotalAlerts != 1 || len(payload.Alerts) != 1 {
+		t.Fatalf("expected one route-scoped limit alert, got %+v", payload)
+	}
+	if payload.Alerts[0].LimitType != "concurrency_queue_full" || payload.Alerts[0].Count != 3 || payload.Alerts[0].Severity != "critical" {
+		t.Fatalf("expected critical queue-full alert from route policy override, got %+v", payload.Alerts[0])
+	}
+}
+
+func TestGetGatewayLimitAlertsAppliesBucketSpecificPolicyOverrides(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Services: []config.ServiceConfig{{
+			Version: 1,
+			Services: []config.Service{{
+				Name: "agent",
+				Host: "http://agent-default:8080",
+				Routes: []config.RouterConfig{
+					{
+						Path:    "/ai/chat",
+						Methods: []string{"POST"},
+						ConcurrencyLimitPolicy: &config.ConcurrencyLimitPolicyConfig{
+							MaxInFlight: 4,
+							KeyBy:       "jwt_sub",
+						},
+						LimitAlertPolicy: &config.RouteLimitAlertPolicyConfig{
+							GroupBy:  "bucket",
+							MinCount: 5,
+							BucketPolicies: []config.LimitAlertBucketPolicyConfig{{
+								BucketClass: "vip-jwt",
+								MinCount:    2,
+								MinSeverity: "critical",
+								LimitTypePolicies: map[string]config.LimitAlertTypePolicy{
+									"concurrency_queue_full": {
+										WarningCount:  2,
+										ElevatedCount: 2,
+										CriticalCount: 2,
+									},
+								},
+							}},
+						},
+						Backends: []config.Backend{
+							{URLPattern: "/"},
+						},
+					},
+				},
+			}},
+		}},
+		Security: config.SecurityConfig{
+			LimitAlertBucketClasses: map[string]config.LimitAlertBucketClassConfig{
+				"vip-jwt": {
+					KeyType:     "jwt_sub",
+					BucketRegex: "^vip-",
+				},
+			},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	route := cfg.Services[0].Services[0].Routes[0]
+	route.ServiceName = "agent"
+	now := time.Now().UTC()
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "vip-tenant-1", 0, now.Add(-2*time.Minute))
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "vip-tenant-1", 0, now.Add(-1*time.Minute))
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/gateway/limit-alerts?window=5m&min_count=5", nil)
+	resp := httptest.NewRecorder()
+	api.getGatewayLimitAlerts(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		TotalAlerts int `json:"total_alerts"`
+		Alerts      []struct {
+			Severity    string `json:"severity"`
+			KeyType     string `json:"key_type"`
+			BucketID    string `json:"bucket_id"`
+			BucketClass string `json:"bucket_class"`
+			Count       int    `json:"count"`
+		} `json:"alerts"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.TotalAlerts != 1 || len(payload.Alerts) != 1 {
+		t.Fatalf("expected one bucket-scoped alert, got %+v", payload)
+	}
+	if payload.Alerts[0].Severity != "critical" || payload.Alerts[0].Count != 2 || payload.Alerts[0].KeyType != "jwt_sub" || strings.TrimSpace(payload.Alerts[0].BucketID) == "" || payload.Alerts[0].BucketClass != "vip-jwt" {
+		t.Fatalf("expected critical vip bucket alert, got %+v", payload.Alerts[0])
 	}
 }
 
@@ -3287,6 +4055,1171 @@ func TestNotifyGatewayPolicyAlertsEmitsDigestAndAlertEvents(t *testing.T) {
 	}
 	if len(deliveries) != 2 {
 		t.Fatalf("expected 2 persisted delivery records, got %d", len(deliveries))
+	}
+}
+
+func TestNotifyGatewayLimitAlertsEmitsDigestAndAlertEvents(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("failed to chdir temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
+
+	receivedEvents := make([]string, 0, 4)
+	server := newNotificationTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode webhook payload: %v", err)
+		}
+		receivedEvents = append(receivedEvents, fmt.Sprint(payload["event"]))
+		w.WriteHeader(http.StatusOK)
+	})
+	defer server.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Services: []config.ServiceConfig{{
+			Version: 1,
+			Services: []config.Service{{
+				Name: "agent",
+				Host: "http://agent-default:8080",
+				Routes: []config.RouterConfig{
+					{
+						Path:    "/ai/chat",
+						Methods: []string{"POST"},
+						Backends: []config.Backend{
+							{URLPattern: "/"},
+						},
+					},
+				},
+			}},
+		}},
+		Security: config.SecurityConfig{
+			NotificationWebhooks: []config.NotificationWebhook{
+				{
+					URL:    server.URL,
+					Events: []string{"gateway.limit_alert_digest", "gateway.limit_alert"},
+				},
+			},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	route := cfg.Services[0].Services[0].Routes[0]
+	route.ServiceName = "agent"
+	now := time.Now().UTC()
+	gw.RecordRouteLimitHitForTest(route, "concurrency_queue_full", "jwt_sub", 0, now.Add(-4*time.Minute))
+	gw.RecordRouteLimitHitForTest(route, "concurrency_queue_full", "jwt_sub", 0, now.Add(-3*time.Minute))
+	gw.RecordRouteLimitHitForTest(route, "concurrency_queue_full", "jwt_sub", 0, now.Add(-2*time.Minute))
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/gateway/limit-alerts/notify?window=5m&min_count=3", nil)
+	resp := httptest.NewRecorder()
+	api.notifyGatewayLimitAlerts(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if len(receivedEvents) != 2 {
+		t.Fatalf("expected 2 notification events, got %d (%v)", len(receivedEvents), receivedEvents)
+	}
+	if !strings.Contains(strings.Join(receivedEvents, ","), "gateway.limit_alert_digest") || !strings.Contains(strings.Join(receivedEvents, ","), "gateway.limit_alert") {
+		t.Fatalf("expected gateway.limit_alert_digest and gateway.limit_alert events, got %v", receivedEvents)
+	}
+
+	deliveries, err := listNotificationDeliveryRecords()
+	if err != nil {
+		t.Fatalf("failed to list notification deliveries: %v", err)
+	}
+	if len(deliveries) != 2 {
+		t.Fatalf("expected 2 persisted delivery records, got %d", len(deliveries))
+	}
+}
+
+func TestNotifyGatewayLimitAlertsHonorsWebhookTypeSeverityAndCooldown(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("failed to chdir temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
+
+	received := make([]string, 0, 6)
+	server := newNotificationTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode webhook payload: %v", err)
+		}
+		data, _ := payload["data"].(map[string]interface{})
+		received = append(received, strings.TrimSpace(fmt.Sprint(payload["event"]))+":"+strings.TrimSpace(fmt.Sprint(data["severity"]))+":"+strings.TrimSpace(fmt.Sprint(data["limit_type"])))
+		w.WriteHeader(http.StatusOK)
+	})
+	defer server.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Services: []config.ServiceConfig{{
+			Version: 1,
+			Services: []config.Service{{
+				Name: "agent",
+				Host: "http://agent-default:8080",
+				Routes: []config.RouterConfig{{
+					Path:    "/ai/chat",
+					Methods: []string{"POST"},
+					Backends: []config.Backend{
+						{URLPattern: "/"},
+					},
+				}},
+			}},
+		}},
+		Security: config.SecurityConfig{
+			NotificationWebhooks: []config.NotificationWebhook{
+				{
+					Name:                  "limit-escalation",
+					URL:                   server.URL,
+					Events:                []string{"gateway.limit_alert"},
+					MinLimitAlertSeverity: "elevated",
+					LimitAlertTypes:       []string{"concurrency_queue_full"},
+					LimitAlertCooldown:    "1h",
+				},
+			},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	route := cfg.Services[0].Services[0].Routes[0]
+	route.ServiceName = "agent"
+	now := time.Now().UTC()
+	gw.RecordRouteLimitHitForTest(route, "concurrency_queue_full", "jwt_sub", 0, now.Add(-4*time.Minute))
+	gw.RecordRouteLimitHitForTest(route, "concurrency_queue_full", "jwt_sub", 0, now.Add(-3*time.Minute))
+	gw.RecordRouteLimitHitForTest(route, "concurrency_queue_full", "jwt_sub", 0, now.Add(-2*time.Minute))
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/gateway/limit-alerts/notify?window=5m&min_count=3", nil)
+
+	resp := httptest.NewRecorder()
+	api.notifyGatewayLimitAlerts(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected first notify to return 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if len(received) != 1 || received[0] != "gateway.limit_alert:elevated:concurrency_queue_full" {
+		t.Fatalf("expected one elevated queue-full limit alert, got %v", received)
+	}
+
+	resp = httptest.NewRecorder()
+	api.notifyGatewayLimitAlerts(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected second notify to return 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if len(received) != 1 {
+		t.Fatalf("expected cooldown to suppress duplicate limit alert, got %v", received)
+	}
+
+	for i := 0; i < 9; i++ {
+		gw.RecordRouteLimitHitForTest(route, "concurrency_queue_full", "jwt_sub", 0, time.Now().UTC())
+	}
+	resp = httptest.NewRecorder()
+	api.notifyGatewayLimitAlerts(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected third notify to return 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if len(received) != 2 || received[1] != "gateway.limit_alert:critical:concurrency_queue_full" {
+		t.Fatalf("expected critical limit alert to bypass cooldown, got %v", received)
+	}
+}
+
+func TestNotifyGatewayLimitClassAlertsEmitsDigestAndAlertEvents(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("failed to chdir temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
+
+	receivedEvents := make([]string, 0, 4)
+	server := newNotificationTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode webhook payload: %v", err)
+		}
+		receivedEvents = append(receivedEvents, fmt.Sprint(payload["event"]))
+		w.WriteHeader(http.StatusOK)
+	})
+	defer server.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitAlertBucketClasses: map[string]config.LimitAlertBucketClassConfig{
+				"vip-jwt": {
+					KeyType:     "jwt_sub",
+					BucketRegex: "^vip-",
+				},
+			},
+			NotificationWebhooks: []config.NotificationWebhook{
+				{
+					URL:    server.URL,
+					Events: []string{"gateway.limit_class_alert_digest", "gateway.limit_class_alert"},
+				},
+			},
+		},
+		Services: []config.ServiceConfig{{
+			Version: 1,
+			Services: []config.Service{{
+				Name: "agent",
+				Host: "http://agent-default:8080",
+				Routes: []config.RouterConfig{
+					{
+						Path:    "/ai/chat",
+						Methods: []string{"POST"},
+						Backends: []config.Backend{
+							{URLPattern: "/"},
+						},
+					},
+				},
+			}},
+		}},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	route := cfg.Services[0].Services[0].Routes[0]
+	route.ServiceName = "agent"
+	now := time.Now().UTC()
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "vip-a", 0, now.Add(-4*time.Minute))
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "vip-b", 0, now.Add(-3*time.Minute))
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "vip-c", 0, now.Add(-2*time.Minute))
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/gateway/limit-class-alerts/notify?window=5m&min_count=3", nil)
+	resp := httptest.NewRecorder()
+	api.notifyGatewayLimitClassAlerts(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if len(receivedEvents) != 2 {
+		t.Fatalf("expected 2 notification events, got %d (%v)", len(receivedEvents), receivedEvents)
+	}
+	if !strings.Contains(strings.Join(receivedEvents, ","), "gateway.limit_class_alert_digest") || !strings.Contains(strings.Join(receivedEvents, ","), "gateway.limit_class_alert") {
+		t.Fatalf("expected gateway.limit_class_alert_digest and gateway.limit_class_alert events, got %v", receivedEvents)
+	}
+
+	deliveries, err := listNotificationDeliveryRecords()
+	if err != nil {
+		t.Fatalf("failed to list notification deliveries: %v", err)
+	}
+	if len(deliveries) != 2 {
+		t.Fatalf("expected 2 persisted delivery records, got %d", len(deliveries))
+	}
+}
+
+func TestNotifyGatewayLimitAlertsHonorsBucketAwareWebhookRoutingAndCooldown(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("failed to chdir temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
+
+	received := make([]string, 0, 6)
+	server := newNotificationTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode webhook payload: %v", err)
+		}
+		data, _ := payload["data"].(map[string]interface{})
+		received = append(received,
+			strings.TrimSpace(fmt.Sprint(payload["event"]))+":"+
+				strings.TrimSpace(fmt.Sprint(data["bucket_id"]))+":"+
+				strings.TrimSpace(fmt.Sprint(data["key_type"]))+":"+
+				strings.TrimSpace(fmt.Sprint(data["bucket_class"])))
+		w.WriteHeader(http.StatusOK)
+	})
+	defer server.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Services: []config.ServiceConfig{{
+			Version: 1,
+			Services: []config.Service{{
+				Name: "agent",
+				Host: "http://agent-default:8080",
+				Routes: []config.RouterConfig{{
+					Path:    "/ai/chat",
+					Methods: []string{"POST"},
+					LimitAlertPolicy: &config.RouteLimitAlertPolicyConfig{
+						GroupBy: "bucket",
+					},
+					Backends: []config.Backend{
+						{URLPattern: "/"},
+					},
+				}},
+			}},
+		}},
+		Security: config.SecurityConfig{
+			NotificationWebhooks: []config.NotificationWebhook{
+				{
+					Name:                    "tenant-buckets",
+					URL:                     server.URL,
+					Events:                  []string{"gateway.limit_alert"},
+					MinLimitAlertSeverity:   "warning",
+					LimitAlertTypes:         []string{"concurrency_queue_full"},
+					LimitAlertKeyTypes:      []string{"jwt_sub"},
+					LimitAlertBucketIDRegex: "^jwt_sub:",
+					LimitAlertCooldown:      "1h",
+				},
+			},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	route := cfg.Services[0].Services[0].Routes[0]
+	route.ServiceName = "agent"
+	now := time.Now().UTC()
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "vip-a", 0, now.Add(-4*time.Minute))
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "vip-a", 0, now.Add(-3*time.Minute))
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "vip-b", 0, now.Add(-2*time.Minute))
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "vip-b", 0, now.Add(-1*time.Minute))
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "api_key", "header:key-1", 0, now.Add(-90*time.Second))
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "api_key", "header:key-1", 0, now.Add(-30*time.Second))
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/gateway/limit-alerts/notify?window=5m&min_count=2", nil)
+
+	resp := httptest.NewRecorder()
+	api.notifyGatewayLimitAlerts(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected first notify to return 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if len(received) != 2 {
+		t.Fatalf("expected two jwt_sub bucket deliveries, got %v", received)
+	}
+	if received[0] == received[1] {
+		t.Fatalf("expected distinct bucket deliveries, got %v", received)
+	}
+
+	resp = httptest.NewRecorder()
+	api.notifyGatewayLimitAlerts(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected second notify to return 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if len(received) != 2 {
+		t.Fatalf("expected cooldown to suppress duplicate per-bucket alerts, got %v", received)
+	}
+}
+
+func TestNotifyGatewayLimitAlertsAppliesNamedWebhookProfile(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("failed to chdir temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
+
+	received := make([]string, 0, 4)
+	server := newNotificationTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode webhook payload: %v", err)
+		}
+		data, _ := payload["data"].(map[string]interface{})
+		received = append(received,
+			strings.TrimSpace(fmt.Sprint(payload["event"]))+":"+
+				strings.TrimSpace(fmt.Sprint(data["bucket_id"]))+":"+
+				strings.TrimSpace(fmt.Sprint(data["key_type"]))+":"+
+				strings.TrimSpace(fmt.Sprint(data["bucket_class"])))
+		w.WriteHeader(http.StatusOK)
+	})
+	defer server.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Services: []config.ServiceConfig{{
+			Version: 1,
+			Services: []config.Service{{
+				Name: "agent",
+				Host: "http://agent-default:8080",
+				Routes: []config.RouterConfig{{
+					Path:    "/ai/chat",
+					Methods: []string{"POST"},
+					LimitAlertPolicy: &config.RouteLimitAlertPolicyConfig{
+						GroupBy: "bucket",
+					},
+					Backends: []config.Backend{
+						{URLPattern: "/"},
+					},
+				}},
+			}},
+		}},
+		Security: config.SecurityConfig{
+			LimitAlertBucketClasses: map[string]config.LimitAlertBucketClassConfig{
+				"vip-jwt": {
+					KeyType:     "jwt_sub",
+					BucketRegex: "^vip-",
+				},
+			},
+			LimitAlertProfiles: map[string]config.LimitAlertRecipientProfile{
+				"vip-jwt": {
+					MinLimitAlertSeverity:   "warning",
+					LimitAlertTypes:         []string{"concurrency_queue_full"},
+					LimitAlertKeyTypes:      []string{"jwt_sub"},
+					LimitAlertBucketClasses: []string{"vip-jwt"},
+					LimitAlertCooldown:      "1h",
+				},
+			},
+			NotificationWebhooks: []config.NotificationWebhook{
+				{
+					Name:              "vip-jwt-target",
+					URL:               server.URL,
+					Events:            []string{"gateway.limit_alert"},
+					LimitAlertProfile: "vip-jwt",
+				},
+			},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	route := cfg.Services[0].Services[0].Routes[0]
+	route.ServiceName = "agent"
+	now := time.Now().UTC()
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "vip-a", 0, now.Add(-2*time.Minute))
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "vip-a", 0, now.Add(-90*time.Second))
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "api_key", "header:key-1", 0, now.Add(-75*time.Second))
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "api_key", "header:key-1", 0, now.Add(-30*time.Second))
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/gateway/limit-alerts/notify?window=5m&min_count=2", nil)
+	resp := httptest.NewRecorder()
+	api.notifyGatewayLimitAlerts(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected notify to return 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if len(received) != 1 {
+		t.Fatalf("expected one delivery from named limiter profile, got %v", received)
+	}
+	if !strings.Contains(received[0], "gateway.limit_alert:") || !strings.Contains(received[0], ":jwt_sub:vip-jwt") {
+		t.Fatalf("expected jwt_sub bucket delivery from named profile, got %v", received)
+	}
+}
+
+func TestReconcileGatewayLimitAlertNotificationsAutoEmitsAndHonorsInterval(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("failed to chdir temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
+
+	receivedEvents := make([]string, 0, 6)
+	server := newNotificationTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload struct {
+			Event string `json:"event"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode webhook payload: %v", err)
+		}
+		receivedEvents = append(receivedEvents, payload.Event)
+		w.WriteHeader(http.StatusOK)
+	})
+	defer server.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Services: []config.ServiceConfig{{
+			Version: 1,
+			Services: []config.Service{{
+				Name: "agent",
+				Host: "http://agent-default:8080",
+				Routes: []config.RouterConfig{{
+					Path:    "/ai/chat",
+					Methods: []string{"POST"},
+					Backends: []config.Backend{
+						{URLPattern: "/"},
+					},
+				}},
+			}},
+		}},
+		Security: config.SecurityConfig{
+			MutationPolicy: config.MutationPolicy{
+				LimitAlertNotifications: config.PolicyAlertNotificationPolicy{
+					Enabled:                 true,
+					Interval:                "1m",
+					MinNotificationInterval: "1m",
+					OnlyOnChange:            true,
+					Window:                  "5m",
+					MinCount:                3,
+					MinSeverity:             "warning",
+				},
+			},
+			NotificationWebhooks: []config.NotificationWebhook{
+				{
+					URL:    server.URL,
+					Events: []string{"gateway.limit_alert_digest", "gateway.limit_alert"},
+				},
+			},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	route := cfg.Services[0].Services[0].Routes[0]
+	route.ServiceName = "agent"
+	base := time.Now().UTC()
+	gw.RecordRouteLimitHitForTest(route, "concurrency_queue_full", "jwt_sub", 0, base.Add(-30*time.Second))
+	gw.RecordRouteLimitHitForTest(route, "concurrency_queue_full", "jwt_sub", 0, base.Add(-20*time.Second))
+	gw.RecordRouteLimitHitForTest(route, "concurrency_queue_full", "jwt_sub", 0, base.Add(-10*time.Second))
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	api.reconcileGatewayLimitAlertNotifications(base)
+	if len(receivedEvents) != 2 {
+		t.Fatalf("expected digest plus one alert on first reconcile, got %d (%v)", len(receivedEvents), receivedEvents)
+	}
+
+	api.reconcileGatewayLimitAlertNotifications(base.Add(30 * time.Second))
+	if len(receivedEvents) != 2 {
+		t.Fatalf("expected min interval to suppress duplicate notifications, got %d (%v)", len(receivedEvents), receivedEvents)
+	}
+}
+
+func TestReconcileGatewayLimitAlertNotificationsEmitsLifecycleEvents(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("failed to chdir temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
+
+	type webhookRecord struct {
+		Event      string
+		IncidentID string
+		Severity   string
+		Previous   string
+	}
+	received := make([]webhookRecord, 0, 8)
+	server := newNotificationTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode webhook payload: %v", err)
+		}
+		data, _ := payload["data"].(map[string]interface{})
+		received = append(received, webhookRecord{
+			Event:      strings.TrimSpace(fmt.Sprint(payload["event"])),
+			IncidentID: strings.TrimSpace(fmt.Sprint(data["incident_id"])),
+			Severity:   strings.TrimSpace(fmt.Sprint(data["severity"])),
+			Previous:   strings.TrimSpace(fmt.Sprint(data["previous_severity"])),
+		})
+		w.WriteHeader(http.StatusOK)
+	})
+	defer server.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Services: []config.ServiceConfig{{
+			Version: 1,
+			Services: []config.Service{{
+				Name: "agent",
+				Host: "http://agent-default:8080",
+				Routes: []config.RouterConfig{{
+					Path:    "/ai/chat",
+					Methods: []string{"POST"},
+					Backends: []config.Backend{
+						{URLPattern: "/"},
+					},
+				}},
+			}},
+		}},
+		Security: config.SecurityConfig{
+			MutationPolicy: config.MutationPolicy{
+				LimitAlertNotifications: config.PolicyAlertNotificationPolicy{
+					Enabled:     true,
+					Interval:    "1m",
+					Window:      "5m",
+					MinCount:    3,
+					MinSeverity: "warning",
+				},
+			},
+			NotificationWebhooks: []config.NotificationWebhook{
+				{
+					URL: server.URL,
+					Events: []string{
+						"gateway.limit_alert_opened",
+						"gateway.limit_alert_stage_changed",
+						"gateway.limit_alert_resolved",
+					},
+				},
+			},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	route := cfg.Services[0].Services[0].Routes[0]
+	route.ServiceName = "agent"
+	base := time.Now().UTC()
+	gw.RecordRouteLimitHitForTest(route, "concurrency_queue_full", "jwt_sub", 0, base.Add(-30*time.Second))
+	gw.RecordRouteLimitHitForTest(route, "concurrency_queue_full", "jwt_sub", 0, base.Add(-20*time.Second))
+	gw.RecordRouteLimitHitForTest(route, "concurrency_queue_full", "jwt_sub", 0, base.Add(-10*time.Second))
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	api.reconcileGatewayLimitAlertNotifications(base)
+	if len(received) != 1 || received[0].Event != "gateway.limit_alert_opened" || strings.TrimSpace(received[0].IncidentID) == "" || received[0].Severity != "elevated" {
+		t.Fatalf("expected opened limit incident event, got %+v", received)
+	}
+	incidentID := received[0].IncidentID
+
+	for i := 0; i < 9; i++ {
+		gw.RecordRouteLimitHitForTest(route, "concurrency_queue_full", "jwt_sub", 0, base.Add(90*time.Second))
+	}
+	api.reconcileGatewayLimitAlertNotifications(base.Add(2 * time.Minute))
+	if len(received) != 2 || received[1].Event != "gateway.limit_alert_stage_changed" || received[1].Previous != "elevated" || received[1].Severity != "critical" || received[1].IncidentID != incidentID {
+		t.Fatalf("expected limit alert stage change for same incident, got %+v", received)
+	}
+
+	api.reconcileGatewayLimitAlertNotifications(base.Add(10 * time.Minute))
+	if len(received) != 3 || received[2].Event != "gateway.limit_alert_resolved" || received[2].IncidentID != incidentID {
+		t.Fatalf("expected resolved limit incident event, got %+v", received)
+	}
+}
+
+func TestReconcileGatewayLimitAlertNotificationsSplitsBucketScopedIncidents(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("failed to chdir temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
+
+	type webhookRecord struct {
+		Event      string
+		IncidentID string
+		BucketID   string
+	}
+	received := make([]webhookRecord, 0, 8)
+	server := newNotificationTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode webhook payload: %v", err)
+		}
+		data, _ := payload["data"].(map[string]interface{})
+		received = append(received, webhookRecord{
+			Event:      strings.TrimSpace(fmt.Sprint(payload["event"])),
+			IncidentID: strings.TrimSpace(fmt.Sprint(data["incident_id"])),
+			BucketID:   strings.TrimSpace(fmt.Sprint(data["bucket_id"])),
+		})
+		w.WriteHeader(http.StatusOK)
+	})
+	defer server.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Services: []config.ServiceConfig{{
+			Version: 1,
+			Services: []config.Service{{
+				Name: "agent",
+				Host: "http://agent-default:8080",
+				Routes: []config.RouterConfig{{
+					Path:    "/ai/chat",
+					Methods: []string{"POST"},
+					ConcurrencyLimitPolicy: &config.ConcurrencyLimitPolicyConfig{
+						MaxInFlight: 4,
+						KeyBy:       "jwt_sub",
+					},
+					LimitAlertPolicy: &config.RouteLimitAlertPolicyConfig{
+						MinCount: 2,
+						GroupBy:  "bucket",
+					},
+					Backends: []config.Backend{
+						{URLPattern: "/"},
+					},
+				}},
+			}},
+		}},
+		Security: config.SecurityConfig{
+			MutationPolicy: config.MutationPolicy{
+				LimitAlertNotifications: config.PolicyAlertNotificationPolicy{
+					Enabled:     true,
+					Interval:    "1m",
+					Window:      "5m",
+					MinCount:    2,
+					MinSeverity: "warning",
+				},
+			},
+			NotificationWebhooks: []config.NotificationWebhook{
+				{
+					URL:    server.URL,
+					Events: []string{"gateway.limit_alert_opened"},
+				},
+			},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	route := cfg.Services[0].Services[0].Routes[0]
+	route.ServiceName = "agent"
+	base := time.Now().UTC()
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "tenant-a", 0, base.Add(-30*time.Second))
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "tenant-a", 0, base.Add(-20*time.Second))
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "tenant-b", 0, base.Add(-15*time.Second))
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "tenant-b", 0, base.Add(-10*time.Second))
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	api.reconcileGatewayLimitAlertNotifications(base)
+	if len(received) != 2 {
+		t.Fatalf("expected two opened limit incidents, got %+v", received)
+	}
+	if received[0].Event != "gateway.limit_alert_opened" || received[1].Event != "gateway.limit_alert_opened" {
+		t.Fatalf("expected opened events, got %+v", received)
+	}
+	if received[0].IncidentID == "" || received[1].IncidentID == "" || received[0].IncidentID == received[1].IncidentID {
+		t.Fatalf("expected distinct incident ids, got %+v", received)
+	}
+	if received[0].BucketID == "" || received[1].BucketID == "" || received[0].BucketID == received[1].BucketID {
+		t.Fatalf("expected distinct bucket ids, got %+v", received)
+	}
+}
+
+func TestReconcileGatewayLimitClassAlertNotificationsAutoEmitsAndHonorsInterval(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("failed to chdir temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
+
+	receivedEvents := make([]string, 0, 4)
+	server := newNotificationTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode webhook payload: %v", err)
+		}
+		receivedEvents = append(receivedEvents, fmt.Sprint(payload["event"]))
+		w.WriteHeader(http.StatusOK)
+	})
+	defer server.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitAlertBucketClasses: map[string]config.LimitAlertBucketClassConfig{
+				"vip-jwt": {
+					KeyType:     "jwt_sub",
+					BucketRegex: "^vip-",
+				},
+			},
+			MutationPolicy: config.MutationPolicy{
+				LimitClassAlertNotifications: config.PolicyAlertNotificationPolicy{
+					Enabled:                 true,
+					Interval:                "1m",
+					MinNotificationInterval: "1m",
+					OnlyOnChange:            true,
+					Window:                  "5m",
+					MinCount:                3,
+					MinSeverity:             "warning",
+				},
+			},
+			NotificationWebhooks: []config.NotificationWebhook{
+				{
+					URL:    server.URL,
+					Events: []string{"gateway.limit_class_alert_digest", "gateway.limit_class_alert"},
+				},
+			},
+		},
+		Services: []config.ServiceConfig{{
+			Version: 1,
+			Services: []config.Service{{
+				Name: "agent",
+				Host: "http://agent-default:8080",
+				Routes: []config.RouterConfig{{
+					Path:    "/ai/chat",
+					Methods: []string{"POST"},
+					Backends: []config.Backend{
+						{URLPattern: "/"},
+					},
+				}},
+			}},
+		}},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	route := cfg.Services[0].Services[0].Routes[0]
+	route.ServiceName = "agent"
+	base := time.Now().UTC()
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "vip-a", 0, base.Add(-30*time.Second))
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "vip-b", 0, base.Add(-20*time.Second))
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "vip-c", 0, base.Add(-10*time.Second))
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	api.reconcileGatewayLimitClassAlertNotifications(base)
+	if len(receivedEvents) != 2 {
+		t.Fatalf("expected digest plus one class alert on first reconcile, got %d (%v)", len(receivedEvents), receivedEvents)
+	}
+
+	api.reconcileGatewayLimitClassAlertNotifications(base.Add(30 * time.Second))
+	if len(receivedEvents) != 2 {
+		t.Fatalf("expected min interval to suppress duplicate class notifications, got %d (%v)", len(receivedEvents), receivedEvents)
+	}
+}
+
+func TestReconcileGatewayLimitClassAlertNotificationsEmitsLifecycleEvents(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("failed to chdir temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
+
+	type webhookRecord struct {
+		Event      string
+		IncidentID string
+		Severity   string
+		Previous   string
+	}
+	received := make([]webhookRecord, 0, 8)
+	server := newNotificationTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode webhook payload: %v", err)
+		}
+		data, _ := payload["data"].(map[string]interface{})
+		received = append(received, webhookRecord{
+			Event:      strings.TrimSpace(fmt.Sprint(payload["event"])),
+			IncidentID: strings.TrimSpace(fmt.Sprint(data["incident_id"])),
+			Severity:   strings.TrimSpace(fmt.Sprint(data["severity"])),
+			Previous:   strings.TrimSpace(fmt.Sprint(data["previous_severity"])),
+		})
+		w.WriteHeader(http.StatusOK)
+	})
+	defer server.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitAlertBucketClasses: map[string]config.LimitAlertBucketClassConfig{
+				"vip-jwt": {
+					KeyType:     "jwt_sub",
+					BucketRegex: "^vip-",
+				},
+			},
+			MutationPolicy: config.MutationPolicy{
+				LimitClassAlertNotifications: config.PolicyAlertNotificationPolicy{
+					Enabled:     true,
+					Interval:    "1m",
+					Window:      "5m",
+					MinCount:    3,
+					MinSeverity: "warning",
+				},
+			},
+			NotificationWebhooks: []config.NotificationWebhook{
+				{
+					URL: server.URL,
+					Events: []string{
+						"gateway.limit_class_alert_opened",
+						"gateway.limit_class_alert_stage_changed",
+						"gateway.limit_class_alert_resolved",
+					},
+				},
+			},
+		},
+		Services: []config.ServiceConfig{{
+			Version: 1,
+			Services: []config.Service{{
+				Name: "agent",
+				Host: "http://agent-default:8080",
+				Routes: []config.RouterConfig{{
+					Path:    "/ai/chat",
+					Methods: []string{"POST"},
+					Backends: []config.Backend{
+						{URLPattern: "/"},
+					},
+				}},
+			}},
+		}},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	route := cfg.Services[0].Services[0].Routes[0]
+	route.ServiceName = "agent"
+	base := time.Now().UTC()
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "vip-a", 0, base.Add(-30*time.Second))
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "vip-b", 0, base.Add(-20*time.Second))
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "vip-c", 0, base.Add(-10*time.Second))
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	api.reconcileGatewayLimitClassAlertNotifications(base)
+	if len(received) != 1 || received[0].Event != "gateway.limit_class_alert_opened" || strings.TrimSpace(received[0].IncidentID) == "" || received[0].Severity != "elevated" {
+		t.Fatalf("expected opened limit class incident event, got %+v", received)
+	}
+	incidentID := received[0].IncidentID
+
+	for i := 0; i < 9; i++ {
+		gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "vip-z", 0, base.Add(90*time.Second))
+	}
+	api.reconcileGatewayLimitClassAlertNotifications(base.Add(2 * time.Minute))
+	if len(received) != 2 || received[1].Event != "gateway.limit_class_alert_stage_changed" || received[1].Previous != "elevated" || received[1].Severity != "critical" || received[1].IncidentID != incidentID {
+		t.Fatalf("expected limit class alert stage change for same incident, got %+v", received)
+	}
+
+	api.reconcileGatewayLimitClassAlertNotifications(base.Add(10 * time.Minute))
+	if len(received) != 3 || received[2].Event != "gateway.limit_class_alert_resolved" || received[2].IncidentID != incidentID {
+		t.Fatalf("expected resolved limit class incident event, got %+v", received)
+	}
+}
+
+func TestNotifyGatewayLimitClassAlertsHonorsWebhookClassFiltersAndCooldown(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("failed to chdir temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
+
+	received := make([]string, 0, 6)
+	server := newNotificationTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode webhook payload: %v", err)
+		}
+		data, _ := payload["data"].(map[string]interface{})
+		received = append(received, strings.TrimSpace(fmt.Sprint(payload["event"]))+":"+strings.TrimSpace(fmt.Sprint(data["severity"]))+":"+strings.TrimSpace(fmt.Sprint(data["bucket_class"])))
+		w.WriteHeader(http.StatusOK)
+	})
+	defer server.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitAlertBucketClasses: map[string]config.LimitAlertBucketClassConfig{
+				"vip-jwt": {
+					KeyType:     "jwt_sub",
+					BucketRegex: "^vip-",
+				},
+			},
+			NotificationWebhooks: []config.NotificationWebhook{
+				{
+					URL:                     server.URL,
+					Events:                  []string{"gateway.limit_class_alert"},
+					MinLimitAlertSeverity:   "elevated",
+					LimitAlertBucketClasses: []string{"vip-jwt"},
+					LimitAlertCooldown:      "30m",
+				},
+			},
+		},
+		Services: []config.ServiceConfig{{
+			Version: 1,
+			Services: []config.Service{{
+				Name: "agent",
+				Host: "http://agent-default:8080",
+				Routes: []config.RouterConfig{{
+					Path:    "/ai/chat",
+					Methods: []string{"POST"},
+					Backends: []config.Backend{
+						{URLPattern: "/"},
+					},
+				}},
+			}},
+		}},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	route := cfg.Services[0].Services[0].Routes[0]
+	route.ServiceName = "agent"
+	now := time.Now().UTC()
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "vip-a", 0, now.Add(-4*time.Minute))
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "vip-b", 0, now.Add(-3*time.Minute))
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "vip-c", 0, now.Add(-2*time.Minute))
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/gateway/limit-class-alerts/notify?window=5m&min_count=3", nil)
+	resp := httptest.NewRecorder()
+	api.notifyGatewayLimitClassAlerts(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if len(received) != 1 || received[0] != "gateway.limit_class_alert:elevated:vip-jwt" {
+		t.Fatalf("expected one filtered class alert delivery, got %v", received)
+	}
+
+	resp = httptest.NewRecorder()
+	api.notifyGatewayLimitClassAlerts(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200 on repeat notify, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if len(received) != 1 {
+		t.Fatalf("expected cooldown to suppress duplicate class alert, got %v", received)
+	}
+
+	for i := 0; i < 9; i++ {
+		gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "vip-z", 0, now.Add(-30*time.Second))
+	}
+	resp = httptest.NewRecorder()
+	api.notifyGatewayLimitClassAlerts(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200 on escalated notify, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if len(received) != 2 || received[1] != "gateway.limit_class_alert:critical:vip-jwt" {
+		t.Fatalf("expected critical class alert to break cooldown, got %v", received)
+	}
+}
+
+func TestGetGatewayLimitClassIncidentsReturnsOpenIncidents(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitAlertBucketClasses: map[string]config.LimitAlertBucketClassConfig{
+				"vip-jwt": {
+					KeyType:     "jwt_sub",
+					BucketRegex: "^vip-",
+				},
+			},
+		},
+		Services: []config.ServiceConfig{{
+			Version: 1,
+			Services: []config.Service{{
+				Name: "agent",
+				Host: "http://agent-default:8080",
+				Routes: []config.RouterConfig{{
+					Path:    "/ai/chat",
+					Methods: []string{"POST"},
+					Backends: []config.Backend{
+						{URLPattern: "/"},
+					},
+				}},
+			}},
+		}},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	route := cfg.Services[0].Services[0].Routes[0]
+	route.ServiceName = "agent"
+	base := time.Now().UTC()
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "vip-a", 0, base.Add(-30*time.Second))
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "vip-b", 0, base.Add(-20*time.Second))
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "vip-c", 0, base.Add(-10*time.Second))
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	api.reconcileGatewayLimitClassAlertNotifications(base)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/gateway/limit-class-incidents", nil)
+	resp := httptest.NewRecorder()
+	api.getGatewayLimitClassIncidents(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		TotalIncidents int `json:"total_incidents"`
+		Incidents      []struct {
+			IncidentID         string  `json:"incident_id"`
+			Severity           string  `json:"severity"`
+			ServiceName        string  `json:"service_name"`
+			RoutePath          string  `json:"route_path"`
+			LimitType          string  `json:"limit_type"`
+			KeyType            string  `json:"key_type"`
+			BucketClass        string  `json:"bucket_class"`
+			Count              int     `json:"count"`
+			IncidentAgeSeconds float64 `json:"incident_age_seconds"`
+		} `json:"incidents"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.TotalIncidents != 1 || len(payload.Incidents) != 1 {
+		t.Fatalf("expected one open class incident, got %+v", payload)
+	}
+	incident := payload.Incidents[0]
+	if strings.TrimSpace(incident.IncidentID) == "" || incident.Severity != "elevated" || incident.ServiceName != "agent" || incident.RoutePath != "/ai/chat" || incident.LimitType != "concurrency_queue_full" || incident.KeyType != "jwt_sub" || incident.BucketClass != "vip-jwt" || incident.Count != 3 || incident.IncidentAgeSeconds < 0 {
+		t.Fatalf("unexpected class incident payload: %+v", incident)
 	}
 }
 

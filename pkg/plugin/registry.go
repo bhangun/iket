@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"sync"
 
+	coreerrors "github.com/bhangun/iket/pkg/core/errors"
 	"github.com/bhangun/iket/pkg/logging"
 )
 
@@ -117,7 +118,7 @@ func (r *Registry) Register(p Plugin) error {
 
 	name := p.Name()
 	if _, exists := r.plugins[name]; exists {
-		return fmt.Errorf("plugin %s already registered", name)
+		return coreerrors.NewPluginError(name, "already registered", nil)
 	}
 
 	r.plugins[name] = p
@@ -146,7 +147,7 @@ func (r *Registry) Get(name string) (Plugin, error) {
 
 	p, ok := r.plugins[name]
 	if !ok {
-		return nil, fmt.Errorf("plugin %s not found", name)
+		return nil, coreerrors.NewCodeError(coreerrors.CodePluginNotFound, fmt.Sprintf("plugin %s not found", name), nil)
 	}
 	return p, nil
 }
@@ -162,7 +163,7 @@ func (r *Registry) GetMiddlewarePlugin(name string) (MiddlewarePlugin, error) {
 		return mp, nil
 	}
 
-	return nil, fmt.Errorf("plugin %s does not implement MiddlewarePlugin interface", name)
+	return nil, coreerrors.NewCodeError(coreerrors.CodePluginUnsupported, fmt.Sprintf("plugin %s does not implement MiddlewarePlugin interface", name), nil)
 }
 
 // IsMiddlewarePlugin checks if a plugin implements the MiddlewarePlugin interface
@@ -195,7 +196,7 @@ func (r *Registry) BuildMiddlewareChain(pluginNames []string, finalHandler http.
 		name := pluginNames[i]
 		mp, err := r.GetMiddlewarePlugin(name)
 		if err != nil {
-			return nil, fmt.Errorf("failed to get middleware plugin %s: %w", name, err)
+			return nil, coreerrors.NewPluginError(name, "failed to get middleware plugin", err)
 		}
 
 		handler = mp.Middleware(handler)
@@ -247,7 +248,7 @@ func (r *Registry) Initialize(configs map[string]map[string]interface{}) error {
 		}
 
 		if err := p.Initialize(config); err != nil {
-			return fmt.Errorf("failed to initialize plugin %s: %w", name, err)
+			return coreerrors.NewPluginError(name, "failed to initialize", err)
 		}
 	}
 
@@ -262,7 +263,7 @@ func (r *Registry) StartAll() error {
 	for name, p := range r.plugins {
 		if lp, ok := p.(LifecyclePlugin); ok {
 			if err := lp.OnStart(); err != nil {
-				return fmt.Errorf("plugin %s failed to start: %w", name, err)
+				return coreerrors.NewPluginError(name, "failed to start", err)
 			}
 		}
 	}
@@ -277,7 +278,7 @@ func (r *Registry) ShutdownAll() error {
 	for name, p := range r.plugins {
 		if lp, ok := p.(LifecyclePlugin); ok {
 			if err := lp.OnShutdown(); err != nil {
-				return fmt.Errorf("plugin %s failed to shutdown: %w", name, err)
+				return coreerrors.NewPluginError(name, "failed to shutdown", err)
 			}
 		}
 	}
@@ -340,7 +341,7 @@ func (r *Registry) ReloadAll(configs map[string]map[string]interface{}) error {
 		if rp, ok := p.(ReloadablePlugin); ok {
 			if config, ok := configs[name]; ok {
 				if err := rp.Reload(config); err != nil {
-					return fmt.Errorf("reload failed for plugin %s: %w", name, err)
+					return coreerrors.NewPluginError(name, "reload failed", err)
 				}
 			}
 		}

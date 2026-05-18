@@ -8,6 +8,7 @@ import (
 	"os"
 	"sync"
 
+	coreerrors "github.com/bhangun/iket/pkg/core/errors"
 	"github.com/bhangun/iket/pkg/plugin"
 )
 
@@ -69,12 +70,12 @@ func (t *TLSPlugin) Initialize(config map[string]interface{}) error {
 
 	// Validate required files
 	if t.certFile == "" || t.keyFile == "" {
-		return fmt.Errorf("cert_file and key_file are required for TLS")
+		return coreerrors.NewRequiredFieldError("cert_file and key_file are required for TLS")
 	}
 
 	// Build TLS config
 	if err := t.buildTLSConfig(); err != nil {
-		return fmt.Errorf("failed to build TLS config: %w", err)
+		return coreerrors.NewConfigError("failed to build TLS config", err)
 	}
 
 	return nil
@@ -84,7 +85,7 @@ func (t *TLSPlugin) buildTLSConfig() error {
 	// Load certificate
 	cert, err := tls.LoadX509KeyPair(t.certFile, t.keyFile)
 	if err != nil {
-		return fmt.Errorf("failed to load certificate: %w", err)
+		return coreerrors.NewConfigError("failed to load certificate", err)
 	}
 
 	// Load CA certificate if provided
@@ -92,12 +93,12 @@ func (t *TLSPlugin) buildTLSConfig() error {
 	if t.caFile != "" {
 		caCert, err := os.ReadFile(t.caFile)
 		if err != nil {
-			return fmt.Errorf("failed to read CA certificate: %w", err)
+			return coreerrors.NewConfigError("failed to read CA certificate", err)
 		}
 
 		caCertPool = x509.NewCertPool()
 		if !caCertPool.AppendCertsFromPEM(caCert) {
-			return fmt.Errorf("failed to append CA certificate")
+			return coreerrors.NewCodeError(coreerrors.CodeCertificatePEMInvalid, "failed to append CA certificate", nil)
 		}
 	}
 
@@ -163,21 +164,21 @@ func (t *TLSPlugin) Health() error {
 	defer t.mu.RUnlock()
 
 	if !t.enabled {
-		return fmt.Errorf("TLS plugin is disabled")
+		return coreerrors.NewCodeError(coreerrors.CodePluginUnsupported, "TLS plugin is disabled", nil)
 	}
 
 	// Check if certificate files exist
 	if _, err := os.Stat(t.certFile); os.IsNotExist(err) {
-		return fmt.Errorf("certificate file not found: %s", t.certFile)
+		return coreerrors.NewCodeError(coreerrors.CodeCertificateNotFound, fmt.Sprintf("certificate file not found: %s", t.certFile), nil)
 	}
 
 	if _, err := os.Stat(t.keyFile); os.IsNotExist(err) {
-		return fmt.Errorf("key file not found: %s", t.keyFile)
+		return coreerrors.NewConfigError(fmt.Sprintf("key file not found: %s", t.keyFile), nil)
 	}
 
 	if t.caFile != "" {
 		if _, err := os.Stat(t.caFile); os.IsNotExist(err) {
-			return fmt.Errorf("CA file not found: %s", t.caFile)
+			return coreerrors.NewConfigError(fmt.Sprintf("CA file not found: %s", t.caFile), nil)
 		}
 	}
 

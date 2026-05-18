@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	coreerrors "github.com/bhangun/iket/pkg/core/errors"
 	"github.com/bhangun/iket/pkg/plugin"
 	"github.com/gorilla/websocket"
 )
@@ -87,12 +88,12 @@ func (w *WebSocketPlugin) Initialize(config map[string]interface{}) error {
 
 	// Validate upstream URL
 	if w.upstreamURL == "" {
-		return fmt.Errorf("upstream_url is required for WebSocket plugin")
+		return coreerrors.NewRequiredFieldError("upstream_url is required for WebSocket plugin")
 	}
 
 	// Ensure upstream URL uses WebSocket protocol
 	if !strings.HasPrefix(w.upstreamURL, "ws://") && !strings.HasPrefix(w.upstreamURL, "wss://") {
-		return fmt.Errorf("upstream_url must use ws:// or wss:// protocol")
+		return coreerrors.NewCodeError(coreerrors.CodeValidationError, "upstream_url must use ws:// or wss:// protocol", nil)
 	}
 
 	return nil
@@ -279,7 +280,7 @@ func (ws *WebSocketPlugin) handleWebSocket(w http.ResponseWriter, r *http.Reques
 func (ws *WebSocketPlugin) buildUpstreamURL(r *http.Request) (string, error) {
 	baseURL, err := url.Parse(ws.upstreamURL)
 	if err != nil {
-		return "", err
+		return "", coreerrors.NewConfigError("invalid upstream URL", err)
 	}
 
 	// Append the path from the original request
@@ -335,17 +336,17 @@ func (ws *WebSocketPlugin) Health() error {
 	defer ws.mu.RUnlock()
 
 	if !ws.enabled {
-		return fmt.Errorf("WebSocket plugin is disabled")
+		return coreerrors.NewCodeError(coreerrors.CodePluginUnsupported, "WebSocket plugin is disabled", nil)
 	}
 
 	// Check if upstream URL is configured
 	if ws.upstreamURL == "" {
-		return fmt.Errorf("upstream URL not configured")
+		return coreerrors.NewRequiredFieldError("upstream URL not configured")
 	}
 
 	// Try to parse the upstream URL
 	if _, err := url.Parse(ws.upstreamURL); err != nil {
-		return fmt.Errorf("invalid upstream URL: %w", err)
+		return coreerrors.NewConfigError("invalid upstream URL", err)
 	}
 
 	return nil
