@@ -268,14 +268,12 @@ build_and_install() {
             make build-cli > /dev/null
             print_info "Moving iket to $INSTALL_DIR..."
             $SUDO_CMD install -m 755 bin/iket "$INSTALL_DIR/iket"
-            $SUDO_CMD install -m 755 bin/iket "$INSTALL_DIR/iket-cli"
         else
             print_info "${BUILD} Building binaries (this may take a minute)..."
             make build build-cli > /dev/null
             print_info "Moving binaries to $INSTALL_DIR..."
             $SUDO_CMD install -m 755 bin/iket-server "$INSTALL_DIR/iket-server"
             $SUDO_CMD install -m 755 bin/iket "$INSTALL_DIR/iket"
-            $SUDO_CMD install -m 755 bin/iket "$INSTALL_DIR/iket-cli"
             $SUDO_CMD install -m 755 bin/iket-server "$INSTALL_DIR/iket-gateway"
         fi
     else
@@ -283,7 +281,6 @@ build_and_install() {
         print_step "Installing Binaries"
         print_info "Installing prebuilt CLI binary to $INSTALL_DIR..."
         $SUDO_CMD install -m 755 "$PREBUILT_CLI_PATH" "$INSTALL_DIR/iket"
-        $SUDO_CMD install -m 755 "$PREBUILT_CLI_PATH" "$INSTALL_DIR/iket-cli"
         if [ "$CLI_ONLY" != true ]; then
             print_info "Installing prebuilt gateway binary to $INSTALL_DIR..."
             $SUDO_CMD install -m 755 "$PREBUILT_SERVER_PATH" "$INSTALL_DIR/iket-server"

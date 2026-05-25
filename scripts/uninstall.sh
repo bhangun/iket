@@ -58,7 +58,7 @@ Options:
   --backup                  Create a backup archive before removing files
   --backup-dir <dir>        Directory for backup archives (default: ~/iket-backups)
   --purge-state             Remove ~/.iket after uninstalling binaries/service
-  --cli-only                Remove only iket and iket-cli, leave server/service installed
+  --cli-only                Remove only iket, leave server/service installed
   --config-dir <dir>        Override the Iket state/config directory (default: ~/.iket)
   --service-name <name>     Override the systemd service name (default: iket)
   --yes                     Skip confirmation prompts
@@ -177,10 +177,8 @@ confirm() {
     print_warning "This will remove installed Iket binaries."
     if [ "$CLI_ONLY" = true ]; then
         echo "  - ${INSTALL_DIR}/iket"
-        echo "  - ${INSTALL_DIR}/iket-cli"
     else
         echo "  - ${INSTALL_DIR}/iket"
-        echo "  - ${INSTALL_DIR}/iket-cli"
         echo "  - ${INSTALL_DIR}/iket-server"
         echo "  - ${INSTALL_DIR}/iket-gateway"
         echo "  - ${SERVICE_FILE} (if present)"
@@ -281,7 +279,7 @@ stop_and_remove_service() {
 remove_binaries() {
     print_step "Removing Binaries"
 
-    local binaries=("$INSTALL_DIR/iket" "$INSTALL_DIR/iket-cli")
+    local binaries=("$INSTALL_DIR/iket")
     if [ "$CLI_ONLY" != true ]; then
         binaries+=("$INSTALL_DIR/iket-server" "$INSTALL_DIR/iket-gateway")
     fi

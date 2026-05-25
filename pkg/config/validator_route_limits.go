@@ -71,10 +71,8 @@ func validateRouteConcurrencyLimitPolicy(ctx serviceValidationContext) error {
 }
 
 func validateLimitKeyPolicy(fieldPrefix, keyBy, keyHeader string) error {
-	switch strings.ToLower(strings.TrimSpace(keyBy)) {
-	case "", "global", "ip", "header", "api_key", "jwt_sub":
-	default:
-		return validationError(fieldPrefix+".keyBy", "keyBy must be one of global, ip, header, api_key, or jwt_sub")
+	if !IsRouteLimitKeyBy(keyBy) {
+		return validationError(fieldPrefix+".keyBy", "keyBy must be one of "+SupportedRouteLimitKeyByValues)
 	}
 	if strings.EqualFold(strings.TrimSpace(keyBy), "header") && strings.TrimSpace(keyHeader) == "" {
 		return validationError(fieldPrefix+".keyHeader", "keyHeader is required when keyBy is header")
@@ -86,9 +84,9 @@ func validateLimiterClassRatePolicies(ctx serviceValidationContext, policy RateL
 	if len(policy.ClassPolicies) == 0 {
 		return nil
 	}
-	keyBy := strings.ToLower(strings.TrimSpace(policy.KeyBy))
-	if keyBy == "" || keyBy == "global" {
-		return validationError(ctx.routeField("rateLimitPolicy.classPolicies"), "classPolicies require a bucketed keyBy such as ip, header, api_key, or jwt_sub")
+	keyBy := NormalizeLimitKeyType(policy.KeyBy)
+	if !IsBucketedLimitKeyType(keyBy) {
+		return validationError(ctx.routeField("rateLimitPolicy.classPolicies"), "classPolicies require a bucketed keyBy such as "+SupportedBucketedLimitKeyTypeValues)
 	}
 	for i, classPolicy := range policy.ClassPolicies {
 		prefix := ctx.routeField("rateLimitPolicy.classPolicies") + "[" + strconv.Itoa(i) + "]"
@@ -107,7 +105,7 @@ func validateLimiterClassRatePolicies(ctx serviceValidationContext, policy RateL
 		if !ok {
 			return validationError(prefix+".bucketClass", "bucketClass must reference a defined security.limitAlertBucketClasses entry")
 		}
-		if strings.ToLower(strings.TrimSpace(classConfig.KeyType)) != keyBy {
+		if NormalizeLimitKeyType(classConfig.KeyType) != keyBy {
 			return validationError(prefix+".bucketClass", "bucketClass keyType must match the route rateLimitPolicy keyBy")
 		}
 		requestsPerSecond := classPolicy.RequestsPerSecond
@@ -132,9 +130,9 @@ func validateLimiterClassConcurrencyPolicies(ctx serviceValidationContext, polic
 	if len(policy.ClassPolicies) == 0 {
 		return nil
 	}
-	keyBy := strings.ToLower(strings.TrimSpace(policy.KeyBy))
-	if keyBy == "" || keyBy == "global" {
-		return validationError(ctx.routeField("concurrencyLimitPolicy.classPolicies"), "classPolicies require a bucketed keyBy such as ip, header, api_key, or jwt_sub")
+	keyBy := NormalizeLimitKeyType(policy.KeyBy)
+	if !IsBucketedLimitKeyType(keyBy) {
+		return validationError(ctx.routeField("concurrencyLimitPolicy.classPolicies"), "classPolicies require a bucketed keyBy such as "+SupportedBucketedLimitKeyTypeValues)
 	}
 	for i, classPolicy := range policy.ClassPolicies {
 		prefix := ctx.routeField("concurrencyLimitPolicy.classPolicies") + "[" + strconv.Itoa(i) + "]"
@@ -153,7 +151,7 @@ func validateLimiterClassConcurrencyPolicies(ctx serviceValidationContext, polic
 		if !ok {
 			return validationError(prefix+".bucketClass", "bucketClass must reference a defined security.limitAlertBucketClasses entry")
 		}
-		if strings.ToLower(strings.TrimSpace(classConfig.KeyType)) != keyBy {
+		if NormalizeLimitKeyType(classConfig.KeyType) != keyBy {
 			return validationError(prefix+".bucketClass", "bucketClass keyType must match the route concurrencyLimitPolicy keyBy")
 		}
 		maxInFlight := classPolicy.MaxInFlight

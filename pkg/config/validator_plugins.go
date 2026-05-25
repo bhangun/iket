@@ -2,9 +2,10 @@ package config
 
 import (
 	"fmt"
-	"github.com/bhangun/iket/pkg/core/errors"
 	"net/url"
 	"time"
+
+	"github.com/bhangun/iket/pkg/core/errors"
 )
 
 // PluginsConfigRule validates plugins configuration
@@ -35,10 +36,74 @@ func (r *PluginsConfigRule) Validate(cfg *Config) error {
 			if err := r.validateCorsPlugin(pluginConfig); err != nil {
 				return err
 			}
+		case "apikey":
+			if err := r.validateAPIKeyPlugin(pluginConfig); err != nil {
+				return err
+			}
 		}
 	}
 
 	return nil
+}
+
+func (r *PluginsConfigRule) validateAPIKeyPlugin(config map[string]interface{}) error {
+	for _, key := range []string{"usage_observer_timeout", "usageObserverTimeout"} {
+		value, ok := config[key]
+		if !ok {
+			continue
+		}
+		timeout, ok := value.(string)
+		if !ok {
+			return errors.NewValidationError("plugins.apikey."+key, "usage observer timeout must use a valid positive duration format")
+		}
+		parsed, err := time.ParseDuration(timeout)
+		if err != nil || parsed <= 0 {
+			return errors.NewValidationError("plugins.apikey."+key, "usage observer timeout must use a valid positive duration format")
+		}
+	}
+	for _, key := range []string{"usage_observer_async", "usageObserverAsync"} {
+		value, ok := config[key]
+		if !ok {
+			continue
+		}
+		if _, ok := value.(bool); !ok {
+			return errors.NewValidationError("plugins.apikey."+key, "usage observer async must be a boolean")
+		}
+	}
+	for _, key := range []string{"usage_observer_async_max_in_flight", "usageObserverAsyncMaxInFlight"} {
+		value, ok := config[key]
+		if !ok {
+			continue
+		}
+		if _, ok := positiveIntPluginConfigValue(value); !ok {
+			return errors.NewValidationError("plugins.apikey."+key, "usage observer async max in-flight must be a positive integer")
+		}
+	}
+	return nil
+}
+
+func positiveIntPluginConfigValue(value interface{}) (int, bool) {
+	maxInt := int64(^uint(0) >> 1)
+	switch typed := value.(type) {
+	case int:
+		return typed, typed > 0
+	case int64:
+		if typed <= 0 || typed > maxInt {
+			return 0, false
+		}
+		return int(typed), typed > 0
+	case float64:
+		if typed <= 0 || typed > float64(maxInt) {
+			return 0, false
+		}
+		converted := int64(typed)
+		if float64(converted) != typed {
+			return 0, false
+		}
+		return int(converted), true
+	default:
+		return 0, false
+	}
 }
 
 func (r *PluginsConfigRule) validateAuthPlugin(config map[string]interface{}) error {

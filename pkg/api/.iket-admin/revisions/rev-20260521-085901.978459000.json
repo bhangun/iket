@@ -1,0 +1,130 @@
+{
+  "id": "rev-20260521-085901.978459000",
+  "action": "client_update",
+  "label": "client-test",
+  "created_at": "2026-05-21T08:59:01.978475Z",
+  "summary": {
+    "client_id": "client-a",
+    "enabled": true,
+    "group": "billing",
+    "key_fingerprint": "f10f781241e2246678b6b45c857069208152a53863e47fac33f607ab405006f4",
+    "name": "Client A Prime",
+    "previous_group": "ops",
+    "previous_name": "Client A",
+    "previous_scopes": [
+      "read"
+    ],
+    "previous_tags": [
+      "green"
+    ],
+    "scopes": [
+      "read",
+      "write"
+    ],
+    "tags": [
+      "gold",
+      "beta"
+    ]
+  },
+  "config": {
+    "Server": {
+      "Port": 8080,
+      "ReadTimeout": "",
+      "WriteTimeout": "",
+      "IdleTimeout": "",
+      "PluginsDir": "",
+      "EnableLogging": false,
+      "TLS": {
+        "Enabled": false,
+        "Port": 0,
+        "HTTP3Enabled": false,
+        "HTTP3Port": 0,
+        "HTTP3Datagrams": false,
+        "EnrollmentPort": 0,
+        "EnrollmentMaxActive": 0,
+        "CertFile": "",
+        "KeyFile": "",
+        "ClientCAFile": "",
+        "ClientAuthType": "",
+        "MinVersion": "",
+        "Ciphers": null,
+        "ServerNames": null,
+        "ServerIPs": null,
+        "AutoGenerate": null,
+        "GenerateSharedClient": null
+      }
+    },
+    "Security": {
+      "TLS": {
+        "Enabled": false,
+        "Port": 0,
+        "HTTP3Enabled": false,
+        "HTTP3Port": 0,
+        "HTTP3Datagrams": false,
+        "EnrollmentPort": 0,
+        "EnrollmentMaxActive": 0,
+        "CertFile": "",
+        "KeyFile": "",
+        "ClientCAFile": "",
+        "ClientAuthType": "",
+        "MinVersion": "",
+        "Ciphers": null,
+        "ServerNames": null,
+        "ServerIPs": null,
+        "AutoGenerate": null,
+        "GenerateSharedClient": null
+      },
+      "EnableBasicAuth": false,
+      "BasicAuthUsers": null,
+      "IPWhitelist": null,
+      "Headers": null,
+      "Clients": null,
+      "Jwt": {
+        "Enabled": false,
+        "Secret": "",
+        "Algorithms": null,
+        "PublicKeyFile": "",
+        "Required": false
+      },
+      "MutationPolicy": {
+        "enabled": true,
+        "enforcedScopes": [
+          "clients"
+        ],
+        "requireLabel": true,
+        "proposalQueue": {
+          "defaultUrgency": {},
+          "notifications": {}
+        },
+        "policyAlertNotifications": {},
+        "limitAlertNotifications": {},
+        "limitClassAlertNotifications": {},
+        "limitClassSnoozeNotifications": {}
+      },
+      "NotificationWebhooks": null
+    },
+    "Storage": {},
+    "Services": null,
+    "Plugins": {
+      "apikey": {
+        "clients": [
+          {
+            "group": "billing",
+            "id": "client-a",
+            "key": "key-a",
+            "name": "Client A Prime",
+            "scopes": [
+              "read",
+              "write"
+            ],
+            "tags": [
+              "gold",
+              "beta"
+            ]
+          }
+        ],
+        "enabled": true
+      }
+    }
+  }
+}

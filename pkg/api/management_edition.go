@@ -2,7 +2,6 @@ package api
 
 import (
 	"net/http"
-	"strconv"
 	"strings"
 
 	"github.com/bhangun/iket/pkg/app"
@@ -48,31 +47,4 @@ func (api *ManagementAPI) getGatewayCapability(w http.ResponseWriter, r *http.Re
 		return
 	}
 	api.writeJSON(w, app.CheckCapability(key))
-}
-
-func managementRouteExtensionFilterFromRequest(r *http.Request) (ManagementRouteExtensionFilter, error) {
-	query := r.URL.Query()
-	supportStatus := query.Get("support_status")
-	if strings.TrimSpace(supportStatus) == "" {
-		supportStatus = query.Get("status")
-	}
-	unsupportedCapability := query.Get("unsupported_capability")
-	if strings.TrimSpace(unsupportedCapability) == "" {
-		unsupportedCapability = query.Get("missing_capability")
-	}
-	filter := ManagementRouteExtensionFilter{
-		Category:              query.Get("category"),
-		Tag:                   query.Get("tag"),
-		Capability:            query.Get("capability"),
-		UnsupportedCapability: unsupportedCapability,
-		SupportStatus:         supportStatus,
-	}
-	if rawSupported := strings.TrimSpace(query.Get("supported")); rawSupported != "" {
-		supported, err := strconv.ParseBool(rawSupported)
-		if err != nil {
-			return ManagementRouteExtensionFilter{}, managedValidationError("supported filter must be true or false", err)
-		}
-		filter.Supported = &supported
-	}
-	return filter, nil
 }

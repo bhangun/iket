@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/bhangun/iket/pkg/core/authcontext"
 	coreerrors "github.com/bhangun/iket/pkg/core/errors"
 	"github.com/bhangun/iket/pkg/plugin"
 	"github.com/golang-jwt/jwt/v4"
@@ -142,8 +143,8 @@ func (j *JWTPlugin) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Add claims to request context
 		ctx := context.WithValue(r.Context(), j.claimsContext, claims)
+		ctx = authcontext.WithPrincipal(ctx, principalFromClaims(claims))
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

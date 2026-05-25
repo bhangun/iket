@@ -107,38 +107,6 @@ func concurrencyLimitQueueDeadline(policy *config.ConcurrencyLimitPolicyConfig) 
 	return time.Now().Add(wait)
 }
 
-func resolveRouteConcurrencyKey(r *http.Request, policy *config.ConcurrencyLimitPolicyConfig) (string, string) {
-	if policy == nil {
-		return "global", "global"
-	}
-	switch strings.ToLower(strings.TrimSpace(policy.KeyBy)) {
-	case "", "global":
-		return "global", "global"
-	case "ip":
-		return "ip", GetClientIP(r)
-	case "header":
-		headerName := strings.TrimSpace(policy.KeyHeader)
-		headerValue := strings.TrimSpace(r.Header.Get(headerName))
-		if headerValue == "" {
-			headerValue = "__missing__"
-		}
-		return "header", strings.ToLower(headerName) + ":" + headerValue
-	case "api_key":
-		if user, _, ok := r.BasicAuth(); ok && strings.TrimSpace(user) != "" {
-			return "api_key", "basic:" + strings.TrimSpace(user)
-		}
-		if headerValue := strings.TrimSpace(r.Header.Get("X-API-Key")); headerValue != "" {
-			return "api_key", "header:" + headerValue
-		}
-		return "api_key", "__missing__"
-	case "jwt_sub":
-		_, key := resolveRouteRateLimitKey(r, &config.RateLimitPolicyConfig{KeyBy: "jwt_sub"})
-		return "jwt_sub", key
-	default:
-		return "global", "global"
-	}
-}
-
 func (g *Gateway) routeConcurrencyBucket(route config.RouterConfig, policy *config.ConcurrencyLimitPolicyConfig, bucketKey string) *routeConcurrencyBucket {
 	routeKey := routeConcurrencyStateKey(route, bucketKey)
 	g.concurrencyStateMu.Lock()

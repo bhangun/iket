@@ -27,6 +27,11 @@ func NewConfigValidator() *ConfigValidator {
 	}
 }
 
+// ValidateConfig validates cfg with the default validation rules.
+func ValidateConfig(cfg *Config) error {
+	return NewConfigValidator().Validate(cfg)
+}
+
 // AddRule adds a custom validation rule
 func (v *ConfigValidator) AddRule(rule ValidationRule) {
 	v.rules = append(v.rules, rule)

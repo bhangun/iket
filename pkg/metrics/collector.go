@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"net/http"
+	"strconv"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -15,6 +16,10 @@ type Collector struct {
 	httpRequestsTotal    *prometheus.CounterVec
 	httpRequestDuration  *prometheus.HistogramVec
 	httpRequestsInFlight *prometheus.GaugeVec
+
+	// BFF metrics
+	bffStepRequestsTotal *prometheus.CounterVec
+	bffStepDuration      *prometheus.HistogramVec
 
 	// Gateway metrics
 	activeConnections prometheus.Gauge
@@ -49,6 +54,21 @@ func NewCollector() *Collector {
 			},
 			[]string{"method", "path"},
 		),
+		bffStepRequestsTotal: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "gateway_bff_step_requests_total",
+				Help: "Total number of BFF upstream step requests",
+			},
+			[]string{"route", "step", "status", "required", "outcome"},
+		),
+		bffStepDuration: prometheus.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name:    "gateway_bff_step_duration_seconds",
+				Help:    "BFF upstream step request duration in seconds",
+				Buckets: prometheus.DefBuckets,
+			},
+			[]string{"route", "step", "status", "required", "outcome"},
+		),
 		activeConnections: prometheus.NewGauge(
 			prometheus.GaugeOpts{
 				Name: "gateway_active_connections",
@@ -68,6 +88,8 @@ func NewCollector() *Collector {
 		collector.httpRequestsTotal,
 		collector.httpRequestDuration,
 		collector.httpRequestsInFlight,
+		collector.bffStepRequestsTotal,
+		collector.bffStepDuration,
 		collector.activeConnections,
 		collector.configReloads,
 	)
@@ -82,8 +104,17 @@ func (c *Collector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // RecordRequest records an HTTP request
 func (c *Collector) RecordRequest(method, path string, status int, duration float64) {
-	c.httpRequestsTotal.WithLabelValues(method, path, string(rune(status))).Inc()
+	c.httpRequestsTotal.WithLabelValues(method, path, strconv.Itoa(status)).Inc()
 	c.httpRequestDuration.WithLabelValues(method, path).Observe(duration)
+}
+
+// RecordBFFStep records a BFF upstream step execution.
+func (c *Collector) RecordBFFStep(route, step string, status int, required bool, outcome string, duration float64) {
+	if c == nil {
+		return
+	}
+	c.bffStepRequestsTotal.WithLabelValues(route, step, strconv.Itoa(status), strconv.FormatBool(required), outcome).Inc()
+	c.bffStepDuration.WithLabelValues(route, step, strconv.Itoa(status), strconv.FormatBool(required), outcome).Observe(duration)
 }
 
 // TrackRequestInFlight tracks a request in flight

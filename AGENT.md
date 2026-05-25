@@ -4,15 +4,15 @@ This file is for coding agents and maintainers working inside the Iket repositor
 
 ## What Iket Is
 
-Iket has two primary binaries:
-- `iket-server`: the gateway and management API server
-- `iket`: the admin CLI
+Iket currently has two primary binaries:
+- `iket`: the admin CLI & the gateway and management API server
 
 Core responsibilities:
 - route matching and upstream path rewriting
-- management API for config, routes, plugins, logs, certificates, and backups
+- management API for config, services, routes, plugins, logs, certificates, proposals, and backups
 - mTLS-secured remote administration
-- file and database-backed config storage
+- file-backed and database-backed configuration storage
+- Docker and host-native operator workflows
 
 ## Repository Shape
 
@@ -22,16 +22,32 @@ Core responsibilities:
 - `pkg/api`: management API handlers
 - `pkg/config`: config model, validation, TLS bootstrap, storage providers
 - `pkg/logging`: structured logger and in-memory live log store
-- `docs`: install, CLI, storage, production guidance
+- `docs`: source repo docs
 - `config`: local example config files
 
-## Current Architecture Assumptions
+## Current Product Defaults
 
-- PostgreSQL is the default primary config store.
-- File config is still accepted and mirrored.
-- Docker/prebuilt deployments are a first-class operator path.
-- The CLI is the primary admin UX.
-- mTLS is the normal admin transport.
+These are the current assumptions agents should preserve unless a change is explicitly intentional:
+
+- plain `iket server run` defaults to file-backed local startup
+- PostgreSQL is explicit opt-in through `--database`
+- first local startup scaffolds:
+  - `config/config.yaml`
+  - `config/service.yaml`
+  - `docker-compose.yaml`
+- daemon log and pid defaults are scaffold-local under `./logs`
+- daemon artifacts may be redirected intentionally with:
+  - `--log-dir`
+  - `--pid-dir`
+  - `--log-file`
+  - `--pid-file`
+- local scaffold restores now support:
+  - listing backups
+  - previewing restore targets
+  - per-file restore
+  - full-scaffold restore
+  - confirmation by default
+  - `--force` as explicit bypass
 
 ## Important Operational Gotchas
 
@@ -43,7 +59,7 @@ Relevant files:
 - `pkg/config/tls_bootstrap.go`
 - `cmd/iket-cli/cert.go`
 - `cmd/iket-cli/setup.go`
-- `docs/INSTALL.md`
+- `iket-website/docs/install.md`
 
 ### 2. Docker bind-mount permissions are a frequent first-run failure
 
@@ -51,18 +67,19 @@ If startup fails with:
 
 `failed to prepare bootstrap TLS assets ... /app/certs/ca.key: permission denied`
 
-the problem is usually host ownership or mode on `certs/` and `logs/`, not Postgres.
+the problem is usually host ownership or mode on `certs/` and `logs/`, not the database.
 
 Relevant files:
 - `cmd/iket-cli/docker_init.go`
-- `docs/INSTALL.md`
+- `iket-website/docs/install.md`
 
 ### 3. Remote config drift is easy to misread
 
 When debugging Docker deployments, always verify the mounted config inside the container:
 
 ```bash
-docker exec iket sh -lc 'sed -n "1,40p" /app/config/config.yaml'
+docker exec iket sh -lc 'sed -n "1,80p" /app/config/config.yaml'
+docker exec iket sh -lc 'sed -n "1,80p" /app/config/service.yaml'
 ```
 
 Do not assume the edited host file and the live mounted file still match.
@@ -75,9 +92,19 @@ When helping users import certs:
 
 Do not blur those paths in docs or error messages.
 
-### 5. SSE/log streaming depends on preserving `http.Flusher`
+### 5. Global `-f` belongs to `--force`
 
-The gateway `responseWriter` wrapper must preserve streaming interfaces. If `iket logs tail` starts returning `Streaming not supported`, check `pkg/core/gateway/middleware.go`.
+The CLI already reserves `-f` globally for `--force`. Subcommands should avoid reusing that shorthand for unrelated flags like `follow`, or Cobra will panic on flag registration.
+
+### 6. Restore and backup UX is now part of the local server contract
+
+When changing scaffold paths, defaults, or daemon artifacts, also check:
+- `iket server backups`
+- `iket server restore --preview`
+- `iket server restore --latest --kind ...`
+- `iket server restore --all --latest`
+
+These are no longer optional helper paths; they are part of the supported recovery flow.
 
 ## Preferred Development Workflow
 
@@ -92,7 +119,7 @@ go test ./cmd/iket
 go test ./cmd/iket-cli
 ```
 
-Then run full coverage when the change is broad:
+Then run broader coverage when the change is larger:
 
 ```bash
 go test ./...
@@ -126,6 +153,16 @@ Check all of:
 - self-test endpoint
 - docs examples using `base_path`, `stripPath`, and `url_pattern`
 
+### When changing server lifecycle behavior
+
+Check all of:
+- scaffold generation
+- reset-defaults behavior
+- timestamped backup behavior
+- daemon log and pid defaults
+- backup/restore preview and confirmation
+- website install and CLI docs
+
 ## Commands Worth Remembering
 
 ```bash
@@ -133,10 +170,13 @@ go test ./pkg/config ./pkg/core/gateway ./cmd/iket ./cmd/iket-cli
 
 iket simulate /path --config ./config/config.yaml --services ./config/service.yaml
 
-iket push services ./config/service.yaml --strategy replace
+iket server run --reset-defaults --init-only
+iket server run -d
+iket server logs --tail 100
+iket server restore --all --latest --preview
 
-docker exec iket sh -lc 'sed -n "1,40p" /app/config/config.yaml'
-docker exec iket sh -lc 'ls -la /app/certs'
+docker exec iket sh -lc 'sed -n "1,80p" /app/config/config.yaml'
+docker exec iket sh -lc 'ls -la /app/certs /app/logs'
 ```
 
 ## Expectations For Future Agent Changes
@@ -145,4 +185,5 @@ docker exec iket sh -lc 'ls -la /app/certs'
 - Prefer explicit operator guidance over implicit magic.
 - If a CLI error is predictable, make it actionable.
 - If a deployment pitfall is common, teach `server doctor` to catch it.
-- Avoid introducing “works locally, confusing remotely” behavior without a doctor or self-test improvement.
+- Avoid introducing “works locally, confusing remotely” behavior without a doctor or recovery-path improvement.
+- If a new local server behavior changes scaffolds or artifacts, treat backup and restore behavior as part of the feature, not an afterthought.

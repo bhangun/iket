@@ -9,13 +9,13 @@ chmod +x ./build-iket.sh
 ./build-iket.sh
 
 echo "📦 Installing binaries to /usr/local/bin/ (this requires sudo)..."
-sudo cp bin/iket bin/iket-cli /usr/local/bin/
-sudo chmod +x /usr/local/bin/iket /usr/local/bin/iket-cli
+sudo cp bin/iket /usr/local/bin/
+sudo chmod +x /usr/local/bin/iket
 
 if [ -d "$HOME/.local/bin" ]; then
     echo "📦 Copying to $HOME/.local/bin/ as well..."
-    cp bin/iket bin/iket-cli "$HOME/.local/bin/"
-    chmod +x "$HOME/.local/bin/iket" "$HOME/.local/bin/iket-cli"
+    cp bin/iket "$HOME/.local/bin/"
+    chmod +x "$HOME/.local/bin/iket"
 fi
 
-echo "✅ Installation complete! You can now run 'iket' and 'iket-cli' directly."
+echo "✅ Installation complete! You can now run 'iket' directly."

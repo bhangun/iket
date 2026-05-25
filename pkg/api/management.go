@@ -28,26 +28,31 @@ type ManagementAPI struct {
 	logsSubscribers    map[*websocket.Conn]bool
 	subscriberMu       sync.RWMutex
 
-	queueDigestNotifyMu                     sync.Mutex
-	lastQueueDigestNotificationAt           map[string]time.Time
-	lastQueueDigestNotificationChecksum     map[string]string
-	queueDigestSLABreachState               map[string]proposalQueueSLABreachState
-	slaBreachEscalationState                map[string]proposalQueueSLABreachEscalationState
-	lastPolicyAlertNotificationAt           time.Time
-	lastPolicyAlertNotificationChecksum     string
-	lastLimitAlertNotificationAt            time.Time
-	lastLimitAlertNotificationChecksum      string
-	lastLimitClassAlertNotificationAt       time.Time
-	lastLimitClassAlertNotificationChecksum string
-	policyAlertIncidentState                map[string]gatewayPolicyAlertIncidentState
-	limitAlertIncidentState                 map[string]gatewayLimitAlertIncidentState
-	limitClassAlertIncidentState            map[string]gatewayLimitClassAlertIncidentState
+	queueDigestNotifyMu                      sync.Mutex
+	lastQueueDigestNotificationAt            map[string]time.Time
+	lastQueueDigestNotificationChecksum      map[string]string
+	queueDigestSLABreachState                map[string]proposalQueueSLABreachState
+	slaBreachEscalationState                 map[string]proposalQueueSLABreachEscalationState
+	lastPolicyAlertNotificationAt            time.Time
+	lastPolicyAlertNotificationChecksum      string
+	lastLimitAlertNotificationAt             time.Time
+	lastLimitAlertNotificationChecksum       string
+	lastLimitClassAlertNotificationAt        time.Time
+	lastLimitClassAlertNotificationChecksum  string
+	lastLimitClassSnoozeNotificationAt       time.Time
+	lastLimitClassSnoozeNotificationChecksum string
+	limitClassSnoozeStageState               map[string]gatewayLimitClassSnoozeStateSnapshot
+	policyAlertIncidentState                 map[string]gatewayPolicyAlertIncidentState
+	limitAlertIncidentState                  map[string]gatewayLimitAlertIncidentState
+	limitClassAlertIncidentState             map[string]gatewayLimitClassAlertIncidentState
+	apiKeyGenerator                          APIKeyGenerator
+	clientLifecycleHooks                     []ClientLifecycleHook
 }
 
 const defaultProposalCanaryAutoReconcileInterval = 30 * time.Second
 
 // NewManagementAPI creates a new management API instance
-func NewManagementAPI(gateway *gateway.Gateway, logger *logging.Logger, registry *plugin.Registry) *ManagementAPI {
+func NewManagementAPI(gateway *gateway.Gateway, logger *logging.Logger, registry *plugin.Registry, options ...ManagementAPIOption) *ManagementAPI {
 	api := &ManagementAPI{
 		gateway:    gateway,
 		logger:     logger,
@@ -66,9 +71,16 @@ func NewManagementAPI(gateway *gateway.Gateway, logger *logging.Logger, registry
 		lastQueueDigestNotificationChecksum: make(map[string]string),
 		queueDigestSLABreachState:           make(map[string]proposalQueueSLABreachState),
 		slaBreachEscalationState:            make(map[string]proposalQueueSLABreachEscalationState),
+		limitClassSnoozeStageState:          make(map[string]gatewayLimitClassSnoozeStateSnapshot),
 		policyAlertIncidentState:            make(map[string]gatewayPolicyAlertIncidentState),
 		limitAlertIncidentState:             make(map[string]gatewayLimitAlertIncidentState),
 		limitClassAlertIncidentState:        make(map[string]gatewayLimitClassAlertIncidentState),
+		apiKeyGenerator:                     CryptoRandAPIKeyGenerator{},
+	}
+	for _, option := range options {
+		if option != nil {
+			option(api)
+		}
 	}
 
 	// Start real-time update goroutines
@@ -79,6 +91,7 @@ func NewManagementAPI(gateway *gateway.Gateway, logger *logging.Logger, registry
 	go api.autoNotifyGatewayPolicyAlerts()
 	go api.autoNotifyGatewayLimitAlerts()
 	go api.autoNotifyGatewayLimitClassAlerts()
+	go api.autoNotifyGatewayLimitClassSnoozes()
 
 	return api
 }

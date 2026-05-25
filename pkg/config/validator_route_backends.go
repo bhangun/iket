@@ -4,8 +4,8 @@ import "strings"
 
 func validateRouteBackendPolicy(ctx serviceValidationContext) error {
 	route := ctx.route
-	if len(route.Backends) == 0 && !isPluginOrInternalRoute(route.Path) {
-		return validationError(ctx.routeField("backend"), "at least one backend must be configured unless this is a plugin or internal route")
+	if len(route.Backends) == 0 && !isPluginOrInternalRoute(route.Path) && !routeHasEnabledBFF(route) {
+		return validationError(ctx.routeField("backend"), "at least one backend must be configured unless this is a plugin, BFF, or internal route")
 	}
 	for backendIndex, backend := range route.Backends {
 		if err := validateRouteBackend(ctx, backendIndex, backend); err != nil {

@@ -62,10 +62,9 @@ COPY --from=builder /bin/iket /usr/local/bin/iket
 COPY config /app/config/default
 
 # Set permissions
-RUN cp /usr/local/bin/iket /usr/local/bin/iket-cli && \
-    cp /usr/local/bin/iket-server /usr/local/bin/iket-gateway && \
-    chmod 755 /usr/local/bin/iket-server /usr/local/bin/iket /usr/local/bin/iket-cli /usr/local/bin/iket-gateway && \
-    chown iketuser:iketuser /usr/local/bin/iket-server /usr/local/bin/iket /usr/local/bin/iket-cli /usr/local/bin/iket-gateway
+RUN cp /usr/local/bin/iket-server /usr/local/bin/iket-gateway && \
+    chmod 755 /usr/local/bin/iket-server /usr/local/bin/iket /usr/local/bin/iket-gateway && \
+    chown iketuser:iketuser /usr/local/bin/iket-server /usr/local/bin/iket /usr/local/bin/iket-gateway
 
 WORKDIR /app
 

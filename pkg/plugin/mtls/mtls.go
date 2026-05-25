@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bhangun/iket/pkg/core/authcontext"
 	coreerrors "github.com/bhangun/iket/pkg/core/errors"
 	"github.com/bhangun/iket/pkg/plugin"
 )
@@ -151,8 +152,8 @@ func (m *MTLSPlugin) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Add certificate info to request context
 		ctx := context.WithValue(r.Context(), m.claimsContext, certInfo)
+		ctx = authcontext.WithPrincipal(ctx, principalFromCertInfo(certInfo))
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

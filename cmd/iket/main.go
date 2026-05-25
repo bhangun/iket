@@ -40,15 +40,60 @@ import (
 
 var (
 	defaultConfigPath  = "config/config.yaml"
+	defaultServicePath = "config/service.yaml"
 	defaultSQLitePath  = ".iket-admin/sqlite/iket.db"
 	defaultPostgresURL = "postgres://iket:iket@127.0.0.1:55432/iket?sslmode=disable"
-	// defaultServicePath = "config/service.yaml"
-	version = app.Version // use version from app package
+	version            = app.Version // use version from app package
 )
 
 var storageEnvVarPattern = regexp.MustCompile(`\$\{([A-Za-z0-9_]+)(:-([^}]*))?\}`)
 
-var defaultConfig = `
+const defaultFileConfig = `
+server:
+  port: 8080
+  readTimeout: "10s"
+  writeTimeout: "10s"
+  idleTimeout: "60s"
+  enableLogging: true
+
+security:
+  tls:
+    enabled: true
+    port: 8443
+    enrollmentPort: 9443
+    enrollmentMaxActive: 10
+    certFile: "${IKET_CERTS_DIR:-./certs}/server.crt"
+    keyFile: "${IKET_CERTS_DIR:-./certs}/server.key"
+    clientCAFile: "${IKET_CERTS_DIR:-./certs}/ca.crt"
+    clientAuthType: "RequireAndVerifyClientCert"
+    minVersion: "TLS1.2"
+    autoGenerate: true
+    generateSharedClient: false
+  enableBasicAuth: true
+  basicAuthUsers:
+    admin: admin123
+  clients:
+    my-client-id: my-secret
+  jwt:
+    enabled: false
+    secret: "changeme"
+    algorithms: ["HS256"]
+    publicKeyFile: ""
+    required: false
+
+storage:
+  mode: "file"
+
+plugins:
+  auth:
+    api_key: "your-secret-api-key-here"
+  openapi:
+    spec_path: "openapi.yaml"
+    enabled: true
+    swagger_ui: true
+`
+
+const defaultPostgresConfigTemplate = `
 server:
   port: 8080
   readTimeout: "10s"
@@ -83,7 +128,7 @@ security:
 
 storage:
   mode: "postgres"
-  postgres_url: "${IKET_POSTGRES_URL:-postgres://iket:iket@127.0.0.1:55432/iket?sslmode=disable}"
+  postgres_url: "%s"
   mirror_files: true
 
 plugins:
@@ -95,7 +140,7 @@ plugins:
     swagger_ui: true
 `
 
-var defaultService = `
+const legacyDefaultService = `
 services:
   - name: "Example Service"
     host: "http://localhost:9000"
@@ -108,23 +153,164 @@ services:
           - url_pattern: /hello
 `
 
-func ensureDefaultConfig(configPath, servicesPath string) bool {
-	created := false
+const defaultService = `
+version: 1
+services:
+  - name: "Example Service"
+    host: "http://localhost:9000"
+    base_path: "/example"
+    routes:
+      - path: "/hello"
+        method: GET
+        requireAuth: false
+        backend:
+          - url_pattern: /hello
+`
+
+const defaultDockerComposeFile = `version: "3.8"
+
+services:
+  iket:
+    image: ${IKET_IMAGE:-bhangun/iket:latest}
+    container_name: iket
+    restart: unless-stopped
+    ports:
+      - "${IKET_HTTP_PORT:-7100}:8080"
+      - "${IKET_HTTPS_PORT:-8443}:8443"
+      - "${IKET_ENROLLMENT_PORT:-9443}:9443"
+    environment:
+      - TZ=${TZ:-UTC}
+      - IKET_CERTS_DIR=/app/certs
+    command: ["--config", "/app/config/config.yaml", "--services", "/app/config/service.yaml"]
+    volumes:
+      - ./config:/app/config:ro
+      - ./certs:/app/certs:rw
+      - ./logs:/app/logs:rw
+`
+
+var backupTimestampNow = func() time.Time {
+	return time.Now()
+}
+
+func buildDefaultConfig(storage config.StorageConfig) string {
+	if storage.EffectiveMode() == "postgres" {
+		return fmt.Sprintf(defaultPostgresConfigTemplate, storage.PostgresURL)
+	}
+	return defaultFileConfig
+}
+
+func inferComposePath(configPath string) string {
 	configDir := filepath.Dir(configPath)
-	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		os.MkdirAll(configDir, 0755)
-		os.WriteFile(configPath, []byte(defaultConfig), 0644)
-		created = true
+	if filepath.Base(configDir) == "config" {
+		return filepath.Join(filepath.Dir(configDir), "docker-compose.yaml")
+	}
+	return filepath.Join(configDir, "docker-compose.yaml")
+}
+
+func ensureDefaultScaffold(configPath, servicesPath string, storage config.StorageConfig, overwrite bool) ([]string, error) {
+	created := make([]string, 0, 3)
+	configDir := filepath.Dir(configPath)
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		return nil, err
+	}
+	configContent := buildDefaultConfig(storage)
+	if overwrite || fileMissing(configPath) || shouldAutoRefreshLegacyConfig(configPath, storage) {
+		if (overwrite || !fileMissing(configPath)) && !sameFileContents(configPath, configContent) {
+			if err := backupFileIfExists(configPath); err != nil {
+				return nil, err
+			}
+		}
+		if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+			return nil, err
+		}
+		created = append(created, configPath)
 	}
 	if servicesPath != "" {
 		routesDir := filepath.Dir(servicesPath)
-		if _, err := os.Stat(servicesPath); os.IsNotExist(err) {
-			os.MkdirAll(routesDir, 0755)
-			os.WriteFile(servicesPath, []byte(defaultService), 0644)
-			created = true
+		if err := os.MkdirAll(routesDir, 0755); err != nil {
+			return nil, err
+		}
+		if overwrite || fileMissing(servicesPath) || shouldAutoRefreshLegacyService(servicesPath) {
+			if (overwrite || !fileMissing(servicesPath)) && !sameFileContents(servicesPath, defaultService) {
+				if err := backupFileIfExists(servicesPath); err != nil {
+					return nil, err
+				}
+			}
+			if err := os.WriteFile(servicesPath, []byte(defaultService), 0644); err != nil {
+				return nil, err
+			}
+			created = append(created, servicesPath)
 		}
 	}
-	return created
+	composePath := inferComposePath(configPath)
+	composeDir := filepath.Dir(composePath)
+	if err := os.MkdirAll(composeDir, 0755); err != nil {
+		return nil, err
+	}
+	if overwrite || fileMissing(composePath) {
+		if overwrite && !sameFileContents(composePath, defaultDockerComposeFile) {
+			if err := backupFileIfExists(composePath); err != nil {
+				return nil, err
+			}
+		}
+		if err := os.WriteFile(composePath, []byte(defaultDockerComposeFile), 0644); err != nil {
+			return nil, err
+		}
+		created = append(created, composePath)
+	}
+	return created, nil
+}
+
+func fileMissing(path string) bool {
+	_, err := os.Stat(path)
+	return os.IsNotExist(err)
+}
+
+func sameFileContents(path string, content string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	return normalizeScaffoldContent(string(data)) == normalizeScaffoldContent(content)
+}
+
+func normalizeScaffoldContent(content string) string {
+	return strings.TrimSpace(strings.ReplaceAll(content, "\r\n", "\n"))
+}
+
+func shouldAutoRefreshLegacyConfig(path string, storage config.StorageConfig) bool {
+	if storage.EffectiveMode() != "file" {
+		return false
+	}
+	legacyPostgresConfig := fmt.Sprintf(defaultPostgresConfigTemplate, defaultPostgresURL)
+	return sameFileContents(path, legacyPostgresConfig)
+}
+
+func shouldAutoRefreshLegacyService(path string) bool {
+	return sameFileContents(path, legacyDefaultService)
+}
+
+func legacyScaffoldRefreshPaths(configPath, servicesPath string, storage config.StorageConfig) []string {
+	refreshed := make([]string, 0, 2)
+	if shouldAutoRefreshLegacyConfig(configPath, storage) {
+		refreshed = append(refreshed, configPath)
+	}
+	if servicesPath != "" && shouldAutoRefreshLegacyService(servicesPath) {
+		refreshed = append(refreshed, servicesPath)
+	}
+	return refreshed
+}
+
+func backupFileIfExists(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	timestamp := backupTimestampNow().Format("20060102-150405")
+	return os.WriteFile(path+"."+timestamp+".bak", data, 0644)
 }
 
 func printFileIfExists(path string, label string) {
@@ -137,10 +323,18 @@ func main() {
 	startTime := time.Now()
 
 	configPath := flag.String("config", defaultConfigPath, "Path to config.yaml")
-	servicesPath := flag.String("services", "", "Path to service-based config (service.yaml), optional")
+	servicesPath := flag.String("services", defaultServicePath, "Path to service-based config (service.yaml)")
 	storageMode := flag.String("storage", "", "Configuration storage backend override: postgres, sqlite, or file")
 	sqlitePath := flag.String("sqlite-path", "", "SQLite database path override")
 	postgresURL := flag.String("postgres-url", "", "PostgreSQL connection URL override")
+	useDatabase := flag.Bool("database", false, "Use PostgreSQL for configuration storage instead of file-based config")
+	databaseUsername := flag.String("username", "", "Database username used when --database is enabled")
+	databasePassword := flag.String("password", "", "Database password used when --database is enabled")
+	databaseName := flag.String("database-name", "", "Database name used when --database is enabled")
+	databaseHost := flag.String("database-host", "", "Database host used when --database is enabled")
+	databasePort := flag.String("database-port", "", "Database port used when --database is enabled")
+	resetDefaults := flag.Bool("reset-defaults", false, "Rewrite config, service, and docker-compose defaults before starting")
+	initOnly := flag.Bool("init-only", false, "Generate or refresh default scaffold files and exit without starting")
 	portFlag := flag.Int("port", 0, "Port to run the gateway on (overrides config and IKET_PORT env var)")
 	printConfig := flag.Bool("print-config", false, "Print the loaded configuration and exit")
 	printVersion := flag.Bool("version", false, "Print version and exit")
@@ -151,9 +345,25 @@ func main() {
 		os.Exit(0)
 	}
 
-	if ensureDefaultConfig(*configPath, *servicesPath) {
-		fmt.Printf("\nDefault config created at %s and/or %s. Please review and run again.\n", *configPath, *servicesPath)
-		os.Exit(0)
+	storageSettings := readStorageSettings(*configPath)
+	storageSettings = resolveServerStorageSettings(
+		storageSettings,
+		*storageMode,
+		*sqlitePath,
+		*postgresURL,
+		*useDatabase,
+		*databaseUsername,
+		*databasePassword,
+		*databaseName,
+		*databaseHost,
+		*databasePort,
+		os.Getenv("IKET_DB_PASSWORD"),
+	)
+	legacyRefreshedPaths := legacyScaffoldRefreshPaths(*configPath, *servicesPath, storageSettings)
+	createdPaths, err := ensureDefaultScaffold(*configPath, *servicesPath, storageSettings, *resetDefaults)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to prepare default scaffold: %v\n", err)
+		os.Exit(1)
 	}
 
 	bootstrapTLS, err := config.ReadBootstrapTLSConfig(*configPath)
@@ -166,23 +376,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	storageSettings := readStorageSettings(*configPath)
-	if *storageMode != "" {
-		storageSettings.Mode = *storageMode
-	}
-	if *sqlitePath != "" {
-		storageSettings.SQLitePath = *sqlitePath
-	}
-	if *postgresURL != "" {
-		storageSettings.PostgresURL = *postgresURL
-	}
-	if strings.TrimSpace(storageSettings.SQLitePath) == "" {
-		storageSettings.SQLitePath = defaultSQLitePath
-	}
-	if strings.TrimSpace(storageSettings.PostgresURL) == "" {
-		storageSettings.PostgresURL = defaultPostgresURL
-	}
-
 	// Initialize logger
 	logger := logging.NewLoggerFromEnv()
 	defer logger.Sync()
@@ -190,8 +383,33 @@ func main() {
 	edition := app.CurrentEdition()
 	helper.PrintBannerWithEdition(version, edition.DisplayName)
 
-	printFileIfExists("config/config.yaml", "Default Config")
-	printFileIfExists("config/service.yaml", "Default Service Config")
+	if len(createdPaths) > 0 {
+		if *resetDefaults {
+			fmt.Println("\nReset default scaffold:")
+		} else {
+			fmt.Println("\nGenerated default scaffold:")
+		}
+		for _, path := range createdPaths {
+			fmt.Printf("  - %s\n", path)
+		}
+		fmt.Println()
+	}
+
+	printFileIfExists(*configPath, "Default Config")
+	printFileIfExists(*servicesPath, "Default Service Config")
+	printFileIfExists(inferComposePath(*configPath), "Default Docker Compose")
+	if len(legacyRefreshedPaths) > 0 && !*resetDefaults {
+		fmt.Println("Refreshed legacy scaffold defaults:")
+		for _, path := range legacyRefreshedPaths {
+			fmt.Printf("  - %s\n", path)
+		}
+		fmt.Println("Previous starter copies were preserved with timestamped .bak suffixes.")
+		fmt.Println()
+	}
+	if *initOnly {
+		fmt.Println("Initialization complete.")
+		os.Exit(0)
+	}
 
 	logger.Info("Iket Gateway version", logging.String("version", version), logging.String("edition", edition.Edition))
 	logger.Info("Starting Iket Gateway")
@@ -339,7 +557,7 @@ func main() {
 
 func readStorageSettings(configPath string) config.StorageConfig {
 	settings := config.StorageConfig{
-		Mode:        "postgres",
+		Mode:        "file",
 		SQLitePath:  defaultSQLitePath,
 		PostgresURL: defaultPostgresURL,
 	}
@@ -366,6 +584,71 @@ func readStorageSettings(configPath string) config.StorageConfig {
 	}
 	if raw.Storage.MirrorFiles != nil {
 		settings.MirrorFiles = raw.Storage.MirrorFiles
+	}
+	return settings
+}
+
+func coalesceString(value string, fallback string) string {
+	if strings.TrimSpace(value) != "" {
+		return strings.TrimSpace(value)
+	}
+	return fallback
+}
+
+func buildDatabaseURL(username, password, host, port, databaseName string) string {
+	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", username, password, host, port, databaseName)
+}
+
+func resolveServerStorageSettings(
+	settings config.StorageConfig,
+	storageMode string,
+	sqlitePath string,
+	postgresURL string,
+	useDatabase bool,
+	databaseUsername string,
+	databasePassword string,
+	databaseName string,
+	databaseHost string,
+	databasePort string,
+	envDatabasePassword string,
+) config.StorageConfig {
+	explicitDatabase := useDatabase ||
+		strings.TrimSpace(databaseUsername) != "" ||
+		strings.TrimSpace(databasePassword) != "" ||
+		strings.TrimSpace(databaseName) != "" ||
+		strings.TrimSpace(databaseHost) != "" ||
+		strings.TrimSpace(databasePort) != "" ||
+		strings.TrimSpace(postgresURL) != ""
+
+	if explicitDatabase {
+		settings.Mode = "postgres"
+		if strings.TrimSpace(postgresURL) == "" {
+			settings.PostgresURL = buildDatabaseURL(
+				coalesceString(databaseUsername, "iket"),
+				coalesceString(databasePassword, coalesceString(envDatabasePassword, "iket")),
+				coalesceString(databaseHost, "127.0.0.1"),
+				coalesceString(databasePort, "55432"),
+				coalesceString(databaseName, "iket"),
+			)
+		}
+	} else if strings.TrimSpace(storageMode) == "" && strings.TrimSpace(sqlitePath) == "" {
+		settings.Mode = "file"
+	}
+
+	if strings.TrimSpace(storageMode) != "" {
+		settings.Mode = storageMode
+	}
+	if strings.TrimSpace(sqlitePath) != "" {
+		settings.SQLitePath = sqlitePath
+	}
+	if strings.TrimSpace(postgresURL) != "" {
+		settings.PostgresURL = postgresURL
+	}
+	if strings.TrimSpace(settings.SQLitePath) == "" {
+		settings.SQLitePath = defaultSQLitePath
+	}
+	if strings.TrimSpace(settings.PostgresURL) == "" {
+		settings.PostgresURL = defaultPostgresURL
 	}
 	return settings
 }

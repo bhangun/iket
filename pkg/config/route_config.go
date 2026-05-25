@@ -101,6 +101,7 @@ type RouterConfig struct {
 	ResponsePIIBlockTypes          []string                          `yaml:"responsePIIBlockTypes,omitempty" json:"response_pii_block_types,omitempty"`
 	MaxRequestBodyBytes            int64                             `yaml:"maxRequestBodyBytes,omitempty" json:"max_request_body_bytes,omitempty"`
 	MaxResponseBodyBytes           int64                             `yaml:"maxResponseBodyBytes,omitempty" json:"max_response_body_bytes,omitempty"`
+	BFF                            *BFFConfig                        `yaml:"bff,omitempty" json:"bff,omitempty"`
 	StripPath                      bool                              `yaml:"stripPath"`
 	ValidateSchema                 string                            `yaml:"validateSchema"`
 	WebSocket                      *WebSocketOptions                 `yaml:"websocket,omitempty"`

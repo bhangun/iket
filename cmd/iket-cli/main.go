@@ -20,12 +20,11 @@ var (
 )
 
 var rootCmd = &cobra.Command{
-	Use:     "iket",
-	Aliases: []string{"iket-cli"},
-	Short:   "Iket Gateway management CLI",
+	Use:   "iket",
+	Short: "Iket Gateway management CLI",
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		topLevel := topLevelCommandName(cmd)
-		if topLevel == "cert" || topLevel == "setup" || topLevel == "context" || topLevel == "enroll" || topLevel == "server" || topLevel == "docker" || topLevel == "simulate" || topLevel == "test" {
+		if topLevel == "cert" || topLevel == "setup" || topLevel == "context" || topLevel == "enroll" || topLevel == "server" || topLevel == "docker" || topLevel == "simulate" || topLevel == "test" || topLevel == "gen" {
 			return nil
 		}
 
@@ -97,64 +96,88 @@ func topLevelCommandName(cmd *cobra.Command) string {
 
 func isDangerousCommandPath(cmdPath string, args []string) bool {
 	safeCommandPaths := map[string]bool{
-		"iket gateway status":                    true,
-		"iket gateway edition":                   true,
-		"iket gateway capabilities":              true,
-		"iket gateway capability":                true,
-		"iket gateway extension":                 true,
-		"iket gateway extensions":                true,
-		"iket gateway self-test":                 true,
-		"iket gateway metrics":                   true,
-		"iket gateway system":                    true,
-		"iket gateway backends":                  true,
-		"iket gateway route-policy":              true,
-		"iket gateway route-policy-diff":         true,
-		"iket gateway limit-hits":                true,
-		"iket gateway limit-buckets":             true,
-		"iket gateway limit-classes":             true,
-		"iket gateway limit-class-alerts":        true,
-		"iket gateway limit-class-incidents":     true,
-		"iket gateway notify-limit-class-alerts": true,
-		"iket gateway limit-alerts":              true,
-		"iket gateway notify-limit-alerts":       true,
-		"iket gateway policy-hits":               true,
-		"iket gateway policy-alerts":             true,
-		"iket gateway shadow-report":             true,
-		"iket gateway shadow-evaluate":           true,
-		"iket simulate":                          true,
-		"iket test":                              true,
-		"iket service list":                      true,
-		"iket route list":                        true,
-		"iket route get":                         true,
-		"iket logs tail":                         true,
-		"iket logs list":                         true,
-		"iket logs trace":                        true,
-		"iket plugin list":                       true,
-		"iket plugin get":                        true,
-		"iket plugin status":                     true,
-		"iket plugin health":                     true,
-		"iket plugin diff-config":                true,
-		"iket context list":                      true,
-		"iket context test":                      true,
-		"iket cert status":                       true,
-		"iket cert list-remote":                  true,
-		"iket backup list":                       true,
-		"iket revision list":                     true,
-		"iket revision show":                     true,
-		"iket revision diff":                     true,
-		"iket notification deliveries":           true,
-		"iket notification show":                 true,
-		"iket proposal list":                     true,
-		"iket proposal queue":                    true,
-		"iket proposal show":                     true,
-		"iket proposal readiness":                true,
-		"iket proposal verify":                   true,
-		"iket proposal canary status":            true,
-		"iket proposal canary evaluate":          true,
-		"iket config diff":                       true,
-		"iket service diff":                      true,
-		"iket route diff-create":                 true,
-		"iket route diff-update":                 true,
+		"iket gateway status":                                                        true,
+		"iket gateway edition":                                                       true,
+		"iket gateway capabilities":                                                  true,
+		"iket gateway capability":                                                    true,
+		"iket gateway extension":                                                     true,
+		"iket gateway extensions":                                                    true,
+		"iket gateway self-test":                                                     true,
+		"iket gateway metrics":                                                       true,
+		"iket gateway system":                                                        true,
+		"iket gateway backends":                                                      true,
+		"iket gateway route-policy":                                                  true,
+		"iket gateway route-policy-diff":                                             true,
+		"iket gateway limit-class-digest-profile":                                    true,
+		"iket gateway limit-class-digest-profile-diff":                               true,
+		"iket gateway limit-class-digest-profile-explain":                            true,
+		"iket gateway limit-class-digest-profile-explain-diff":                       true,
+		"iket gateway limit-class-digest-profile-explain-bundle":                     true,
+		"iket gateway limit-class-digest-profile-explain-bundle-diff":                true,
+		"iket gateway limit-class-digest-assertion-preset":                           true,
+		"iket gateway limit-class-digest-assertion-preset-diff":                      true,
+		"iket gateway limit-class-digest-assertion-group-preset":                     true,
+		"iket gateway limit-class-digest-assertion-group-preset-diff":                true,
+		"iket gateway limit-class-digest-assertion-group-preset-explain":             true,
+		"iket gateway limit-class-digest-assertion-group-preset-explain-bundle":      true,
+		"iket gateway limit-class-digest-assertion-group-preset-explain-bundle-diff": true,
+		"iket gateway limit-class-digest-assertion-group-preset-explain-diff":        true,
+		"iket gateway limit-class-digest-assertion-preset-explain":                   true,
+		"iket gateway limit-class-digest-assertion-preset-explain-bundle":            true,
+		"iket gateway limit-class-digest-assertion-preset-explain-bundle-diff":       true,
+		"iket gateway limit-class-digest-assertion-preset-explain-diff":              true,
+		"iket gateway limit-hits":                                                    true,
+		"iket gateway limit-buckets":                                                 true,
+		"iket gateway limit-classes":                                                 true,
+		"iket gateway limit-class-alerts":                                            true,
+		"iket gateway limit-class-snoozes":                                           true,
+		"iket gateway notify-limit-class-snoozes":                                    true,
+		"iket gateway limit-class-incidents":                                         true,
+		"iket gateway acknowledge-limit-class-incident":                              true,
+		"iket gateway snooze-limit-class-incident":                                   true,
+		"iket gateway notify-limit-class-alerts":                                     true,
+		"iket gateway limit-alerts":                                                  true,
+		"iket gateway notify-limit-alerts":                                           true,
+		"iket gateway policy-hits":                                                   true,
+		"iket gateway policy-alerts":                                                 true,
+		"iket gateway shadow-report":                                                 true,
+		"iket gateway shadow-evaluate":                                               true,
+		"iket simulate":                                                              true,
+		"iket test":                                                                  true,
+		"iket service list":                                                          true,
+		"iket route list":                                                            true,
+		"iket route get":                                                             true,
+		"iket logs tail":                                                             true,
+		"iket logs list":                                                             true,
+		"iket logs trace":                                                            true,
+		"iket plugin list":                                                           true,
+		"iket plugin get":                                                            true,
+		"iket plugin status":                                                         true,
+		"iket plugin health":                                                         true,
+		"iket plugin diff-config":                                                    true,
+		"iket client list":                                                           true,
+		"iket client get":                                                            true,
+		"iket context list":                                                          true,
+		"iket context test":                                                          true,
+		"iket cert status":                                                           true,
+		"iket cert list-remote":                                                      true,
+		"iket backup list":                                                           true,
+		"iket revision list":                                                         true,
+		"iket revision show":                                                         true,
+		"iket revision diff":                                                         true,
+		"iket notification deliveries":                                               true,
+		"iket notification show":                                                     true,
+		"iket proposal list":                                                         true,
+		"iket proposal queue":                                                        true,
+		"iket proposal show":                                                         true,
+		"iket proposal readiness":                                                    true,
+		"iket proposal verify":                                                       true,
+		"iket proposal canary status":                                                true,
+		"iket proposal canary evaluate":                                              true,
+		"iket config diff":                                                           true,
+		"iket service diff":                                                          true,
+		"iket route diff-create":                                                     true,
+		"iket route diff-update":                                                     true,
 	}
 
 	if cmdPath == "iket gateway config" && len(args) == 0 {
@@ -179,6 +202,10 @@ func strictRevisionMetadataRequirements(cmd *cobra.Command, args []string) (requ
 		"iket route disable":    true,
 		"iket plugin disable":   true,
 		"iket client delete":    true,
+		"iket client disable":   true,
+		"iket client enable":    true,
+		"iket client rotate":    true,
+		"iket client update":    true,
 		"iket backup restore":   true,
 		"iket revision restore": true,
 	}
@@ -218,6 +245,7 @@ func main() {
 	initSetupCmd(rootCmd)
 	initEnrollCmd(rootCmd)
 	initServerCmd(rootCmd)
+	initGenCmd(rootCmd)
 	initConfigApplyCmd(rootCmd)
 	initPushCmd(rootCmd)
 	initPullCmd(rootCmd)
@@ -318,6 +346,14 @@ func initGatewayCmd(rootCmd *cobra.Command) {
 
 	var extensionCapability string
 	var extensionUnsupportedCapability string
+	var extensionSearch string
+	var extensionReleaseStage string
+	var extensionCompatibilityStatus string
+	var extensionProviderKind string
+	var extensionProviderName string
+	var extensionPermission string
+	var extensionRoutePrefix string
+	var extensionLinkRel string
 	var extensionCategory string
 	var extensionTag string
 	var extensionStatus string
@@ -337,6 +373,30 @@ func initGatewayCmd(rootCmd *cobra.Command) {
 			}
 			if capability := strings.TrimSpace(extensionUnsupportedCapability); capability != "" {
 				query.Set("unsupported_capability", capability)
+			}
+			if search := strings.TrimSpace(extensionSearch); search != "" {
+				query.Set("q", search)
+			}
+			if stage := strings.TrimSpace(extensionReleaseStage); stage != "" {
+				query.Set("release_stage", stage)
+			}
+			if compatibility := strings.TrimSpace(extensionCompatibilityStatus); compatibility != "" {
+				query.Set("compatibility_status", compatibility)
+			}
+			if providerKind := strings.TrimSpace(extensionProviderKind); providerKind != "" {
+				query.Set("provider_kind", providerKind)
+			}
+			if providerName := strings.TrimSpace(extensionProviderName); providerName != "" {
+				query.Set("provider", providerName)
+			}
+			if permission := strings.TrimSpace(extensionPermission); permission != "" {
+				query.Set("permission", permission)
+			}
+			if routePrefix := strings.TrimSpace(extensionRoutePrefix); routePrefix != "" {
+				query.Set("route_prefix", routePrefix)
+			}
+			if rel := strings.TrimSpace(extensionLinkRel); rel != "" {
+				query.Set("link_rel", rel)
 			}
 			if category := strings.TrimSpace(extensionCategory); category != "" {
 				query.Set("category", category)
@@ -367,6 +427,14 @@ func initGatewayCmd(rootCmd *cobra.Command) {
 	}
 	extensionsCmd.Flags().StringVar(&extensionCapability, "capability", "", "Filter extensions by required capability")
 	extensionsCmd.Flags().StringVar(&extensionUnsupportedCapability, "unsupported-capability", "", "Filter extensions blocked by an unsupported capability")
+	extensionsCmd.Flags().StringVar(&extensionSearch, "search", "", "Search extensions by name, description, version, compatibility, provider, permission, route, link, release stage, category, tag, or capability")
+	extensionsCmd.Flags().StringVar(&extensionReleaseStage, "stage", "", "Filter extensions by release stage")
+	extensionsCmd.Flags().StringVar(&extensionCompatibilityStatus, "compatibility", "", "Filter extensions by compatibility status")
+	extensionsCmd.Flags().StringVar(&extensionProviderKind, "provider-kind", "", "Filter extensions by provider kind")
+	extensionsCmd.Flags().StringVar(&extensionProviderName, "provider", "", "Filter extensions by provider name")
+	extensionsCmd.Flags().StringVar(&extensionPermission, "permission", "", "Filter extensions by declared permission key")
+	extensionsCmd.Flags().StringVar(&extensionRoutePrefix, "route-prefix", "", "Filter extensions by mounted route prefix")
+	extensionsCmd.Flags().StringVar(&extensionLinkRel, "link-rel", "", "Filter extensions by typed link relation")
 	extensionsCmd.Flags().StringVar(&extensionCategory, "category", "", "Filter extensions by category")
 	extensionsCmd.Flags().StringVar(&extensionTag, "tag", "", "Filter extensions by tag")
 	extensionsCmd.Flags().StringVar(&extensionStatus, "status", "", "Filter extensions by support status")
@@ -708,12 +776,33 @@ func initClientCmd(rootCmd *cobra.Command) {
 		},
 	})
 
+	clientCmd.AddCommand(&cobra.Command{
+		Use:   "get [key-or-fingerprint]",
+		Short: "Get one redacted client app profile",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			resp, err := apiClient.Do("GET", "/api/v1/clients/"+url.PathEscape(args[0]), nil)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	})
+
 	var (
-		clientName   string
-		clientKey    string
-		clientGroup  string
-		clientScopes []string
-		clientTags   []string
+		clientName        string
+		clientKey         string
+		clientGenerateKey bool
+		clientGroup       string
+		clientScopes      []string
+		clientTags        []string
+		updateName        string
+		updateGroup       string
+		updateScopes      []string
+		updateTags        []string
+		rotateKey         string
+		rotateGenerateKey bool
 	)
 
 	addCmd := &cobra.Command{
@@ -721,14 +810,18 @@ func initClientCmd(rootCmd *cobra.Command) {
 		Short: "Add a client app",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if strings.TrimSpace(clientKey) != "" && clientGenerateKey {
+				return fmt.Errorf("--key cannot be combined with --generate-key")
+			}
 			id := args[0]
 			payload := map[string]interface{}{
-				"id":     id,
-				"name":   clientName,
-				"key":    clientKey,
-				"group":  clientGroup,
-				"scopes": clientScopes,
-				"tags":   clientTags,
+				"id":           id,
+				"name":         clientName,
+				"key":          clientKey,
+				"generate_key": clientGenerateKey || strings.TrimSpace(clientKey) == "",
+				"group":        clientGroup,
+				"scopes":       clientScopes,
+				"tags":         clientTags,
 			}
 			resp, err := apiClient.Do("POST", appendMutationOptions("/api/v1/clients", false), payload)
 			if err != nil {
@@ -739,20 +832,109 @@ func initClientCmd(rootCmd *cobra.Command) {
 		},
 	}
 	addCmd.Flags().StringVar(&clientName, "name", "", "Display name of the client")
-	addCmd.Flags().StringVar(&clientKey, "key", "", "API Key for the client")
+	addCmd.Flags().StringVar(&clientKey, "key", "", "Bring your own API key for the client; omitted by default to let Iket generate one")
+	addCmd.Flags().BoolVar(&clientGenerateKey, "generate-key", false, "Generate an API key on the server (default when --key is omitted)")
 	addCmd.Flags().StringVar(&clientGroup, "group", "", "Group for the client")
 	addCmd.Flags().StringSliceVar(&clientScopes, "scopes", []string{}, "Scopes for the client (comma separated)")
 	addCmd.Flags().StringSliceVar(&clientTags, "tags", []string{}, "Tags for the client (comma separated)")
-	addCmd.MarkFlagRequired("key")
 
 	clientCmd.AddCommand(addCmd)
 
-	clientCmd.AddCommand(&cobra.Command{
-		Use:   "delete [key]",
-		Short: "Delete a client app by key",
+	updateCmd := &cobra.Command{
+		Use:   "update [key-or-fingerprint]",
+		Short: "Update a client app profile without rotating its API key",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			resp, err := apiClient.Do("DELETE", appendMutationOptions("/api/v1/clients/"+args[0], false), nil)
+			payload := map[string]interface{}{}
+			if cmd.Flags().Changed("name") {
+				payload["name"] = updateName
+			}
+			if cmd.Flags().Changed("group") {
+				payload["group"] = updateGroup
+			}
+			if cmd.Flags().Changed("scopes") {
+				payload["scopes"] = updateScopes
+			}
+			if cmd.Flags().Changed("tags") {
+				payload["tags"] = updateTags
+			}
+			if len(payload) == 0 {
+				return fmt.Errorf("provide at least one profile field: --name, --group, --scopes, or --tags")
+			}
+			resp, err := apiClient.Do("PATCH", appendMutationOptions("/api/v1/clients/"+url.PathEscape(args[0]), false), payload)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	}
+	updateCmd.Flags().StringVar(&updateName, "name", "", "Display name of the client")
+	updateCmd.Flags().StringVar(&updateGroup, "group", "", "Group for the client")
+	updateCmd.Flags().StringSliceVar(&updateScopes, "scopes", []string{}, "Scopes for the client (comma separated); pass an empty value to clear")
+	updateCmd.Flags().StringSliceVar(&updateTags, "tags", []string{}, "Tags for the client (comma separated); pass an empty value to clear")
+
+	clientCmd.AddCommand(updateCmd)
+
+	rotateCmd := &cobra.Command{
+		Use:   "rotate [key-or-fingerprint]",
+		Short: "Rotate a client API key",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if strings.TrimSpace(rotateKey) != "" && rotateGenerateKey {
+				return fmt.Errorf("--key cannot be combined with --generate-key")
+			}
+			payload := map[string]interface{}{
+				"key":          rotateKey,
+				"generate_key": rotateGenerateKey || strings.TrimSpace(rotateKey) == "",
+			}
+			resp, err := apiClient.Do("POST", appendMutationOptions("/api/v1/clients/"+url.PathEscape(args[0])+"/rotate", false), payload)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	}
+	rotateCmd.Flags().StringVar(&rotateKey, "key", "", "Bring your own replacement API key; omitted by default to let Iket generate one")
+	rotateCmd.Flags().BoolVar(&rotateGenerateKey, "generate-key", false, "Generate the replacement API key on the server (default when --key is omitted)")
+
+	clientCmd.AddCommand(rotateCmd)
+
+	clientCmd.AddCommand(&cobra.Command{
+		Use:   "enable [key-or-fingerprint]",
+		Short: "Enable a suspended client app",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			resp, err := apiClient.Do("POST", appendMutationOptions("/api/v1/clients/"+url.PathEscape(args[0])+"/enable", false), nil)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	})
+
+	clientCmd.AddCommand(&cobra.Command{
+		Use:   "disable [key-or-fingerprint]",
+		Short: "Suspend a client app without deleting its key metadata",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			resp, err := apiClient.Do("POST", appendMutationOptions("/api/v1/clients/"+url.PathEscape(args[0])+"/disable", false), nil)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	})
+
+	clientCmd.AddCommand(&cobra.Command{
+		Use:   "delete [key-or-fingerprint]",
+		Short: "Delete a client app by key or fingerprint",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			resp, err := apiClient.Do("DELETE", appendMutationOptions("/api/v1/clients/"+url.PathEscape(args[0]), false), nil)
 			if err != nil {
 				return err
 			}

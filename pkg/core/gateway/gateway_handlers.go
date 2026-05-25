@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/bhangun/iket/pkg/core/authcontext"
 	"github.com/bhangun/iket/pkg/logging"
 )
 
@@ -43,11 +44,11 @@ func (g *Gateway) notFoundHandler(w http.ResponseWriter, r *http.Request) {
 
 // configHandler returns the current configuration as JSON, with secrets redacted.
 func (g *Gateway) configHandler(w http.ResponseWriter, r *http.Request) {
-	cfg := *g.GetConfig()
-	if cfg.Security.Jwt.Secret != "" {
-		cfg.Security.Jwt.Secret = "REDACTED"
+	cfg, err := RedactedConfig(g.GetConfig())
+	if err != nil {
+		http.Error(w, "failed to redact configuration", http.StatusInternalServerError)
+		return
 	}
-	cfg.Security.BasicAuthUsers = nil
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(cfg)
 }
@@ -84,7 +85,8 @@ func (g *Gateway) adminAuthMiddleware(next http.Handler) http.Handler {
 			w.Write([]byte("Invalid admin credentials"))
 			return
 		}
-		next.ServeHTTP(w, r)
+		ctx := authcontext.WithPrincipal(r.Context(), principalFromBasicIdentity("admin_basic_auth", user))
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 

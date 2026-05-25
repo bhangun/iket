@@ -1,29 +1,16 @@
 package api
 
 import (
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/sha1"
-	"crypto/sha256"
-	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/hex"
 	"encoding/json"
-	"encoding/pem"
-	"errors"
 	"fmt"
-	"github.com/bhangun/iket/pkg/config"
+	"net/http"
+	"strings"
+	"time"
+
 	coreerrors "github.com/bhangun/iket/pkg/core/errors"
 	"github.com/bhangun/iket/pkg/core/gateway"
 	"github.com/bhangun/iket/pkg/logging"
 	"github.com/gorilla/mux"
-	"io/fs"
-	"math/big"
-	"net/http"
-	"os"
-	"path/filepath"
-	"strings"
-	"time"
 )
 
 func (api *ManagementAPI) listCertificates(w http.ResponseWriter, r *http.Request) {
@@ -80,7 +67,7 @@ func (api *ManagementAPI) createEnrollmentToken(w http.ResponseWriter, r *http.R
 	}
 
 	if strings.TrimSpace(req.Name) == "" {
-		req.Name = "iket-cli"
+		req.Name = "iket"
 	}
 	if req.TTLMinute <= 0 {
 		req.TTLMinute = 15
@@ -91,6 +78,11 @@ func (api *ManagementAPI) createEnrollmentToken(w http.ResponseWriter, r *http.R
 	}
 	if strings.TrimSpace(req.ClientCN) == "" {
 		req.ClientCN = sanitizedClientCommonName(req.Name)
+	}
+	tlsCfg, err := api.enrollmentTLSConfig()
+	if err != nil {
+		api.writeManagedError(w, err, http.StatusInternalServerError)
+		return
 	}
 
 	existing, err := listEnrollmentTokenRecords()
@@ -105,13 +97,13 @@ func (api *ManagementAPI) createEnrollmentToken(w http.ResponseWriter, r *http.R
 			activeCount++
 		}
 	}
-	maxActive := api.gateway.GetConfig().Security.TLS.EffectiveEnrollmentMaxActive()
+	maxActive := tlsCfg.EffectiveEnrollmentMaxActive()
 	if activeCount >= maxActive {
 		api.writeManagedError(w, managedError(coreerrors.CodeEnrollmentTokenLimitReached, fmt.Sprintf("active enrollment token limit reached (%d)", maxActive), nil), http.StatusConflict)
 		return
 	}
 
-	caKey, caCert, caPEM, err := loadEnrollmentCA(api.gateway.GetConfig().Security.TLS)
+	caKey, caCert, caPEM, err := loadEnrollmentCA(tlsCfg)
 	if err != nil {
 		api.writeManagedError(w, err, http.StatusBadRequest)
 		return
@@ -208,8 +200,13 @@ func (api *ManagementAPI) enrollClientCertificate(w http.ResponseWriter, r *http
 		api.writeManagedError(w, managedRequiredFieldError("csr_pem is required"), http.StatusBadRequest)
 		return
 	}
+	tlsCfg, err := api.enrollmentTLSConfig()
+	if err != nil {
+		api.writeManagedError(w, err, http.StatusInternalServerError)
+		return
+	}
 
-	caKey, caCert, caPEM, err := loadEnrollmentCA(api.gateway.GetConfig().Security.TLS)
+	caKey, caCert, caPEM, err := loadEnrollmentCA(tlsCfg)
 	if err != nil {
 		api.writeManagedError(w, err, http.StatusBadRequest)
 		return
@@ -217,7 +214,7 @@ func (api *ManagementAPI) enrollClientCertificate(w http.ResponseWriter, r *http
 
 	commonName := record.ClientCN
 	if commonName == "" {
-		commonName = sanitizedClientCommonName(firstNonEmpty(req.Name, record.Name, "iket-cli"))
+		commonName = sanitizedClientCommonName(firstNonEmpty(req.Name, record.Name, "iket"))
 	}
 	certPEM, cert, err := signEnrollmentCSR([]byte(req.CSRPEM), commonName, caKey, caCert)
 	if err != nil {
@@ -255,6 +252,11 @@ func (api *ManagementAPI) enrollClientCertificate(w http.ResponseWriter, r *http
 }
 
 func (api *ManagementAPI) listEnrollmentTokens(w http.ResponseWriter, r *http.Request) {
+	tlsCfg, err := api.enrollmentTLSConfig()
+	if err != nil {
+		api.writeManagedError(w, err, http.StatusInternalServerError)
+		return
+	}
 	records, err := listEnrollmentTokenRecords()
 	if err != nil {
 		api.writeManagedError(w, managedConfigError("Failed to list enrollment tokens", err), http.StatusInternalServerError)
@@ -283,7 +285,7 @@ func (api *ManagementAPI) listEnrollmentTokens(w http.ResponseWriter, r *http.Re
 	api.writeJSON(w, map[string]interface{}{
 		"tokens":             items,
 		"active_count":       activeCount,
-		"max_active_allowed": api.gateway.GetConfig().Security.TLS.EffectiveEnrollmentMaxActive(),
+		"max_active_allowed": tlsCfg.EffectiveEnrollmentMaxActive(),
 	})
 }
 
@@ -327,250 +329,4 @@ func (api *ManagementAPI) deleteCertificate(w http.ResponseWriter, r *http.Reque
 		Message: "Certificate deleted successfully",
 	}
 	api.writeJSON(w, response)
-}
-
-type enrollmentTokenRecord struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	TokenHash string    `json:"token_hash"`
-	CreatedAt time.Time `json:"created_at"`
-	ExpiresAt time.Time `json:"expires_at"`
-	UsedAt    time.Time `json:"used_at,omitempty"`
-	ServerURL string    `json:"server_url,omitempty"`
-	EnrollURL string    `json:"enroll_url,omitempty"`
-	ClientCN  string    `json:"client_cn,omitempty"`
-}
-
-func loadManagedCertificates() ([]map[string]interface{}, error) {
-	if err := os.MkdirAll(certificatesDir(), 0755); err != nil {
-		return nil, err
-	}
-	entries, err := os.ReadDir(certificatesDir())
-	if err != nil {
-		return nil, err
-	}
-	out := make([]map[string]interface{}, 0)
-	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(certificatesDir(), entry.Name()))
-		if err != nil {
-			continue
-		}
-		var meta map[string]interface{}
-		if err := json.Unmarshal(data, &meta); err == nil {
-			out = append(out, meta)
-		}
-	}
-	return out, nil
-}
-
-func saveManagedCertificate(name, certType, certPEM, keyPEM string) (map[string]interface{}, error) {
-	if name == "" || certPEM == "" {
-		return nil, fmt.Errorf("name and cert_pem are required")
-	}
-	block, _ := pem.Decode([]byte(certPEM))
-	if block == nil {
-		return nil, fmt.Errorf("invalid cert_pem")
-	}
-	cert, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		return nil, fmt.Errorf("invalid certificate: %w", err)
-	}
-	if err := os.MkdirAll(certificatesDir(), 0755); err != nil {
-		return nil, err
-	}
-	sum := sha1.Sum([]byte(name + cert.Subject.String() + time.Now().String()))
-	id := fmt.Sprintf("%x", sum[:6])
-	meta := map[string]interface{}{
-		"id":          id,
-		"name":        name,
-		"type":        certType,
-		"subject":     cert.Subject.String(),
-		"issuer":      cert.Issuer.String(),
-		"valid_from":  cert.NotBefore,
-		"valid_until": cert.NotAfter,
-		"status":      "valid",
-		"cert_pem":    certPEM,
-	}
-	if keyPEM != "" {
-		meta["key_pem"] = keyPEM
-	}
-	data, _ := json.MarshalIndent(meta, "", "  ")
-	if err := os.WriteFile(filepath.Join(certificatesDir(), id+".json"), data, 0644); err != nil {
-		return nil, err
-	}
-	return meta, nil
-}
-
-func deleteManagedCertificate(id string) error {
-	path := filepath.Join(certificatesDir(), id+".json")
-	if _, err := os.Stat(path); err != nil {
-		return coreerrors.New(coreerrors.CodeCertificateNotFound, "Certificate not found")
-	}
-	return os.Remove(path)
-}
-
-func saveEnrollmentTokenRecord(record enrollmentTokenRecord) error {
-	if err := os.MkdirAll(enrollmentTokensDir(), 0700); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(record, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Join(enrollmentTokensDir(), record.ID+".json"), data, 0600)
-}
-
-func loadEnrollmentTokenRecord(id string) (*enrollmentTokenRecord, error) {
-	data, err := os.ReadFile(filepath.Join(enrollmentTokensDir(), id+".json"))
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, coreerrors.New(coreerrors.CodeEnrollmentTokenNotFound, "Enrollment token not found")
-		}
-		return nil, err
-	}
-	var record enrollmentTokenRecord
-	if err := json.Unmarshal(data, &record); err != nil {
-		return nil, err
-	}
-	return &record, nil
-}
-
-func listEnrollmentTokenRecords() ([]enrollmentTokenRecord, error) {
-	if err := os.MkdirAll(enrollmentTokensDir(), 0700); err != nil {
-		return nil, err
-	}
-	entries, err := os.ReadDir(enrollmentTokensDir())
-	if err != nil {
-		return nil, err
-	}
-	out := make([]enrollmentTokenRecord, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(enrollmentTokensDir(), entry.Name()))
-		if err != nil {
-			continue
-		}
-		var record enrollmentTokenRecord
-		if err := json.Unmarshal(data, &record); err == nil {
-			out = append(out, record)
-		}
-	}
-	return out, nil
-}
-
-func deleteEnrollmentTokenRecord(id string) error {
-	path := filepath.Join(enrollmentTokensDir(), id+".json")
-	if _, err := os.Stat(path); err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return coreerrors.New(coreerrors.CodeEnrollmentTokenNotFound, "Enrollment token not found")
-		}
-		return err
-	}
-	return os.Remove(path)
-}
-
-func isActiveEnrollmentToken(record enrollmentTokenRecord, now time.Time) bool {
-	return record.UsedAt.IsZero() && now.Before(record.ExpiresAt)
-}
-
-func parseEnrollmentToken(token string) (string, string, error) {
-	parts := strings.SplitN(strings.TrimSpace(token), ".", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return "", "", coreerrors.New(coreerrors.CodeEnrollmentTokenInvalid, "Invalid enrollment token")
-	}
-	return parts[0], parts[1], nil
-}
-
-func hashEnrollmentSecret(secret string) string {
-	sum := sha256.Sum256([]byte(secret))
-	return hex.EncodeToString(sum[:])
-}
-
-func randomHex(n int) (string, error) {
-	buf := make([]byte, n)
-	if _, err := rand.Read(buf); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(buf), nil
-}
-
-func loadEnrollmentCA(tlsCfg config.TLSConfig) (*rsa.PrivateKey, *x509.Certificate, []byte, error) {
-	if tlsCfg.ClientCAFile == "" {
-		return nil, nil, nil, fmt.Errorf("client CA is not configured")
-	}
-	caPEM, err := os.ReadFile(tlsCfg.ClientCAFile)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	caBlock, _ := pem.Decode(caPEM)
-	if caBlock == nil {
-		return nil, nil, nil, fmt.Errorf("invalid client CA certificate")
-	}
-	caCert, err := x509.ParseCertificate(caBlock.Bytes)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
-	caKeyPath := filepath.Join(filepath.Dir(tlsCfg.ClientCAFile), "ca.key")
-	caKeyPEM, err := os.ReadFile(caKeyPath)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil, nil, fmt.Errorf("ca.key not found next to %s; enrollment requires a locally managed CA", tlsCfg.ClientCAFile)
-		}
-		return nil, nil, nil, err
-	}
-	keyBlock, _ := pem.Decode(caKeyPEM)
-	if keyBlock == nil {
-		return nil, nil, nil, fmt.Errorf("invalid ca private key")
-	}
-	caKey, err := x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	return caKey, caCert, caPEM, nil
-}
-
-func signEnrollmentCSR(csrPEM []byte, commonName string, caKey *rsa.PrivateKey, caCert *x509.Certificate) ([]byte, *x509.Certificate, error) {
-	block, _ := pem.Decode(csrPEM)
-	if block == nil {
-		return nil, nil, fmt.Errorf("invalid csr_pem")
-	}
-	csr, err := x509.ParseCertificateRequest(block.Bytes)
-	if err != nil {
-		return nil, nil, err
-	}
-	if err := csr.CheckSignature(); err != nil {
-		return nil, nil, err
-	}
-
-	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-	if err != nil {
-		return nil, nil, err
-	}
-	template := &x509.Certificate{
-		SerialNumber: serialNumber,
-		Subject: pkix.Name{
-			CommonName:   commonName,
-			Organization: []string{"Iket"},
-		},
-		NotBefore:             time.Now().Add(-1 * time.Hour),
-		NotAfter:              time.Now().AddDate(1, 0, 0),
-		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-		BasicConstraintsValid: true,
-	}
-	certDER, err := x509.CreateCertificate(rand.Reader, template, caCert, csr.PublicKey, caKey)
-	if err != nil {
-		return nil, nil, err
-	}
-	cert, err := x509.ParseCertificate(certDER)
-	if err != nil {
-		return nil, nil, err
-	}
-	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER}), cert, nil
 }

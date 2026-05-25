@@ -33,6 +33,61 @@ func TestServicesConfigRuleRejectsInvalidRouteRateLimitPolicyKeyBy(t *testing.T)
 	}
 }
 
+func TestServicesConfigRuleAcceptsPrincipalLimitKeyByWithClassPolicies(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			LimitAlertBucketClasses: map[string]LimitAlertBucketClassConfig{
+				"enterprise-client": {
+					KeyType:     "principal",
+					BucketRegex: "^client:",
+				},
+			},
+		},
+		Services: []ServiceConfig{{
+			Version: 1,
+			Services: []Service{{
+				Name: "agent",
+				Host: "http://agent:8080",
+				Routes: []RouterConfig{{
+					Path:    "/ai/chat",
+					Methods: []string{"POST"},
+					RateLimitPolicy: &RateLimitPolicyConfig{
+						RequestsPerSecond: 5,
+						Burst:             10,
+						KeyBy:             "principal",
+						ClassPolicies: []LimiterClassRatePolicyConfig{{
+							BucketClass:       "enterprise-client",
+							RequestsPerSecond: 2,
+							Burst:             4,
+						}},
+					},
+					ConcurrencyLimitPolicy: &ConcurrencyLimitPolicyConfig{
+						MaxInFlight: 4,
+						KeyBy:       "principal",
+						ClassPolicies: []LimiterClassConcurrencyPolicyConfig{{
+							BucketClass: "enterprise-client",
+							MaxInFlight: 2,
+						}},
+					},
+					LimitAlertPolicy: &RouteLimitAlertPolicyConfig{
+						BucketPolicies: []LimitAlertBucketPolicyConfig{{
+							KeyType:     "principal",
+							BucketRegex: "^client:",
+							MinCount:    2,
+						}},
+					},
+					Backends: []Backend{{URLPattern: "/"}},
+				}},
+			}},
+		}},
+	}
+
+	if err := NewConfigValidator().Validate(cfg); err != nil {
+		t.Fatalf("expected principal limiter key config to validate, got %v", err)
+	}
+}
+
 func TestServicesConfigRuleRejectsHeaderRateLimitPolicyWithoutKeyHeader(t *testing.T) {
 	cfg := &Config{
 		Server: ServerConfig{Port: 8080},

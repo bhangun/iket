@@ -1,0 +1,19 @@
+version: "3.8"
+
+services:
+  iket:
+    image: ${IKET_IMAGE:-bhangun/iket:latest}
+    container_name: iket
+    restart: unless-stopped
+    ports:
+      - "${IKET_HTTP_PORT:-7100}:8080"
+      - "${IKET_HTTPS_PORT:-8443}:8443"
+      - "${IKET_ENROLLMENT_PORT:-9443}:9443"
+    environment:
+      - TZ=${TZ:-UTC}
+      - IKET_CERTS_DIR=/app/certs
+    command: ["--config", "/app/config/config.yaml", "--services", "/app/config/service.yaml"]
+    volumes:
+      - ./config:/app/config:ro
+      - ./certs:/app/certs:rw
+      - ./logs:/app/logs:rw

@@ -1,0 +1,129 @@
+{
+  "id": "rev-20260521-090745.625905000",
+  "action": "client_add",
+  "label": "client-test",
+  "created_at": "2026-05-21T09:07:45.625922Z",
+  "summary": {
+    "client_id": "client-b",
+    "enabled": true,
+    "generated_key": true,
+    "group": "ops",
+    "key_fingerprint": "e995a00145362077bebce0a95ac32edf553588f813e962ff3b6593d88c84461b",
+    "name": "Client B",
+    "scopes": [
+      "read"
+    ],
+    "tags": []
+  },
+  "config": {
+    "Server": {
+      "Port": 8080,
+      "ReadTimeout": "",
+      "WriteTimeout": "",
+      "IdleTimeout": "",
+      "PluginsDir": "",
+      "EnableLogging": false,
+      "TLS": {
+        "Enabled": false,
+        "Port": 0,
+        "HTTP3Enabled": false,
+        "HTTP3Port": 0,
+        "HTTP3Datagrams": false,
+        "EnrollmentPort": 0,
+        "EnrollmentMaxActive": 0,
+        "CertFile": "",
+        "KeyFile": "",
+        "ClientCAFile": "",
+        "ClientAuthType": "",
+        "MinVersion": "",
+        "Ciphers": null,
+        "ServerNames": null,
+        "ServerIPs": null,
+        "AutoGenerate": null,
+        "GenerateSharedClient": null
+      }
+    },
+    "Security": {
+      "TLS": {
+        "Enabled": false,
+        "Port": 0,
+        "HTTP3Enabled": false,
+        "HTTP3Port": 0,
+        "HTTP3Datagrams": false,
+        "EnrollmentPort": 0,
+        "EnrollmentMaxActive": 0,
+        "CertFile": "",
+        "KeyFile": "",
+        "ClientCAFile": "",
+        "ClientAuthType": "",
+        "MinVersion": "",
+        "Ciphers": null,
+        "ServerNames": null,
+        "ServerIPs": null,
+        "AutoGenerate": null,
+        "GenerateSharedClient": null
+      },
+      "EnableBasicAuth": false,
+      "BasicAuthUsers": null,
+      "IPWhitelist": null,
+      "Headers": null,
+      "Clients": null,
+      "Jwt": {
+        "Enabled": false,
+        "Secret": "",
+        "Algorithms": null,
+        "PublicKeyFile": "",
+        "Required": false
+      },
+      "MutationPolicy": {
+        "enabled": true,
+        "enforcedScopes": [
+          "clients"
+        ],
+        "requireLabel": true,
+        "proposalQueue": {
+          "defaultUrgency": {},
+          "notifications": {}
+        },
+        "policyAlertNotifications": {},
+        "limitAlertNotifications": {},
+        "limitClassAlertNotifications": {},
+        "limitClassSnoozeNotifications": {}
+      },
+      "NotificationWebhooks": null
+    },
+    "Storage": {},
+    "Services": null,
+    "Plugins": {
+      "apikey": {
+        "clients": [
+          {
+            "group": "ops",
+            "id": "client-a",
+            "key": "key-a",
+            "name": "Client A",
+            "scopes": [
+              "read"
+            ],
+            "tags": [
+              "green"
+            ]
+          },
+          {
+            "enabled": true,
+            "group": "ops",
+            "id": "client-b",
+            "key_fingerprint": "e995a00145362077bebce0a95ac32edf553588f813e962ff3b6593d88c84461b",
+            "key_hash": "sha256:e995a00145362077bebce0a95ac32edf553588f813e962ff3b6593d88c84461b",
+            "name": "Client B",
+            "scopes": [
+              "read"
+            ],
+            "tags": null
+          }
+        ],
+        "enabled": true
+      }
+    }
+  }
+}

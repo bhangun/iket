@@ -83,6 +83,29 @@ func validatePolicyAlertNotificationPolicy(field string, policy PolicyAlertNotif
 			return errors.NewValidationError(field+".window", "policy alert notification window must use a valid duration format")
 		}
 	}
+	if policy.DetailedMinBucketClassPriority < 0 {
+		return errors.NewValidationError(field+".detailedMinBucketClassPriority", "policy alert notification detailedMinBucketClassPriority must be zero or greater")
+	}
+	if policy.DetailedMaxBucketClasses < 0 {
+		return errors.NewValidationError(field+".detailedMaxBucketClasses", "policy alert notification detailedMaxBucketClasses must be zero or greater")
+	}
+	var elevatedWithin time.Duration
+	if strings.TrimSpace(policy.SnoozeElevatedWithin) != "" {
+		parsed, err := time.ParseDuration(strings.TrimSpace(policy.SnoozeElevatedWithin))
+		if err != nil || parsed <= 0 {
+			return errors.NewValidationError(field+".snoozeElevatedWithin", "policy alert notification snoozeElevatedWithin must use a positive duration format")
+		}
+		elevatedWithin = parsed
+	}
+	if strings.TrimSpace(policy.SnoozeCriticalWithin) != "" {
+		parsed, err := time.ParseDuration(strings.TrimSpace(policy.SnoozeCriticalWithin))
+		if err != nil || parsed <= 0 {
+			return errors.NewValidationError(field+".snoozeCriticalWithin", "policy alert notification snoozeCriticalWithin must use a positive duration format")
+		}
+		if elevatedWithin > 0 && parsed > elevatedWithin {
+			return errors.NewValidationError(field+".snoozeCriticalWithin", "policy alert notification snoozeCriticalWithin must be less than or equal to snoozeElevatedWithin")
+		}
+	}
 	if policy.MinCount < 0 {
 		return errors.NewValidationError(field+".minCount", "policy alert notification minCount must be zero or greater")
 	}
@@ -136,10 +159,8 @@ func validateLimitAlertBucketPolicy(field string, policy LimitAlertBucketPolicyC
 		if strings.TrimSpace(policy.Preset) != "" {
 			goto validateThresholds
 		}
-		switch strings.ToLower(strings.TrimSpace(policy.KeyType)) {
-		case "ip", "header", "api_key", "jwt_sub":
-		default:
-			return errors.NewValidationError(field+".keyType", "limit alert bucket policy keyType must be ip, header, api_key, or jwt_sub")
+		if !IsBucketedLimitKeyType(policy.KeyType) {
+			return errors.NewValidationError(field+".keyType", "limit alert bucket policy keyType must be "+SupportedBucketedLimitKeyTypeValues)
 		}
 		if strings.TrimSpace(policy.BucketRegex) == "" {
 			return errors.NewValidationError(field+".bucketRegex", "limit alert bucket policy bucketRegex is required")

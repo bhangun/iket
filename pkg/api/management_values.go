@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"strings"
 )
 
@@ -30,10 +31,46 @@ func int64Value(value interface{}) int64 {
 	}
 }
 
+func stringValue(value interface{}) string {
+	if value == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(value))
+}
+
+func stringSliceValue(value interface{}) []string {
+	switch values := value.(type) {
+	case nil:
+		return nil
+	case []string:
+		return trimmedStringSlice(values)
+	case []interface{}:
+		out := make([]string, 0, len(values))
+		for _, value := range values {
+			text := stringValue(value)
+			if text != "" {
+				out = append(out, text)
+			}
+		}
+		return out
+	default:
+		text := stringValue(value)
+		if text == "" {
+			return nil
+		}
+		return []string{text}
+	}
+}
+
+func boolValue(value interface{}) bool {
+	v, _ := value.(bool)
+	return v
+}
+
 func sanitizedClientCommonName(name string) string {
 	name = strings.TrimSpace(strings.ToLower(name))
 	if name == "" {
-		return "iket-cli"
+		return "iket"
 	}
 	var b strings.Builder
 	for _, r := range name {
@@ -50,7 +87,7 @@ func sanitizedClientCommonName(name string) string {
 	}
 	out := strings.Trim(b.String(), "-")
 	if out == "" {
-		return "iket-cli"
+		return "iket"
 	}
 	return out
 }

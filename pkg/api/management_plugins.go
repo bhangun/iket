@@ -2,28 +2,24 @@ package api
 
 import (
 	"encoding/json"
-	coreerrors "github.com/bhangun/iket/pkg/core/errors"
-	"github.com/gorilla/mux"
 	"net/http"
-	"time"
-)
 
-// Plugin Response
-type PluginInfo struct {
-	Name    string            `json:"name"`
-	Type    string            `json:"type"`
-	Enabled bool              `json:"enabled"`
-	Status  string            `json:"status"`
-	Tags    map[string]string `json:"tags"`
-}
+	coreerrors "github.com/bhangun/iket/pkg/core/errors"
+)
 
 // ListPlugins returns the list of registered plugin names.
 func (m *ManagementAPI) ListPlugins() []string {
-	return m.registry.List() // assuming Registry has a List() method
+	return m.registry.List()
 }
 
 func (api *ManagementAPI) listPlugins(w http.ResponseWriter, r *http.Request) {
+	filter, err := pluginListFilterFromRequest(r)
+	if err != nil {
+		api.writeManagedError(w, err, http.StatusBadRequest)
+		return
+	}
 	plugins := api.registry.List()
+	allPluginInfos := make([]PluginInfo, 0, len(plugins))
 	pluginInfos := make([]PluginInfo, 0, len(plugins))
 
 	for _, name := range plugins {
@@ -32,94 +28,38 @@ func (api *ManagementAPI) listPlugins(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		info := PluginInfo{
-			Name:    name,
-			Type:    "unknown",
-			Enabled: api.pluginEnabled(name),
-			Status:  "healthy",
-			Tags:    make(map[string]string),
-		}
+		info := api.pluginInventorySnapshot(name, plugin).Info
 
-		// Get plugin type if available
-		if typedPlugin, ok := plugin.(interface{ Type() string }); ok {
-			info.Type = typedPlugin.Type()
+		allPluginInfos = append(allPluginInfos, info)
+		if !pluginInfoMatchesFilter(info, filter) {
+			continue
 		}
-
-		// Get plugin tags if available
-		if taggedPlugin, ok := plugin.(interface{ Tags() map[string]string }); ok {
-			info.Tags = taggedPlugin.Tags()
-		}
-
-		// Check health if available
-		if healthChecker, ok := plugin.(interface{ Health() error }); ok {
-			if err := healthChecker.Health(); err != nil {
-				info.Status = "unhealthy"
-			}
-		}
-
 		pluginInfos = append(pluginInfos, info)
 	}
 
 	response := map[string]interface{}{
 		"plugins": pluginInfos,
+		"total":   len(pluginInfos),
+		"summary": pluginListSummaryFromInfos(allPluginInfos, len(pluginInfos)),
+	}
+	if pluginListFilterActive(filter) {
+		response["filters"] = pluginListFilterResponse(filter)
 	}
 	api.writeJSON(w, response)
 }
 
 func (api *ManagementAPI) getPluginDetails(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	pluginName := vars["name"]
-
-	plugin, err := api.registry.Get(pluginName)
-	if err != nil {
-		api.writeManagedError(w, managedError(coreerrors.CodePluginNotFound, "Plugin not found", err), http.StatusNotFound)
+	pluginName, plugin, ok := api.registeredPluginFromRequest(w, r)
+	if !ok {
 		return
 	}
 
-	details := map[string]interface{}{
-		"name":    pluginName,
-		"type":    "unknown",
-		"enabled": api.pluginEnabled(pluginName),
-		"status":  "healthy",
-	}
-
-	// Get plugin type
-	if typedPlugin, ok := plugin.(interface{ Type() string }); ok {
-		details["type"] = typedPlugin.Type()
-	}
-
-	// Get plugin tags
-	if taggedPlugin, ok := plugin.(interface{ Tags() map[string]string }); ok {
-		details["tags"] = taggedPlugin.Tags()
-	}
-
-	// Get health status
-	if healthChecker, ok := plugin.(interface{ Health() error }); ok {
-		if err := healthChecker.Health(); err != nil {
-			details["status"] = "unhealthy"
-			details["health"] = map[string]interface{}{
-				"status":  "unhealthy",
-				"message": err.Error(),
-			}
-		} else {
-			details["health"] = map[string]interface{}{
-				"status":  "healthy",
-				"message": "Plugin is functioning normally",
-			}
-		}
-	}
-
-	// Get status
-	if statusReporter, ok := plugin.(interface{ Status() string }); ok {
-		details["status_message"] = statusReporter.Status()
-	}
-
-	api.writeJSON(w, details)
+	snapshot := api.pluginInventorySnapshot(pluginName, plugin)
+	api.writeJSON(w, pluginDetailsResponse(snapshot))
 }
 
 func (api *ManagementAPI) updatePluginConfig(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	pluginName := vars["name"]
+	pluginName := pluginNameFromRequest(r)
 	dryRun := r.URL.Query().Get("dry_run") == "true"
 
 	var config map[string]interface{}
@@ -144,7 +84,12 @@ func (api *ManagementAPI) updatePluginConfig(w http.ResponseWriter, r *http.Requ
 		api.writeManagedError(w, managedConfigError("Failed to prepare configuration update", err), http.StatusInternalServerError)
 		return
 	}
-	currentPluginCfg := simCfg.Plugins[pluginName]
+	currentPluginCfg := cfg.Plugins[pluginName]
+	previousPluginCfg, err := clonePluginConfigMap(currentPluginCfg)
+	if err != nil {
+		api.writeManagedError(w, managedConfigError("Failed to snapshot plugin configuration", err), http.StatusInternalServerError)
+		return
+	}
 	simCfg.SetPluginConfig(pluginName, config)
 	summary := map[string]interface{}{
 		"plugin": pluginName,
@@ -163,14 +108,13 @@ func (api *ManagementAPI) updatePluginConfig(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Reload plugin with new configuration
-	if err := plugin.Initialize(config); err != nil {
-		api.writeManagedError(w, managedConfigError("Failed to update plugin configuration", err), http.StatusInternalServerError)
-		return
-	}
 	label, note, changeRef := revisionMetadataFromRequest(r)
-	if err := api.applyManagedConfigChange(simCfg, "plugin_config_update", label, note, changeRef, summary); err != nil {
-		api.writeManagedError(w, managedConfigError("Failed to persist plugin configuration", err), http.StatusInternalServerError)
+	if err := api.applyPluginRuntimeConfigChange(plugin, "plugin_config_update", simCfg, config, previousPluginCfg, label, note, changeRef, summary); err != nil {
+		if code := coreerrors.CodeOf(err); code != "" {
+			api.writeManagedError(w, managedError(code, err.Error(), err), coreerrors.HTTPStatusForCode(code))
+			return
+		}
+		api.writeManagedError(w, managedConfigError("Failed to update plugin configuration", err), http.StatusInternalServerError)
 		return
 	}
 
@@ -183,7 +127,7 @@ func (api *ManagementAPI) updatePluginConfig(w http.ResponseWriter, r *http.Requ
 }
 
 func (api *ManagementAPI) enablePlugin(w http.ResponseWriter, r *http.Request) {
-	pluginName := mux.Vars(r)["name"]
+	pluginName := pluginNameFromRequest(r)
 	if err := api.setPluginEnabled(r, pluginName, true); err != nil {
 		api.writeManagedError(w, err, http.StatusBadRequest)
 		return
@@ -197,7 +141,7 @@ func (api *ManagementAPI) enablePlugin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *ManagementAPI) disablePlugin(w http.ResponseWriter, r *http.Request) {
-	pluginName := mux.Vars(r)["name"]
+	pluginName := pluginNameFromRequest(r)
 	if err := api.setPluginEnabled(r, pluginName, false); err != nil {
 		api.writeManagedError(w, err, http.StatusBadRequest)
 		return
@@ -211,56 +155,30 @@ func (api *ManagementAPI) disablePlugin(w http.ResponseWriter, r *http.Request) 
 }
 
 func (api *ManagementAPI) getPluginHealth(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	pluginName := vars["name"]
-
-	plugin, err := api.registry.Get(pluginName)
-	if err != nil {
-		api.writeManagedError(w, managedError(coreerrors.CodePluginNotFound, "Plugin not found", err), http.StatusNotFound)
+	_, plugin, ok := api.registeredPluginFromRequest(w, r)
+	if !ok {
 		return
 	}
 
-	healthChecker, ok := plugin.(interface{ Health() error })
+	health, ok := pluginHealthResponse(plugin)
 	if !ok {
 		api.writeManagedError(w, managedError(coreerrors.CodePluginUnsupported, "Plugin does not support health checks", nil), http.StatusNotImplemented)
 		return
-	}
-
-	err = healthChecker.Health()
-	health := map[string]interface{}{
-		"status":     "healthy",
-		"last_check": time.Now(),
-		"message":    "Plugin is functioning normally",
-	}
-
-	if err != nil {
-		health["status"] = "unhealthy"
-		health["message"] = err.Error()
 	}
 
 	api.writeJSON(w, health)
 }
 
 func (api *ManagementAPI) getPluginStatus(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	pluginName := vars["name"]
-
-	plugin, err := api.registry.Get(pluginName)
-	if err != nil {
-		api.writeManagedError(w, managedError(coreerrors.CodePluginNotFound, "Plugin not found", err), http.StatusNotFound)
+	pluginName, plugin, ok := api.registeredPluginFromRequest(w, r)
+	if !ok {
 		return
 	}
 
-	statusReporter, ok := plugin.(interface{ Status() string })
+	status, ok := pluginStatusResponse(plugin, api.pluginEnabled(pluginName))
 	if !ok {
 		api.writeManagedError(w, managedError(coreerrors.CodePluginUnsupported, "Plugin does not support status reporting", nil), http.StatusNotImplemented)
 		return
-	}
-
-	status := map[string]interface{}{
-		"status":      statusReporter.Status(),
-		"enabled":     api.pluginEnabled(pluginName),
-		"last_update": time.Now(),
 	}
 
 	api.writeJSON(w, status)
@@ -298,13 +216,14 @@ func (api *ManagementAPI) setPluginEnabled(r *http.Request, name string, enabled
 	if pluginCfg == nil {
 		pluginCfg = map[string]interface{}{}
 	}
-	pluginCfg["enabled"] = enabled
-	simCfg.SetPluginConfig(name, pluginCfg)
-	if err := p.Initialize(pluginCfg); err != nil {
+	previousPluginCfg, err := clonePluginConfigMap(pluginCfg)
+	if err != nil {
 		return err
 	}
+	pluginCfg["enabled"] = enabled
+	simCfg.SetPluginConfig(name, pluginCfg)
 	label, note, changeRef := revisionMetadataFromRequest(r)
-	return api.applyManagedConfigChange(simCfg, "plugin_set_enabled", label, note, changeRef, map[string]interface{}{
+	return api.applyPluginRuntimeConfigChange(p, "plugin_set_enabled", simCfg, pluginCfg, previousPluginCfg, label, note, changeRef, map[string]interface{}{
 		"plugin":  name,
 		"enabled": enabled,
 	})

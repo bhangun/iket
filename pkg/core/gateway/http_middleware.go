@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/bhangun/iket/pkg/core/authcontext"
+	"github.com/bhangun/iket/pkg/core/requestcontext"
 	"github.com/bhangun/iket/pkg/logging"
 )
 
@@ -43,6 +45,12 @@ func (g *Gateway) routeContextMiddleware() func(http.Handler) http.Handler {
 			ctx := context.WithValue(r.Context(), matchedRouteKey, matchedRouteContext{
 				Route: match.Route,
 				Vars:  match.Vars,
+			})
+			ctx = requestcontext.WithAttribution(ctx, requestcontext.Attribution{
+				TenantRealm: match.Vars["realm"],
+				ServiceName: match.Route.ServiceName,
+				RouteName:   match.Route.Name,
+				RoutePath:   match.Route.Path,
 			})
 			ctx = context.WithValue(ctx, routeVarsKey, match.Vars)
 			if realm := match.Vars["realm"]; realm != "" {
@@ -113,6 +121,7 @@ func (g *Gateway) securityHeadersMiddleware() func(http.Handler) http.Handler {
 			requestID := ensureRequestID(r)
 			w.Header().Set("X-Request-Id", requestID)
 			ctx := context.WithValue(r.Context(), requestIDKey, requestID)
+			ctx = requestcontext.WithAttribution(ctx, requestcontext.Attribution{RequestID: requestID})
 
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
@@ -151,6 +160,8 @@ func (g *Gateway) authMiddleware(next http.Handler) http.Handler {
 				_, _ = w.Write([]byte("Invalid username or password"))
 				return
 			}
+			ctx := authcontext.WithPrincipal(r.Context(), principalFromBasicIdentity("basic_auth", user))
+			r = r.WithContext(ctx)
 		}
 		next.ServeHTTP(w, r)
 	})

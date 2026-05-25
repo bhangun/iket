@@ -588,6 +588,7 @@ func initServerCmd(rootCmd *cobra.Command) {
 	doctorCmd.Flags().StringVar(&doctorURL, "url", "", "Optional target admin URL to verify against the generated server certificate SANs")
 	doctorCmd.Flags().BoolVar(&doctorSkipDocker, "skip-docker", false, "Skip docker/docker compose runtime checks")
 
+	initServerRunCmd(serverCmd)
 	serverCmd.AddCommand(initCmd, doctorCmd)
 	rootCmd.AddCommand(serverCmd)
 }

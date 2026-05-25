@@ -21,6 +21,17 @@ var gatewayLimitClassesWindow string
 var gatewayLimitClassesMinCount int
 var gatewayLimitClassAlertsWindow string
 var gatewayLimitClassAlertsMinCount int
+var gatewayLimitClassSnoozesExpiringWithin string
+var gatewayLimitClassIncidentsSeverity string
+var gatewayLimitClassIncidentsBucketClass string
+var gatewayLimitClassIncidentsServiceName string
+var gatewayLimitClassIncidentsRoutePath string
+var gatewayLimitClassIncidentsLimitType string
+var gatewayLimitClassIncidentsKeyType string
+var gatewayLimitClassIncidentID string
+var gatewayLimitClassIncidentReviewer string
+var gatewayLimitClassIncidentNote string
+var gatewayLimitClassIncidentSnoozeDuration string
 var gatewayLimitAlertsWindow string
 var gatewayLimitAlertsMinCount int
 var gatewayPolicyAlertsWindow string
@@ -37,6 +48,61 @@ var gatewayRoutePolicyDiffToPath string
 var gatewayRoutePolicyDiffToMethod string
 var gatewayRoutePolicyDiffToHeaders []string
 var gatewayRoutePolicyDiffToBucketKey string
+var gatewayLimitClassDigestProfileWebhook string
+var gatewayLimitClassDigestProfileName string
+var gatewayLimitClassDigestProfileDiffFromWebhook string
+var gatewayLimitClassDigestProfileDiffFromProfile string
+var gatewayLimitClassDigestProfileDiffToWebhook string
+var gatewayLimitClassDigestProfileDiffToProfile string
+var gatewayLimitClassDigestProfileExplainWebhook string
+var gatewayLimitClassDigestProfileExplainProfile string
+var gatewayLimitClassDigestProfileExplainField string
+var gatewayLimitClassDigestProfileExplainDiffFromWebhook string
+var gatewayLimitClassDigestProfileExplainDiffFromProfile string
+var gatewayLimitClassDigestProfileExplainDiffToWebhook string
+var gatewayLimitClassDigestProfileExplainDiffToProfile string
+var gatewayLimitClassDigestProfileExplainDiffField string
+var gatewayLimitClassDigestProfileExplainBundleWebhook string
+var gatewayLimitClassDigestProfileExplainBundleProfile string
+var gatewayLimitClassDigestProfileExplainBundleBundles []string
+var gatewayLimitClassDigestProfileExplainBundleFields []string
+var gatewayLimitClassDigestProfileExplainBundleDiffFromWebhook string
+var gatewayLimitClassDigestProfileExplainBundleDiffFromProfile string
+var gatewayLimitClassDigestProfileExplainBundleDiffToWebhook string
+var gatewayLimitClassDigestProfileExplainBundleDiffToProfile string
+var gatewayLimitClassDigestProfileExplainBundleDiffBundles []string
+var gatewayLimitClassDigestProfileExplainBundleDiffFields []string
+var gatewayLimitClassDigestProfileExplainBundleDiffProfiles []string
+var gatewayLimitClassDigestProfileExplainBundleDiffFromRole string
+var gatewayLimitClassDigestProfileExplainBundleDiffToRole string
+var gatewayLimitClassDigestAssertionPresetName string
+var gatewayLimitClassDigestAssertionPresetDiffFromName string
+var gatewayLimitClassDigestAssertionPresetDiffToName string
+var gatewayLimitClassDigestAssertionPresetExplainName string
+var gatewayLimitClassDigestAssertionPresetExplainKind string
+var gatewayLimitClassDigestAssertionPresetExplainBundleName string
+var gatewayLimitClassDigestAssertionPresetExplainBundleBundles []string
+var gatewayLimitClassDigestAssertionPresetExplainBundleKinds []string
+var gatewayLimitClassDigestAssertionPresetExplainBundleDiffFromName string
+var gatewayLimitClassDigestAssertionPresetExplainBundleDiffToName string
+var gatewayLimitClassDigestAssertionPresetExplainBundleDiffProfiles []string
+var gatewayLimitClassDigestAssertionPresetExplainBundleDiffBundles []string
+var gatewayLimitClassDigestAssertionPresetExplainBundleDiffKinds []string
+var gatewayLimitClassDigestAssertionPresetExplainDiffFromName string
+var gatewayLimitClassDigestAssertionPresetExplainDiffToName string
+var gatewayLimitClassDigestAssertionPresetExplainDiffKind string
+var gatewayLimitClassDigestAssertionGroupPresetName string
+var gatewayLimitClassDigestAssertionGroupPresetDiffFromName string
+var gatewayLimitClassDigestAssertionGroupPresetDiffToName string
+var gatewayLimitClassDigestAssertionGroupPresetExplainName string
+var gatewayLimitClassDigestAssertionGroupPresetExplainBundleBundles []string
+var gatewayLimitClassDigestAssertionGroupPresetExplainBundlePresets []string
+var gatewayLimitClassDigestAssertionGroupPresetExplainBundleDiffFromBundles []string
+var gatewayLimitClassDigestAssertionGroupPresetExplainBundleDiffFromPresets []string
+var gatewayLimitClassDigestAssertionGroupPresetExplainBundleDiffToBundles []string
+var gatewayLimitClassDigestAssertionGroupPresetExplainBundleDiffToPresets []string
+var gatewayLimitClassDigestAssertionGroupPresetExplainDiffFromName string
+var gatewayLimitClassDigestAssertionGroupPresetExplainDiffToName string
 
 func initAdminCoverageCmds(rootCmd *cobra.Command) {
 	initGatewayAdminCmds(rootCmd)
@@ -47,6 +113,16 @@ func initAdminCoverageCmds(rootCmd *cobra.Command) {
 	initRevisionCmd(rootCmd)
 	initProposalCmd(rootCmd)
 	initNotificationCmd(rootCmd)
+}
+
+func adminSubcommand(parent *cobra.Command, use string) *cobra.Command {
+	name := strings.TrimSpace(strings.Split(use, " ")[0])
+	for _, cmd := range parent.Commands() {
+		if cmd.Name() == name {
+			return cmd
+		}
+	}
+	panic("admin subcommand not found: " + use)
 }
 
 func initGatewayAdminCmds(rootCmd *cobra.Command) {
@@ -176,6 +252,711 @@ func initGatewayAdminCmds(rootCmd *cobra.Command) {
 	routePolicyDiffCmd.Flags().StringVar(&gatewayRoutePolicyDiffToBucketKey, "to-bucket-key", "inspect", "Optional second rollout bucket key for percent-gated routes")
 	gatewayCmd.AddCommand(routePolicyDiffCmd)
 
+	limitClassDigestProfileCmd := &cobra.Command{
+		Use:   "limit-class-digest-profile",
+		Short: "Inspect the resolved limiter digest receiver view for one notification webhook",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			webhook := strings.TrimSpace(gatewayLimitClassDigestProfileWebhook)
+			profile := strings.TrimSpace(gatewayLimitClassDigestProfileName)
+			if (webhook == "" && profile == "") || (webhook != "" && profile != "") {
+				return fmt.Errorf("exactly one of --webhook or --profile is required")
+			}
+			values := url.Values{}
+			if webhook != "" {
+				values.Set("webhook", webhook)
+			}
+			if profile != "" {
+				values.Set("profile", profile)
+			}
+			path := "/api/v1/gateway/limit-class-digest-profile?" + values.Encode()
+			resp, err := apiClient.Do("GET", path, nil)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	}
+	limitClassDigestProfileCmd.Flags().StringVar(&gatewayLimitClassDigestProfileWebhook, "webhook", "", "Notification webhook name to inspect")
+	limitClassDigestProfileCmd.Flags().StringVar(&gatewayLimitClassDigestProfileName, "profile", "", "Named digest profile to inspect")
+	gatewayCmd.AddCommand(limitClassDigestProfileCmd)
+
+	limitClassDigestProfileDiffCmd := &cobra.Command{
+		Use:   "limit-class-digest-profile-diff",
+		Short: "Compare two resolved limiter digest receiver views",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			fromWebhook := strings.TrimSpace(gatewayLimitClassDigestProfileDiffFromWebhook)
+			fromProfile := strings.TrimSpace(gatewayLimitClassDigestProfileDiffFromProfile)
+			toWebhook := strings.TrimSpace(gatewayLimitClassDigestProfileDiffToWebhook)
+			toProfile := strings.TrimSpace(gatewayLimitClassDigestProfileDiffToProfile)
+			if (fromWebhook == "" && fromProfile == "") || (fromWebhook != "" && fromProfile != "") {
+				return fmt.Errorf("exactly one of --from-webhook or --from-profile is required")
+			}
+			if (toWebhook == "" && toProfile == "") || (toWebhook != "" && toProfile != "") {
+				return fmt.Errorf("exactly one of --to-webhook or --to-profile is required")
+			}
+			values := url.Values{}
+			if fromWebhook != "" {
+				values.Set("from_webhook", fromWebhook)
+			}
+			if fromProfile != "" {
+				values.Set("from_profile", fromProfile)
+			}
+			if toWebhook != "" {
+				values.Set("to_webhook", toWebhook)
+			}
+			if toProfile != "" {
+				values.Set("to_profile", toProfile)
+			}
+			path := "/api/v1/gateway/limit-class-digest-profile/diff?" + values.Encode()
+			resp, err := apiClient.Do("GET", path, nil)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	}
+	limitClassDigestProfileDiffCmd.Flags().StringVar(&gatewayLimitClassDigestProfileDiffFromWebhook, "from-webhook", "", "First notification webhook name to compare")
+	limitClassDigestProfileDiffCmd.Flags().StringVar(&gatewayLimitClassDigestProfileDiffFromProfile, "from-profile", "", "First named digest profile to compare")
+	limitClassDigestProfileDiffCmd.Flags().StringVar(&gatewayLimitClassDigestProfileDiffToWebhook, "to-webhook", "", "Second notification webhook name to compare")
+	limitClassDigestProfileDiffCmd.Flags().StringVar(&gatewayLimitClassDigestProfileDiffToProfile, "to-profile", "", "Second named digest profile to compare")
+	gatewayCmd.AddCommand(limitClassDigestProfileDiffCmd)
+
+	limitClassDigestProfileExplainCmd := &cobra.Command{
+		Use:   "limit-class-digest-profile-explain",
+		Short: "Explain how one resolved limiter digest field got its final value",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			webhook := strings.TrimSpace(gatewayLimitClassDigestProfileExplainWebhook)
+			profile := strings.TrimSpace(gatewayLimitClassDigestProfileExplainProfile)
+			field := strings.TrimSpace(gatewayLimitClassDigestProfileExplainField)
+			if (webhook == "" && profile == "") || (webhook != "" && profile != "") {
+				return fmt.Errorf("exactly one of --webhook or --profile is required")
+			}
+			if field == "" {
+				return fmt.Errorf("--field is required")
+			}
+			values := url.Values{}
+			if webhook != "" {
+				values.Set("webhook", webhook)
+			}
+			if profile != "" {
+				values.Set("profile", profile)
+			}
+			values.Set("field", field)
+			path := "/api/v1/gateway/limit-class-digest-profile/explain?" + values.Encode()
+			resp, err := apiClient.Do("GET", path, nil)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	}
+	limitClassDigestProfileExplainCmd.Flags().StringVar(&gatewayLimitClassDigestProfileExplainWebhook, "webhook", "", "Notification webhook name to explain")
+	limitClassDigestProfileExplainCmd.Flags().StringVar(&gatewayLimitClassDigestProfileExplainProfile, "profile", "", "Named digest profile to explain")
+	limitClassDigestProfileExplainCmd.Flags().StringVar(&gatewayLimitClassDigestProfileExplainField, "field", "", "Resolved digest receiver field to explain")
+	gatewayCmd.AddCommand(limitClassDigestProfileExplainCmd)
+
+	limitClassDigestProfileExplainDiffCmd := &cobra.Command{
+		Use:   "limit-class-digest-profile-explain-diff",
+		Short: "Compare the precedence trace for one limiter digest receiver field",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			fromWebhook := strings.TrimSpace(gatewayLimitClassDigestProfileExplainDiffFromWebhook)
+			fromProfile := strings.TrimSpace(gatewayLimitClassDigestProfileExplainDiffFromProfile)
+			toWebhook := strings.TrimSpace(gatewayLimitClassDigestProfileExplainDiffToWebhook)
+			toProfile := strings.TrimSpace(gatewayLimitClassDigestProfileExplainDiffToProfile)
+			field := strings.TrimSpace(gatewayLimitClassDigestProfileExplainDiffField)
+			if (fromWebhook == "" && fromProfile == "") || (fromWebhook != "" && fromProfile != "") {
+				return fmt.Errorf("exactly one of --from-webhook or --from-profile is required")
+			}
+			if (toWebhook == "" && toProfile == "") || (toWebhook != "" && toProfile != "") {
+				return fmt.Errorf("exactly one of --to-webhook or --to-profile is required")
+			}
+			if field == "" {
+				return fmt.Errorf("--field is required")
+			}
+			values := url.Values{}
+			if fromWebhook != "" {
+				values.Set("from_webhook", fromWebhook)
+			}
+			if fromProfile != "" {
+				values.Set("from_profile", fromProfile)
+			}
+			if toWebhook != "" {
+				values.Set("to_webhook", toWebhook)
+			}
+			if toProfile != "" {
+				values.Set("to_profile", toProfile)
+			}
+			values.Set("field", field)
+			path := "/api/v1/gateway/limit-class-digest-profile/explain/diff?" + values.Encode()
+			resp, err := apiClient.Do("GET", path, nil)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	}
+	limitClassDigestProfileExplainDiffCmd.Flags().StringVar(&gatewayLimitClassDigestProfileExplainDiffFromWebhook, "from-webhook", "", "First notification webhook name to explain")
+	limitClassDigestProfileExplainDiffCmd.Flags().StringVar(&gatewayLimitClassDigestProfileExplainDiffFromProfile, "from-profile", "", "First named digest profile to explain")
+	limitClassDigestProfileExplainDiffCmd.Flags().StringVar(&gatewayLimitClassDigestProfileExplainDiffToWebhook, "to-webhook", "", "Second notification webhook name to explain")
+	limitClassDigestProfileExplainDiffCmd.Flags().StringVar(&gatewayLimitClassDigestProfileExplainDiffToProfile, "to-profile", "", "Second named digest profile to explain")
+	limitClassDigestProfileExplainDiffCmd.Flags().StringVar(&gatewayLimitClassDigestProfileExplainDiffField, "field", "", "Resolved digest receiver field to compare")
+	gatewayCmd.AddCommand(limitClassDigestProfileExplainDiffCmd)
+
+	limitClassDigestProfileExplainBundleCmd := &cobra.Command{
+		Use:   "limit-class-digest-profile-explain-bundle",
+		Short: "Explain multiple resolved limiter digest fields in one inspection call",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			webhook := strings.TrimSpace(gatewayLimitClassDigestProfileExplainBundleWebhook)
+			profile := strings.TrimSpace(gatewayLimitClassDigestProfileExplainBundleProfile)
+			fields := make([]string, 0, len(gatewayLimitClassDigestProfileExplainBundleFields))
+			for _, field := range gatewayLimitClassDigestProfileExplainBundleFields {
+				field = strings.TrimSpace(field)
+				if field != "" {
+					fields = append(fields, field)
+				}
+			}
+			bundles := make([]string, 0, len(gatewayLimitClassDigestProfileExplainBundleBundles))
+			for _, bundle := range gatewayLimitClassDigestProfileExplainBundleBundles {
+				bundle = strings.TrimSpace(bundle)
+				if bundle != "" {
+					bundles = append(bundles, bundle)
+				}
+			}
+			if (webhook == "" && profile == "") || (webhook != "" && profile != "") {
+				return fmt.Errorf("exactly one of --webhook or --profile is required")
+			}
+			if len(fields) == 0 && len(bundles) == 0 {
+				return fmt.Errorf("at least one --field or --bundle is required")
+			}
+			values := url.Values{}
+			if webhook != "" {
+				values.Set("webhook", webhook)
+			}
+			if profile != "" {
+				values.Set("profile", profile)
+			}
+			for _, bundle := range bundles {
+				values.Add("bundle", bundle)
+			}
+			for _, field := range fields {
+				values.Add("field", field)
+			}
+			path := "/api/v1/gateway/limit-class-digest-profile/explain/bundle?" + values.Encode()
+			resp, err := apiClient.Do("GET", path, nil)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	}
+	limitClassDigestProfileExplainBundleCmd.Flags().StringVar(&gatewayLimitClassDigestProfileExplainBundleWebhook, "webhook", "", "Notification webhook name to explain")
+	limitClassDigestProfileExplainBundleCmd.Flags().StringVar(&gatewayLimitClassDigestProfileExplainBundleProfile, "profile", "", "Named digest profile to explain")
+	limitClassDigestProfileExplainBundleCmd.Flags().StringSliceVar(&gatewayLimitClassDigestProfileExplainBundleBundles, "bundle", nil, "Named explain bundle to apply; repeat as needed")
+	limitClassDigestProfileExplainBundleCmd.Flags().StringSliceVar(&gatewayLimitClassDigestProfileExplainBundleFields, "field", nil, "Resolved digest receiver field to explain; repeat as needed")
+	gatewayCmd.AddCommand(limitClassDigestProfileExplainBundleCmd)
+
+	limitClassDigestProfileExplainBundleDiffCmd := &cobra.Command{
+		Use:   "limit-class-digest-profile-explain-bundle-diff",
+		Short: "Compare a multi-field explain bundle across two limiter digest receiver targets",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			fromWebhook := strings.TrimSpace(gatewayLimitClassDigestProfileExplainBundleDiffFromWebhook)
+			fromProfile := strings.TrimSpace(gatewayLimitClassDigestProfileExplainBundleDiffFromProfile)
+			toWebhook := strings.TrimSpace(gatewayLimitClassDigestProfileExplainBundleDiffToWebhook)
+			toProfile := strings.TrimSpace(gatewayLimitClassDigestProfileExplainBundleDiffToProfile)
+			bundles := make([]string, 0, len(gatewayLimitClassDigestProfileExplainBundleDiffBundles))
+			for _, bundle := range gatewayLimitClassDigestProfileExplainBundleDiffBundles {
+				bundle = strings.TrimSpace(bundle)
+				if bundle != "" {
+					bundles = append(bundles, bundle)
+				}
+			}
+			fields := make([]string, 0, len(gatewayLimitClassDigestProfileExplainBundleDiffFields))
+			for _, field := range gatewayLimitClassDigestProfileExplainBundleDiffFields {
+				field = strings.TrimSpace(field)
+				if field != "" {
+					fields = append(fields, field)
+				}
+			}
+			diffProfiles := make([]string, 0, len(gatewayLimitClassDigestProfileExplainBundleDiffProfiles))
+			for _, profile := range gatewayLimitClassDigestProfileExplainBundleDiffProfiles {
+				profile = strings.TrimSpace(profile)
+				if profile != "" {
+					diffProfiles = append(diffProfiles, profile)
+				}
+			}
+			if (fromWebhook == "" && fromProfile == "") || (fromWebhook != "" && fromProfile != "") {
+				return fmt.Errorf("exactly one of --from-webhook or --from-profile is required")
+			}
+			if (toWebhook == "" && toProfile == "") || (toWebhook != "" && toProfile != "") {
+				return fmt.Errorf("exactly one of --to-webhook or --to-profile is required")
+			}
+			if len(diffProfiles) == 0 && len(bundles) == 0 && len(fields) == 0 {
+				return fmt.Errorf("at least one --diff-profile, --bundle, or --field is required")
+			}
+			values := url.Values{}
+			if fromWebhook != "" {
+				values.Set("from_webhook", fromWebhook)
+			}
+			if fromProfile != "" {
+				values.Set("from_profile", fromProfile)
+			}
+			if toWebhook != "" {
+				values.Set("to_webhook", toWebhook)
+			}
+			if toProfile != "" {
+				values.Set("to_profile", toProfile)
+			}
+			if strings.TrimSpace(gatewayLimitClassDigestProfileExplainBundleDiffFromRole) != "" {
+				values.Set("from_role", strings.TrimSpace(gatewayLimitClassDigestProfileExplainBundleDiffFromRole))
+			}
+			if strings.TrimSpace(gatewayLimitClassDigestProfileExplainBundleDiffToRole) != "" {
+				values.Set("to_role", strings.TrimSpace(gatewayLimitClassDigestProfileExplainBundleDiffToRole))
+			}
+			for _, bundle := range bundles {
+				values.Add("bundle", bundle)
+			}
+			for _, profile := range diffProfiles {
+				values.Add("diff_profile", profile)
+			}
+			for _, field := range fields {
+				values.Add("field", field)
+			}
+			path := "/api/v1/gateway/limit-class-digest-profile/explain/bundle/diff?" + values.Encode()
+			resp, err := apiClient.Do("GET", path, nil)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	}
+	limitClassDigestProfileExplainBundleDiffCmd.Flags().StringVar(&gatewayLimitClassDigestProfileExplainBundleDiffFromWebhook, "from-webhook", "", "First notification webhook name to explain")
+	limitClassDigestProfileExplainBundleDiffCmd.Flags().StringVar(&gatewayLimitClassDigestProfileExplainBundleDiffFromProfile, "from-profile", "", "First named digest profile to explain")
+	limitClassDigestProfileExplainBundleDiffCmd.Flags().StringVar(&gatewayLimitClassDigestProfileExplainBundleDiffFromRole, "from-role", "", "Expected role label for the first target when using role-aware diff profiles")
+	limitClassDigestProfileExplainBundleDiffCmd.Flags().StringVar(&gatewayLimitClassDigestProfileExplainBundleDiffToWebhook, "to-webhook", "", "Second notification webhook name to explain")
+	limitClassDigestProfileExplainBundleDiffCmd.Flags().StringVar(&gatewayLimitClassDigestProfileExplainBundleDiffToProfile, "to-profile", "", "Second named digest profile to explain")
+	limitClassDigestProfileExplainBundleDiffCmd.Flags().StringVar(&gatewayLimitClassDigestProfileExplainBundleDiffToRole, "to-role", "", "Expected role label for the second target when using role-aware diff profiles")
+	limitClassDigestProfileExplainBundleDiffCmd.Flags().StringSliceVar(&gatewayLimitClassDigestProfileExplainBundleDiffProfiles, "diff-profile", nil, "Named explain diff profile to apply; repeat as needed")
+	limitClassDigestProfileExplainBundleDiffCmd.Flags().StringSliceVar(&gatewayLimitClassDigestProfileExplainBundleDiffBundles, "bundle", nil, "Named explain bundle to apply; repeat as needed")
+	limitClassDigestProfileExplainBundleDiffCmd.Flags().StringSliceVar(&gatewayLimitClassDigestProfileExplainBundleDiffFields, "field", nil, "Resolved digest receiver field to compare; repeat as needed")
+	gatewayCmd.AddCommand(limitClassDigestProfileExplainBundleDiffCmd)
+
+	limitClassDigestAssertionPresetCmd := &cobra.Command{
+		Use:   "limit-class-digest-assertion-preset",
+		Short: "Inspect one resolved limiter digest assertion preset chain",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			preset := strings.TrimSpace(gatewayLimitClassDigestAssertionPresetName)
+			if preset == "" {
+				return fmt.Errorf("--preset is required")
+			}
+			values := url.Values{}
+			values.Set("preset", preset)
+			path := "/api/v1/gateway/limit-class-digest-assertion-preset?" + values.Encode()
+			resp, err := apiClient.Do("GET", path, nil)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	}
+	limitClassDigestAssertionPresetCmd.Flags().StringVar(&gatewayLimitClassDigestAssertionPresetName, "preset", "", "Assertion preset name to inspect")
+	gatewayCmd.AddCommand(limitClassDigestAssertionPresetCmd)
+
+	limitClassDigestAssertionPresetDiffCmd := &cobra.Command{
+		Use:   "limit-class-digest-assertion-preset-diff",
+		Short: "Compare two resolved limiter digest assertion preset chains",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			fromPreset := strings.TrimSpace(gatewayLimitClassDigestAssertionPresetDiffFromName)
+			toPreset := strings.TrimSpace(gatewayLimitClassDigestAssertionPresetDiffToName)
+			if fromPreset == "" || toPreset == "" {
+				return fmt.Errorf("--from-preset and --to-preset are required")
+			}
+			values := url.Values{}
+			values.Set("from_preset", fromPreset)
+			values.Set("to_preset", toPreset)
+			path := "/api/v1/gateway/limit-class-digest-assertion-preset/diff?" + values.Encode()
+			resp, err := apiClient.Do("GET", path, nil)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	}
+	limitClassDigestAssertionPresetDiffCmd.Flags().StringVar(&gatewayLimitClassDigestAssertionPresetDiffFromName, "from-preset", "", "First assertion preset name to compare")
+	limitClassDigestAssertionPresetDiffCmd.Flags().StringVar(&gatewayLimitClassDigestAssertionPresetDiffToName, "to-preset", "", "Second assertion preset name to compare")
+	gatewayCmd.AddCommand(limitClassDigestAssertionPresetDiffCmd)
+
+	limitClassDigestAssertionGroupPresetCmd := &cobra.Command{
+		Use:   "limit-class-digest-assertion-group-preset",
+		Short: "Inspect one resolved limiter digest assertion group preset chain",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			preset := strings.TrimSpace(gatewayLimitClassDigestAssertionGroupPresetName)
+			if preset == "" {
+				return fmt.Errorf("--preset is required")
+			}
+			values := url.Values{}
+			values.Set("preset", preset)
+			path := "/api/v1/gateway/limit-class-digest-assertion-group-preset?" + values.Encode()
+			resp, err := apiClient.Do("GET", path, nil)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	}
+	limitClassDigestAssertionGroupPresetCmd.Flags().StringVar(&gatewayLimitClassDigestAssertionGroupPresetName, "preset", "", "Assertion group preset name to inspect")
+	gatewayCmd.AddCommand(limitClassDigestAssertionGroupPresetCmd)
+
+	limitClassDigestAssertionGroupPresetDiffCmd := &cobra.Command{
+		Use:   "limit-class-digest-assertion-group-preset-diff",
+		Short: "Compare two resolved limiter digest assertion group preset chains",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			fromPreset := strings.TrimSpace(gatewayLimitClassDigestAssertionGroupPresetDiffFromName)
+			toPreset := strings.TrimSpace(gatewayLimitClassDigestAssertionGroupPresetDiffToName)
+			if fromPreset == "" || toPreset == "" {
+				return fmt.Errorf("--from-preset and --to-preset are required")
+			}
+			values := url.Values{}
+			values.Set("from_preset", fromPreset)
+			values.Set("to_preset", toPreset)
+			path := "/api/v1/gateway/limit-class-digest-assertion-group-preset/diff?" + values.Encode()
+			resp, err := apiClient.Do("GET", path, nil)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	}
+	limitClassDigestAssertionGroupPresetDiffCmd.Flags().StringVar(&gatewayLimitClassDigestAssertionGroupPresetDiffFromName, "from-preset", "", "First assertion group preset name to compare")
+	limitClassDigestAssertionGroupPresetDiffCmd.Flags().StringVar(&gatewayLimitClassDigestAssertionGroupPresetDiffToName, "to-preset", "", "Second assertion group preset name to compare")
+	gatewayCmd.AddCommand(limitClassDigestAssertionGroupPresetDiffCmd)
+
+	limitClassDigestAssertionGroupPresetExplainCmd := &cobra.Command{
+		Use:   "limit-class-digest-assertion-group-preset-explain",
+		Short: "Explain the resolved groups for one limiter digest assertion group preset",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			preset := strings.TrimSpace(gatewayLimitClassDigestAssertionGroupPresetExplainName)
+			if preset == "" {
+				return fmt.Errorf("--preset is required")
+			}
+			values := url.Values{}
+			values.Set("preset", preset)
+			path := "/api/v1/gateway/limit-class-digest-assertion-group-preset/explain?" + values.Encode()
+			resp, err := apiClient.Do("GET", path, nil)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	}
+	limitClassDigestAssertionGroupPresetExplainCmd.Flags().StringVar(&gatewayLimitClassDigestAssertionGroupPresetExplainName, "preset", "", "Assertion group preset name to explain")
+	gatewayCmd.AddCommand(limitClassDigestAssertionGroupPresetExplainCmd)
+
+	limitClassDigestAssertionGroupPresetExplainBundleCmd := &cobra.Command{
+		Use:   "limit-class-digest-assertion-group-preset-explain-bundle",
+		Short: "Explain multiple limiter digest assertion group presets in one call",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			bundles := make([]string, 0, len(gatewayLimitClassDigestAssertionGroupPresetExplainBundleBundles))
+			for _, bundle := range gatewayLimitClassDigestAssertionGroupPresetExplainBundleBundles {
+				bundle = strings.TrimSpace(bundle)
+				if bundle != "" {
+					bundles = append(bundles, bundle)
+				}
+			}
+			presets := make([]string, 0, len(gatewayLimitClassDigestAssertionGroupPresetExplainBundlePresets))
+			for _, preset := range gatewayLimitClassDigestAssertionGroupPresetExplainBundlePresets {
+				preset = strings.TrimSpace(preset)
+				if preset != "" {
+					presets = append(presets, preset)
+				}
+			}
+			if len(bundles) == 0 && len(presets) == 0 {
+				return fmt.Errorf("at least one --bundle or --preset is required")
+			}
+			values := url.Values{}
+			for _, bundle := range bundles {
+				values.Add("bundle", bundle)
+			}
+			for _, preset := range presets {
+				values.Add("preset", preset)
+			}
+			path := "/api/v1/gateway/limit-class-digest-assertion-group-preset/explain/bundle?" + values.Encode()
+			resp, err := apiClient.Do("GET", path, nil)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	}
+	limitClassDigestAssertionGroupPresetExplainBundleCmd.Flags().StringSliceVar(&gatewayLimitClassDigestAssertionGroupPresetExplainBundleBundles, "bundle", nil, "Named assertion group preset explain bundle to apply; repeat as needed")
+	limitClassDigestAssertionGroupPresetExplainBundleCmd.Flags().StringSliceVar(&gatewayLimitClassDigestAssertionGroupPresetExplainBundlePresets, "preset", nil, "Assertion group preset name to include; repeat as needed")
+	gatewayCmd.AddCommand(limitClassDigestAssertionGroupPresetExplainBundleCmd)
+
+	limitClassDigestAssertionGroupPresetExplainBundleDiffCmd := &cobra.Command{
+		Use:   "limit-class-digest-assertion-group-preset-explain-bundle-diff",
+		Short: "Compare multiple limiter digest assertion group preset bundles in one call",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			fromBundles := make([]string, 0, len(gatewayLimitClassDigestAssertionGroupPresetExplainBundleDiffFromBundles))
+			for _, bundle := range gatewayLimitClassDigestAssertionGroupPresetExplainBundleDiffFromBundles {
+				bundle = strings.TrimSpace(bundle)
+				if bundle != "" {
+					fromBundles = append(fromBundles, bundle)
+				}
+			}
+			fromPresets := make([]string, 0, len(gatewayLimitClassDigestAssertionGroupPresetExplainBundleDiffFromPresets))
+			for _, preset := range gatewayLimitClassDigestAssertionGroupPresetExplainBundleDiffFromPresets {
+				preset = strings.TrimSpace(preset)
+				if preset != "" {
+					fromPresets = append(fromPresets, preset)
+				}
+			}
+			toBundles := make([]string, 0, len(gatewayLimitClassDigestAssertionGroupPresetExplainBundleDiffToBundles))
+			for _, bundle := range gatewayLimitClassDigestAssertionGroupPresetExplainBundleDiffToBundles {
+				bundle = strings.TrimSpace(bundle)
+				if bundle != "" {
+					toBundles = append(toBundles, bundle)
+				}
+			}
+			toPresets := make([]string, 0, len(gatewayLimitClassDigestAssertionGroupPresetExplainBundleDiffToPresets))
+			for _, preset := range gatewayLimitClassDigestAssertionGroupPresetExplainBundleDiffToPresets {
+				preset = strings.TrimSpace(preset)
+				if preset != "" {
+					toPresets = append(toPresets, preset)
+				}
+			}
+			if len(fromBundles) == 0 && len(fromPresets) == 0 {
+				return fmt.Errorf("at least one --from-bundle or --from-preset is required")
+			}
+			if len(toBundles) == 0 && len(toPresets) == 0 {
+				return fmt.Errorf("at least one --to-bundle or --to-preset is required")
+			}
+			values := url.Values{}
+			for _, bundle := range fromBundles {
+				values.Add("from_bundle", bundle)
+			}
+			for _, preset := range fromPresets {
+				values.Add("from_preset", preset)
+			}
+			for _, bundle := range toBundles {
+				values.Add("to_bundle", bundle)
+			}
+			for _, preset := range toPresets {
+				values.Add("to_preset", preset)
+			}
+			path := "/api/v1/gateway/limit-class-digest-assertion-group-preset/explain/bundle/diff?" + values.Encode()
+			resp, err := apiClient.Do("GET", path, nil)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	}
+	limitClassDigestAssertionGroupPresetExplainBundleDiffCmd.Flags().StringSliceVar(&gatewayLimitClassDigestAssertionGroupPresetExplainBundleDiffFromBundles, "from-bundle", nil, "Named assertion group preset explain bundle for the first side; repeat as needed")
+	limitClassDigestAssertionGroupPresetExplainBundleDiffCmd.Flags().StringSliceVar(&gatewayLimitClassDigestAssertionGroupPresetExplainBundleDiffFromPresets, "from-preset", nil, "Assertion group preset name for the first side; repeat as needed")
+	limitClassDigestAssertionGroupPresetExplainBundleDiffCmd.Flags().StringSliceVar(&gatewayLimitClassDigestAssertionGroupPresetExplainBundleDiffToBundles, "to-bundle", nil, "Named assertion group preset explain bundle for the second side; repeat as needed")
+	limitClassDigestAssertionGroupPresetExplainBundleDiffCmd.Flags().StringSliceVar(&gatewayLimitClassDigestAssertionGroupPresetExplainBundleDiffToPresets, "to-preset", nil, "Assertion group preset name for the second side; repeat as needed")
+	gatewayCmd.AddCommand(limitClassDigestAssertionGroupPresetExplainBundleDiffCmd)
+
+	limitClassDigestAssertionGroupPresetExplainDiffCmd := &cobra.Command{
+		Use:   "limit-class-digest-assertion-group-preset-explain-diff",
+		Short: "Compare the stage-by-stage resolved groups for two limiter digest assertion group presets",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			fromPreset := strings.TrimSpace(gatewayLimitClassDigestAssertionGroupPresetExplainDiffFromName)
+			toPreset := strings.TrimSpace(gatewayLimitClassDigestAssertionGroupPresetExplainDiffToName)
+			if fromPreset == "" || toPreset == "" {
+				return fmt.Errorf("--from-preset and --to-preset are required")
+			}
+			values := url.Values{}
+			values.Set("from_preset", fromPreset)
+			values.Set("to_preset", toPreset)
+			path := "/api/v1/gateway/limit-class-digest-assertion-group-preset/explain/diff?" + values.Encode()
+			resp, err := apiClient.Do("GET", path, nil)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	}
+	limitClassDigestAssertionGroupPresetExplainDiffCmd.Flags().StringVar(&gatewayLimitClassDigestAssertionGroupPresetExplainDiffFromName, "from-preset", "", "First assertion group preset name to explain")
+	limitClassDigestAssertionGroupPresetExplainDiffCmd.Flags().StringVar(&gatewayLimitClassDigestAssertionGroupPresetExplainDiffToName, "to-preset", "", "Second assertion group preset name to explain")
+	gatewayCmd.AddCommand(limitClassDigestAssertionGroupPresetExplainDiffCmd)
+
+	limitClassDigestAssertionPresetExplainCmd := &cobra.Command{
+		Use:   "limit-class-digest-assertion-preset-explain",
+		Short: "Explain the resolved rules or groups for one limiter digest assertion preset",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			preset := strings.TrimSpace(gatewayLimitClassDigestAssertionPresetExplainName)
+			kind := strings.TrimSpace(gatewayLimitClassDigestAssertionPresetExplainKind)
+			if preset == "" {
+				return fmt.Errorf("--preset is required")
+			}
+			if kind == "" {
+				return fmt.Errorf("--kind is required")
+			}
+			values := url.Values{}
+			values.Set("preset", preset)
+			values.Set("kind", kind)
+			path := "/api/v1/gateway/limit-class-digest-assertion-preset/explain?" + values.Encode()
+			resp, err := apiClient.Do("GET", path, nil)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	}
+	limitClassDigestAssertionPresetExplainCmd.Flags().StringVar(&gatewayLimitClassDigestAssertionPresetExplainName, "preset", "", "Assertion preset name to explain")
+	limitClassDigestAssertionPresetExplainCmd.Flags().StringVar(&gatewayLimitClassDigestAssertionPresetExplainKind, "kind", "", "Assertion preset section to explain: rules or groups")
+	gatewayCmd.AddCommand(limitClassDigestAssertionPresetExplainCmd)
+
+	limitClassDigestAssertionPresetExplainBundleCmd := &cobra.Command{
+		Use:   "limit-class-digest-assertion-preset-explain-bundle",
+		Short: "Explain multiple resolved sections of one limiter digest assertion preset",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			preset := strings.TrimSpace(gatewayLimitClassDigestAssertionPresetExplainBundleName)
+			bundles := make([]string, 0, len(gatewayLimitClassDigestAssertionPresetExplainBundleBundles))
+			for _, bundle := range gatewayLimitClassDigestAssertionPresetExplainBundleBundles {
+				bundle = strings.TrimSpace(bundle)
+				if bundle != "" {
+					bundles = append(bundles, bundle)
+				}
+			}
+			kinds := make([]string, 0, len(gatewayLimitClassDigestAssertionPresetExplainBundleKinds))
+			for _, kind := range gatewayLimitClassDigestAssertionPresetExplainBundleKinds {
+				kind = strings.TrimSpace(kind)
+				if kind != "" {
+					kinds = append(kinds, kind)
+				}
+			}
+			if preset == "" {
+				return fmt.Errorf("--preset is required")
+			}
+			if len(kinds) == 0 && len(bundles) == 0 {
+				return fmt.Errorf("at least one --kind or --bundle is required")
+			}
+			values := url.Values{}
+			values.Set("preset", preset)
+			for _, bundle := range bundles {
+				values.Add("bundle", bundle)
+			}
+			for _, kind := range kinds {
+				values.Add("kind", kind)
+			}
+			path := "/api/v1/gateway/limit-class-digest-assertion-preset/explain/bundle?" + values.Encode()
+			resp, err := apiClient.Do("GET", path, nil)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	}
+	limitClassDigestAssertionPresetExplainBundleCmd.Flags().StringVar(&gatewayLimitClassDigestAssertionPresetExplainBundleName, "preset", "", "Assertion preset name to explain")
+	limitClassDigestAssertionPresetExplainBundleCmd.Flags().StringSliceVar(&gatewayLimitClassDigestAssertionPresetExplainBundleBundles, "bundle", nil, "Named assertion preset explain bundle to apply; repeat as needed")
+	limitClassDigestAssertionPresetExplainBundleCmd.Flags().StringSliceVar(&gatewayLimitClassDigestAssertionPresetExplainBundleKinds, "kind", nil, "Assertion preset section to explain; repeat as needed")
+	gatewayCmd.AddCommand(limitClassDigestAssertionPresetExplainBundleCmd)
+
+	limitClassDigestAssertionPresetExplainBundleDiffCmd := &cobra.Command{
+		Use:   "limit-class-digest-assertion-preset-explain-bundle-diff",
+		Short: "Compare multiple resolved sections across two limiter digest assertion presets",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			fromPreset := strings.TrimSpace(gatewayLimitClassDigestAssertionPresetExplainBundleDiffFromName)
+			toPreset := strings.TrimSpace(gatewayLimitClassDigestAssertionPresetExplainBundleDiffToName)
+			bundles := make([]string, 0, len(gatewayLimitClassDigestAssertionPresetExplainBundleDiffBundles))
+			for _, bundle := range gatewayLimitClassDigestAssertionPresetExplainBundleDiffBundles {
+				bundle = strings.TrimSpace(bundle)
+				if bundle != "" {
+					bundles = append(bundles, bundle)
+				}
+			}
+			kinds := make([]string, 0, len(gatewayLimitClassDigestAssertionPresetExplainBundleDiffKinds))
+			for _, kind := range gatewayLimitClassDigestAssertionPresetExplainBundleDiffKinds {
+				kind = strings.TrimSpace(kind)
+				if kind != "" {
+					kinds = append(kinds, kind)
+				}
+			}
+			if fromPreset == "" || toPreset == "" {
+				return fmt.Errorf("--from-preset and --to-preset are required")
+			}
+			if len(kinds) == 0 && len(bundles) == 0 {
+				return fmt.Errorf("at least one --kind or --bundle is required")
+			}
+			values := url.Values{}
+			values.Set("from_preset", fromPreset)
+			values.Set("to_preset", toPreset)
+			for _, profile := range gatewayLimitClassDigestAssertionPresetExplainBundleDiffProfiles {
+				profile = strings.TrimSpace(profile)
+				if profile != "" {
+					values.Add("diff_profile", profile)
+				}
+			}
+			for _, bundle := range bundles {
+				values.Add("bundle", bundle)
+			}
+			for _, kind := range kinds {
+				values.Add("kind", kind)
+			}
+			path := "/api/v1/gateway/limit-class-digest-assertion-preset/explain/bundle/diff?" + values.Encode()
+			resp, err := apiClient.Do("GET", path, nil)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	}
+	limitClassDigestAssertionPresetExplainBundleDiffCmd.Flags().StringVar(&gatewayLimitClassDigestAssertionPresetExplainBundleDiffFromName, "from-preset", "", "First assertion preset name to explain")
+	limitClassDigestAssertionPresetExplainBundleDiffCmd.Flags().StringVar(&gatewayLimitClassDigestAssertionPresetExplainBundleDiffToName, "to-preset", "", "Second assertion preset name to explain")
+	limitClassDigestAssertionPresetExplainBundleDiffCmd.Flags().StringSliceVar(&gatewayLimitClassDigestAssertionPresetExplainBundleDiffProfiles, "diff-profile", nil, "Named assertion preset explain diff profile to apply; repeat as needed")
+	limitClassDigestAssertionPresetExplainBundleDiffCmd.Flags().StringSliceVar(&gatewayLimitClassDigestAssertionPresetExplainBundleDiffBundles, "bundle", nil, "Named assertion preset explain bundle to apply; repeat as needed")
+	limitClassDigestAssertionPresetExplainBundleDiffCmd.Flags().StringSliceVar(&gatewayLimitClassDigestAssertionPresetExplainBundleDiffKinds, "kind", nil, "Assertion preset section to compare; repeat as needed")
+	gatewayCmd.AddCommand(limitClassDigestAssertionPresetExplainBundleDiffCmd)
+
+	limitClassDigestAssertionPresetExplainDiffCmd := &cobra.Command{
+		Use:   "limit-class-digest-assertion-preset-explain-diff",
+		Short: "Compare the stage-by-stage resolved rules or groups for two limiter digest assertion presets",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			fromPreset := strings.TrimSpace(gatewayLimitClassDigestAssertionPresetExplainDiffFromName)
+			toPreset := strings.TrimSpace(gatewayLimitClassDigestAssertionPresetExplainDiffToName)
+			kind := strings.TrimSpace(gatewayLimitClassDigestAssertionPresetExplainDiffKind)
+			if fromPreset == "" || toPreset == "" {
+				return fmt.Errorf("--from-preset and --to-preset are required")
+			}
+			if kind == "" {
+				return fmt.Errorf("--kind is required")
+			}
+			values := url.Values{}
+			values.Set("from_preset", fromPreset)
+			values.Set("to_preset", toPreset)
+			values.Set("kind", kind)
+			path := "/api/v1/gateway/limit-class-digest-assertion-preset/explain/diff?" + values.Encode()
+			resp, err := apiClient.Do("GET", path, nil)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	}
+	limitClassDigestAssertionPresetExplainDiffCmd.Flags().StringVar(&gatewayLimitClassDigestAssertionPresetExplainDiffFromName, "from-preset", "", "First assertion preset name to explain")
+	limitClassDigestAssertionPresetExplainDiffCmd.Flags().StringVar(&gatewayLimitClassDigestAssertionPresetExplainDiffToName, "to-preset", "", "Second assertion preset name to explain")
+	limitClassDigestAssertionPresetExplainDiffCmd.Flags().StringVar(&gatewayLimitClassDigestAssertionPresetExplainDiffKind, "kind", "", "Assertion preset section to compare: rules or groups")
+	gatewayCmd.AddCommand(limitClassDigestAssertionPresetExplainDiffCmd)
+
 	gatewayCmd.AddCommand(&cobra.Command{
 		Use:   "limit-hits",
 		Short: "Get route rate/concurrency limiter hit counters by type and route",
@@ -192,7 +973,7 @@ func initGatewayAdminCmds(rootCmd *cobra.Command) {
 			return nil
 		},
 	})
-	gatewayCmd.Commands()[len(gatewayCmd.Commands())-1].Flags().StringVar(&gatewayLimitHitsWindow, "window", "5m", "Recent window to summarize, such as 5m or 1h")
+	adminSubcommand(gatewayCmd, "limit-hits").Flags().StringVar(&gatewayLimitHitsWindow, "window", "5m", "Recent window to summarize, such as 5m or 1h")
 
 	gatewayCmd.AddCommand(&cobra.Command{
 		Use:   "limit-buckets",
@@ -217,8 +998,8 @@ func initGatewayAdminCmds(rootCmd *cobra.Command) {
 			return nil
 		},
 	})
-	gatewayCmd.Commands()[len(gatewayCmd.Commands())-1].Flags().StringVar(&gatewayLimitBucketsWindow, "window", "5m", "Recent window to summarize, such as 5m or 1h")
-	gatewayCmd.Commands()[len(gatewayCmd.Commands())-1].Flags().IntVar(&gatewayLimitBucketsMinCount, "min-count", 1, "Minimum limiter hits in the window before a bucket appears")
+	adminSubcommand(gatewayCmd, "limit-buckets").Flags().StringVar(&gatewayLimitBucketsWindow, "window", "5m", "Recent window to summarize, such as 5m or 1h")
+	adminSubcommand(gatewayCmd, "limit-buckets").Flags().IntVar(&gatewayLimitBucketsMinCount, "min-count", 1, "Minimum limiter hits in the window before a bucket appears")
 
 	gatewayCmd.AddCommand(&cobra.Command{
 		Use:   "limit-classes",
@@ -243,8 +1024,8 @@ func initGatewayAdminCmds(rootCmd *cobra.Command) {
 			return nil
 		},
 	})
-	gatewayCmd.Commands()[len(gatewayCmd.Commands())-1].Flags().StringVar(&gatewayLimitClassesWindow, "window", "5m", "Recent window to summarize, such as 5m or 1h")
-	gatewayCmd.Commands()[len(gatewayCmd.Commands())-1].Flags().IntVar(&gatewayLimitClassesMinCount, "min-count", 1, "Minimum limiter hits in the window before a class appears")
+	adminSubcommand(gatewayCmd, "limit-classes").Flags().StringVar(&gatewayLimitClassesWindow, "window", "5m", "Recent window to summarize, such as 5m or 1h")
+	adminSubcommand(gatewayCmd, "limit-classes").Flags().IntVar(&gatewayLimitClassesMinCount, "min-count", 1, "Minimum limiter hits in the window before a class appears")
 
 	gatewayCmd.AddCommand(&cobra.Command{
 		Use:   "limit-class-alerts",
@@ -269,14 +1050,37 @@ func initGatewayAdminCmds(rootCmd *cobra.Command) {
 			return nil
 		},
 	})
-	gatewayCmd.Commands()[len(gatewayCmd.Commands())-1].Flags().StringVar(&gatewayLimitClassAlertsWindow, "window", "5m", "Recent window to summarize, such as 5m or 1h")
-	gatewayCmd.Commands()[len(gatewayCmd.Commands())-1].Flags().IntVar(&gatewayLimitClassAlertsMinCount, "min-count", 3, "Minimum limiter hits in the window before a class alert appears")
+	adminSubcommand(gatewayCmd, "limit-class-alerts").Flags().StringVar(&gatewayLimitClassAlertsWindow, "window", "5m", "Recent window to summarize, such as 5m or 1h")
+	adminSubcommand(gatewayCmd, "limit-class-alerts").Flags().IntVar(&gatewayLimitClassAlertsMinCount, "min-count", 3, "Minimum limiter hits in the window before a class alert appears")
 
 	gatewayCmd.AddCommand(&cobra.Command{
-		Use:   "limit-class-incidents",
-		Short: "Show currently open limiter incidents grouped by named bucket class",
+		Use:   "limit-class-snoozes",
+		Short: "Show currently snoozed limiter class incidents",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			resp, err := apiClient.Do("GET", "/api/v1/gateway/limit-class-incidents", nil)
+			values := url.Values{}
+			if strings.TrimSpace(gatewayLimitClassIncidentsBucketClass) != "" {
+				values.Set("bucket_class", strings.TrimSpace(gatewayLimitClassIncidentsBucketClass))
+			}
+			if strings.TrimSpace(gatewayLimitClassIncidentsServiceName) != "" {
+				values.Set("service_name", strings.TrimSpace(gatewayLimitClassIncidentsServiceName))
+			}
+			if strings.TrimSpace(gatewayLimitClassIncidentsRoutePath) != "" {
+				values.Set("route_path", strings.TrimSpace(gatewayLimitClassIncidentsRoutePath))
+			}
+			if strings.TrimSpace(gatewayLimitClassIncidentsLimitType) != "" {
+				values.Set("limit_type", strings.TrimSpace(gatewayLimitClassIncidentsLimitType))
+			}
+			if strings.TrimSpace(gatewayLimitClassIncidentsKeyType) != "" {
+				values.Set("key_type", strings.TrimSpace(gatewayLimitClassIncidentsKeyType))
+			}
+			if strings.TrimSpace(gatewayLimitClassSnoozesExpiringWithin) != "" {
+				values.Set("expiring_within", strings.TrimSpace(gatewayLimitClassSnoozesExpiringWithin))
+			}
+			path := "/api/v1/gateway/limit-class-snoozes"
+			if encoded := values.Encode(); encoded != "" {
+				path += "?" + encoded
+			}
+			resp, err := apiClient.Do("GET", path, nil)
 			if err != nil {
 				return err
 			}
@@ -284,6 +1088,159 @@ func initGatewayAdminCmds(rootCmd *cobra.Command) {
 			return nil
 		},
 	})
+	adminSubcommand(gatewayCmd, "limit-class-snoozes").Flags().StringVar(&gatewayLimitClassIncidentsBucketClass, "bucket-class", "", "Only show snoozes for the named bucket class")
+	adminSubcommand(gatewayCmd, "limit-class-snoozes").Flags().StringVar(&gatewayLimitClassIncidentsServiceName, "service", "", "Only show snoozes for the service name")
+	adminSubcommand(gatewayCmd, "limit-class-snoozes").Flags().StringVar(&gatewayLimitClassIncidentsRoutePath, "route", "", "Only show snoozes for the matched route path")
+	adminSubcommand(gatewayCmd, "limit-class-snoozes").Flags().StringVar(&gatewayLimitClassIncidentsLimitType, "limit-type", "", "Only show snoozes for the limiter type")
+	adminSubcommand(gatewayCmd, "limit-class-snoozes").Flags().StringVar(&gatewayLimitClassIncidentsKeyType, "key-type", "", "Only show snoozes for the limiter key type")
+	adminSubcommand(gatewayCmd, "limit-class-snoozes").Flags().StringVar(&gatewayLimitClassSnoozesExpiringWithin, "expiring-within", "", "Only show snoozes expiring within a duration such as 15m or 1h")
+
+	gatewayCmd.AddCommand(&cobra.Command{
+		Use:   "notify-limit-class-snoozes",
+		Short: "Emit notifications for limiter class snoozes that are nearing expiry",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			values := url.Values{}
+			if strings.TrimSpace(gatewayLimitClassIncidentsBucketClass) != "" {
+				values.Set("bucket_class", strings.TrimSpace(gatewayLimitClassIncidentsBucketClass))
+			}
+			if strings.TrimSpace(gatewayLimitClassIncidentsServiceName) != "" {
+				values.Set("service_name", strings.TrimSpace(gatewayLimitClassIncidentsServiceName))
+			}
+			if strings.TrimSpace(gatewayLimitClassIncidentsRoutePath) != "" {
+				values.Set("route_path", strings.TrimSpace(gatewayLimitClassIncidentsRoutePath))
+			}
+			if strings.TrimSpace(gatewayLimitClassIncidentsLimitType) != "" {
+				values.Set("limit_type", strings.TrimSpace(gatewayLimitClassIncidentsLimitType))
+			}
+			if strings.TrimSpace(gatewayLimitClassIncidentsKeyType) != "" {
+				values.Set("key_type", strings.TrimSpace(gatewayLimitClassIncidentsKeyType))
+			}
+			if strings.TrimSpace(gatewayLimitClassSnoozesExpiringWithin) != "" {
+				values.Set("expiring_within", strings.TrimSpace(gatewayLimitClassSnoozesExpiringWithin))
+			}
+			path := "/api/v1/gateway/limit-class-snoozes/notify"
+			if encoded := values.Encode(); encoded != "" {
+				path += "?" + encoded
+			}
+			resp, err := apiClient.Do("POST", path, nil)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	})
+	adminSubcommand(gatewayCmd, "notify-limit-class-snoozes").Flags().StringVar(&gatewayLimitClassIncidentsBucketClass, "bucket-class", "", "Only notify for snoozes in the named bucket class")
+	adminSubcommand(gatewayCmd, "notify-limit-class-snoozes").Flags().StringVar(&gatewayLimitClassIncidentsServiceName, "service", "", "Only notify for snoozes in the service name")
+	adminSubcommand(gatewayCmd, "notify-limit-class-snoozes").Flags().StringVar(&gatewayLimitClassIncidentsRoutePath, "route", "", "Only notify for snoozes in the matched route path")
+	adminSubcommand(gatewayCmd, "notify-limit-class-snoozes").Flags().StringVar(&gatewayLimitClassIncidentsLimitType, "limit-type", "", "Only notify for snoozes in the limiter type")
+	adminSubcommand(gatewayCmd, "notify-limit-class-snoozes").Flags().StringVar(&gatewayLimitClassIncidentsKeyType, "key-type", "", "Only notify for snoozes in the limiter key type")
+	adminSubcommand(gatewayCmd, "notify-limit-class-snoozes").Flags().StringVar(&gatewayLimitClassSnoozesExpiringWithin, "expiring-within", "15m", "Only notify for snoozes expiring within a duration such as 15m or 1h")
+
+	gatewayCmd.AddCommand(&cobra.Command{
+		Use:   "limit-class-incidents",
+		Short: "Show currently open limiter incidents grouped by named bucket class",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			values := url.Values{}
+			if strings.TrimSpace(gatewayLimitClassIncidentsSeverity) != "" {
+				values.Set("severity", strings.TrimSpace(gatewayLimitClassIncidentsSeverity))
+			}
+			if strings.TrimSpace(gatewayLimitClassIncidentsBucketClass) != "" {
+				values.Set("bucket_class", strings.TrimSpace(gatewayLimitClassIncidentsBucketClass))
+			}
+			if strings.TrimSpace(gatewayLimitClassIncidentsServiceName) != "" {
+				values.Set("service_name", strings.TrimSpace(gatewayLimitClassIncidentsServiceName))
+			}
+			if strings.TrimSpace(gatewayLimitClassIncidentsRoutePath) != "" {
+				values.Set("route_path", strings.TrimSpace(gatewayLimitClassIncidentsRoutePath))
+			}
+			if strings.TrimSpace(gatewayLimitClassIncidentsLimitType) != "" {
+				values.Set("limit_type", strings.TrimSpace(gatewayLimitClassIncidentsLimitType))
+			}
+			if strings.TrimSpace(gatewayLimitClassIncidentsKeyType) != "" {
+				values.Set("key_type", strings.TrimSpace(gatewayLimitClassIncidentsKeyType))
+			}
+			path := "/api/v1/gateway/limit-class-incidents"
+			if encoded := values.Encode(); encoded != "" {
+				path += "?" + encoded
+			}
+			resp, err := apiClient.Do("GET", path, nil)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	})
+	adminSubcommand(gatewayCmd, "limit-class-incidents").Flags().StringVar(&gatewayLimitClassIncidentsSeverity, "severity", "", "Only show incidents at the exact severity: warning, elevated, or critical")
+	adminSubcommand(gatewayCmd, "limit-class-incidents").Flags().StringVar(&gatewayLimitClassIncidentsBucketClass, "bucket-class", "", "Only show incidents for the named bucket class")
+	adminSubcommand(gatewayCmd, "limit-class-incidents").Flags().StringVar(&gatewayLimitClassIncidentsServiceName, "service", "", "Only show incidents for the service name")
+	adminSubcommand(gatewayCmd, "limit-class-incidents").Flags().StringVar(&gatewayLimitClassIncidentsRoutePath, "route", "", "Only show incidents for the matched route path")
+	adminSubcommand(gatewayCmd, "limit-class-incidents").Flags().StringVar(&gatewayLimitClassIncidentsLimitType, "limit-type", "", "Only show incidents for the limiter type")
+	adminSubcommand(gatewayCmd, "limit-class-incidents").Flags().StringVar(&gatewayLimitClassIncidentsKeyType, "key-type", "", "Only show incidents for the limiter key type")
+
+	gatewayCmd.AddCommand(&cobra.Command{
+		Use:   "acknowledge-limit-class-incident",
+		Short: "Acknowledge an open limiter class incident",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if strings.TrimSpace(gatewayLimitClassIncidentID) == "" {
+				return fmt.Errorf("--incident-id is required")
+			}
+			if strings.TrimSpace(gatewayLimitClassIncidentReviewer) == "" {
+				return fmt.Errorf("--reviewer is required")
+			}
+			payload := map[string]string{
+				"reviewer": strings.TrimSpace(gatewayLimitClassIncidentReviewer),
+			}
+			if strings.TrimSpace(gatewayLimitClassIncidentNote) != "" {
+				payload["note"] = strings.TrimSpace(gatewayLimitClassIncidentNote)
+			}
+			path := "/api/v1/gateway/limit-class-incidents/" + url.PathEscape(strings.TrimSpace(gatewayLimitClassIncidentID)) + "/acknowledge"
+			resp, err := apiClient.Do("POST", path, payload)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	})
+	adminSubcommand(gatewayCmd, "acknowledge-limit-class-incident").Flags().StringVar(&gatewayLimitClassIncidentID, "incident-id", "", "Limit class incident ID to acknowledge")
+	adminSubcommand(gatewayCmd, "acknowledge-limit-class-incident").Flags().StringVar(&gatewayLimitClassIncidentReviewer, "reviewer", "", "Reviewer acknowledging the incident")
+	adminSubcommand(gatewayCmd, "acknowledge-limit-class-incident").Flags().StringVar(&gatewayLimitClassIncidentNote, "note", "", "Optional acknowledgement note")
+
+	gatewayCmd.AddCommand(&cobra.Command{
+		Use:   "snooze-limit-class-incident",
+		Short: "Snooze an open limiter class incident for a bounded duration",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if strings.TrimSpace(gatewayLimitClassIncidentID) == "" {
+				return fmt.Errorf("--incident-id is required")
+			}
+			if strings.TrimSpace(gatewayLimitClassIncidentReviewer) == "" {
+				return fmt.Errorf("--reviewer is required")
+			}
+			if strings.TrimSpace(gatewayLimitClassIncidentSnoozeDuration) == "" {
+				return fmt.Errorf("--duration is required")
+			}
+			payload := map[string]string{
+				"reviewer": strings.TrimSpace(gatewayLimitClassIncidentReviewer),
+				"duration": strings.TrimSpace(gatewayLimitClassIncidentSnoozeDuration),
+			}
+			if strings.TrimSpace(gatewayLimitClassIncidentNote) != "" {
+				payload["note"] = strings.TrimSpace(gatewayLimitClassIncidentNote)
+			}
+			path := "/api/v1/gateway/limit-class-incidents/" + url.PathEscape(strings.TrimSpace(gatewayLimitClassIncidentID)) + "/snooze"
+			resp, err := apiClient.Do("POST", path, payload)
+			if err != nil {
+				return err
+			}
+			printResponse(resp)
+			return nil
+		},
+	})
+	adminSubcommand(gatewayCmd, "snooze-limit-class-incident").Flags().StringVar(&gatewayLimitClassIncidentID, "incident-id", "", "Limit class incident ID to snooze")
+	adminSubcommand(gatewayCmd, "snooze-limit-class-incident").Flags().StringVar(&gatewayLimitClassIncidentReviewer, "reviewer", "", "Reviewer snoozing the incident")
+	adminSubcommand(gatewayCmd, "snooze-limit-class-incident").Flags().StringVar(&gatewayLimitClassIncidentSnoozeDuration, "duration", "", "How long to snooze the incident, such as 15m or 1h")
+	adminSubcommand(gatewayCmd, "snooze-limit-class-incident").Flags().StringVar(&gatewayLimitClassIncidentNote, "note", "", "Optional snooze note")
 
 	gatewayCmd.AddCommand(&cobra.Command{
 		Use:   "notify-limit-class-alerts",
@@ -332,8 +1289,8 @@ func initGatewayAdminCmds(rootCmd *cobra.Command) {
 			return nil
 		},
 	})
-	gatewayCmd.Commands()[len(gatewayCmd.Commands())-1].Flags().StringVar(&gatewayLimitAlertsWindow, "window", "5m", "Recent window to evaluate, such as 5m or 1h")
-	gatewayCmd.Commands()[len(gatewayCmd.Commands())-1].Flags().IntVar(&gatewayLimitAlertsMinCount, "min-count", 3, "Minimum limiter hits in the window before a route/type becomes an alert")
+	adminSubcommand(gatewayCmd, "limit-alerts").Flags().StringVar(&gatewayLimitAlertsWindow, "window", "5m", "Recent window to evaluate, such as 5m or 1h")
+	adminSubcommand(gatewayCmd, "limit-alerts").Flags().IntVar(&gatewayLimitAlertsMinCount, "min-count", 3, "Minimum limiter hits in the window before a route/type becomes an alert")
 
 	gatewayCmd.AddCommand(&cobra.Command{
 		Use:   "notify-limit-alerts",
@@ -358,8 +1315,8 @@ func initGatewayAdminCmds(rootCmd *cobra.Command) {
 			return nil
 		},
 	})
-	gatewayCmd.Commands()[len(gatewayCmd.Commands())-1].Flags().StringVar(&gatewayLimitAlertsWindow, "window", "5m", "Recent window to evaluate, such as 5m or 1h")
-	gatewayCmd.Commands()[len(gatewayCmd.Commands())-1].Flags().IntVar(&gatewayLimitAlertsMinCount, "min-count", 3, "Minimum limiter hits in the window before a route/type becomes an alert")
+	adminSubcommand(gatewayCmd, "notify-limit-alerts").Flags().StringVar(&gatewayLimitAlertsWindow, "window", "5m", "Recent window to evaluate, such as 5m or 1h")
+	adminSubcommand(gatewayCmd, "notify-limit-alerts").Flags().IntVar(&gatewayLimitAlertsMinCount, "min-count", 3, "Minimum limiter hits in the window before a route/type becomes an alert")
 
 	gatewayCmd.AddCommand(&cobra.Command{
 		Use:   "policy-hits",
@@ -377,7 +1334,7 @@ func initGatewayAdminCmds(rootCmd *cobra.Command) {
 			return nil
 		},
 	})
-	gatewayCmd.Commands()[len(gatewayCmd.Commands())-1].Flags().StringVar(&gatewayPolicyHitsWindow, "window", "5m", "Recent window to summarize, such as 5m or 1h")
+	adminSubcommand(gatewayCmd, "policy-hits").Flags().StringVar(&gatewayPolicyHitsWindow, "window", "5m", "Recent window to summarize, such as 5m or 1h")
 
 	gatewayCmd.AddCommand(&cobra.Command{
 		Use:   "policy-alerts",
@@ -402,8 +1359,8 @@ func initGatewayAdminCmds(rootCmd *cobra.Command) {
 			return nil
 		},
 	})
-	gatewayCmd.Commands()[len(gatewayCmd.Commands())-1].Flags().StringVar(&gatewayPolicyAlertsWindow, "window", "5m", "Recent window to evaluate, such as 5m or 1h")
-	gatewayCmd.Commands()[len(gatewayCmd.Commands())-1].Flags().IntVar(&gatewayPolicyAlertsMinCount, "min-count", 3, "Minimum hits in the window before a route/reason becomes an alert")
+	adminSubcommand(gatewayCmd, "policy-alerts").Flags().StringVar(&gatewayPolicyAlertsWindow, "window", "5m", "Recent window to evaluate, such as 5m or 1h")
+	adminSubcommand(gatewayCmd, "policy-alerts").Flags().IntVar(&gatewayPolicyAlertsMinCount, "min-count", 3, "Minimum hits in the window before a route/reason becomes an alert")
 
 	gatewayCmd.AddCommand(&cobra.Command{
 		Use:   "notify-policy-alerts",
@@ -428,8 +1385,8 @@ func initGatewayAdminCmds(rootCmd *cobra.Command) {
 			return nil
 		},
 	})
-	gatewayCmd.Commands()[len(gatewayCmd.Commands())-1].Flags().StringVar(&gatewayPolicyAlertsWindow, "window", "5m", "Recent window to evaluate, such as 5m or 1h")
-	gatewayCmd.Commands()[len(gatewayCmd.Commands())-1].Flags().IntVar(&gatewayPolicyAlertsMinCount, "min-count", 3, "Minimum hits in the window before a route/reason becomes an alert")
+	adminSubcommand(gatewayCmd, "notify-policy-alerts").Flags().StringVar(&gatewayPolicyAlertsWindow, "window", "5m", "Recent window to evaluate, such as 5m or 1h")
+	adminSubcommand(gatewayCmd, "notify-policy-alerts").Flags().IntVar(&gatewayPolicyAlertsMinCount, "min-count", 3, "Minimum hits in the window before a route/reason becomes an alert")
 
 	gatewayCmd.AddCommand(&cobra.Command{
 		Use:   "shadow-report",

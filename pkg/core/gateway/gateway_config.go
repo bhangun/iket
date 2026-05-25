@@ -28,10 +28,17 @@ func (g *Gateway) ReloadConfig() error {
 	if err != nil {
 		return errors.NewConfigError("failed to reload configuration", err)
 	}
+	if err := cfg.Validate(); err != nil {
+		return errors.NewConfigError("invalid reloaded configuration", err)
+	}
 
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.config = cfg
+	g.clearBFFCache()
+	if err := g.setupRoutes(); err != nil {
+		return errors.NewConfigError("failed to rebuild routes", err)
+	}
 	g.logger.Info("Configuration reloaded from provider")
 	return nil
 }
@@ -53,6 +60,7 @@ func (g *Gateway) UpdateConfig(cfg *config.Config) error {
 	}
 
 	g.config = cfg
+	g.clearBFFCache()
 
 	if err := g.setupRoutes(); err != nil {
 		return errors.NewConfigError("failed to rebuild routes", err)

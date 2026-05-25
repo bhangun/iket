@@ -24,7 +24,6 @@ print_info "Building Iket for production..."
 # 2. Install
 print_info "Installing Iket binaries..."
 sudo cp bin/iket-server bin/iket /usr/local/bin/
-sudo cp /usr/local/bin/iket /usr/local/bin/iket-cli
 sudo cp /usr/local/bin/iket-server /usr/local/bin/iket-gateway
 
 # 3. Directories & Permissions

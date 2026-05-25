@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/bhangun/iket/pkg/config"
+	"github.com/bhangun/iket/pkg/core/authcontext"
 	"github.com/bhangun/iket/pkg/logging"
 	"github.com/bhangun/iket/pkg/plugin"
 )
@@ -85,7 +86,8 @@ func (g *Gateway) clientCredentialAuthMiddleware() func(http.Handler) http.Handl
 				w.Write([]byte("Invalid client credentials"))
 				return
 			}
-			next.ServeHTTP(w, r)
+			ctx := authcontext.WithPrincipal(r.Context(), principalFromBasicIdentity("client_credentials", user))
+			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
 }
@@ -94,22 +96,18 @@ func (g *Gateway) clientCredentialAuthMiddleware() func(http.Handler) http.Handl
 func requireRolesMiddleware(requiredRoles []string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			roles, ok := r.Context().Value("roles").([]string)
-			if !ok || len(roles) == 0 {
+			matched, present := authcontext.HasAnyRole(r.Context(), requiredRoles)
+			if !present {
 				w.WriteHeader(http.StatusForbidden)
 				w.Write([]byte(`{"error":"Forbidden","message":"No roles found in token"}`))
 				return
 			}
-			for _, required := range requiredRoles {
-				for _, actual := range roles {
-					if required == actual {
-						next.ServeHTTP(w, r)
-						return
-					}
-				}
+			if !matched {
+				w.WriteHeader(http.StatusForbidden)
+				w.Write([]byte(`{"error":"Forbidden","message":"Insufficient roles"}`))
+				return
 			}
-			w.WriteHeader(http.StatusForbidden)
-			w.Write([]byte(`{"error":"Forbidden","message":"Insufficient roles"}`))
+			next.ServeHTTP(w, r)
 		})
 	}
 }
@@ -118,22 +116,18 @@ func requireRolesMiddleware(requiredRoles []string) func(http.Handler) http.Hand
 func requireScopesMiddleware(requiredScopes []string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			scopes, ok := r.Context().Value("apikey_scopes").([]string)
-			if !ok || len(scopes) == 0 {
+			matched, present := authcontext.HasAnyScope(r.Context(), requiredScopes)
+			if !present {
 				w.WriteHeader(http.StatusForbidden)
-				w.Write([]byte(`{"error":"Forbidden","message":"No scopes found for client"}`))
+				w.Write([]byte(`{"error":"Forbidden","message":"No scopes found for authenticated principal"}`))
 				return
 			}
-			for _, required := range requiredScopes {
-				for _, actual := range scopes {
-					if required == actual {
-						next.ServeHTTP(w, r)
-						return
-					}
-				}
+			if !matched {
+				w.WriteHeader(http.StatusForbidden)
+				w.Write([]byte(`{"error":"Forbidden","message":"Insufficient scopes"}`))
+				return
 			}
-			w.WriteHeader(http.StatusForbidden)
-			w.Write([]byte(`{"error":"Forbidden","message":"Insufficient scopes"}`))
+			next.ServeHTTP(w, r)
 		})
 	}
 }
@@ -142,10 +136,10 @@ func requireScopesMiddleware(requiredScopes []string) func(http.Handler) http.Ha
 func requireGroupMiddleware(requiredGroup string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			clientGroup, ok := r.Context().Value("apikey_group").(string)
-			if !ok || clientGroup != requiredGroup {
+			matched, present := authcontext.HasGroup(r.Context(), requiredGroup)
+			if !present || !matched {
 				w.WriteHeader(http.StatusForbidden)
-				w.Write([]byte(`{"error":"Forbidden","message":"Client group mismatch"}`))
+				w.Write([]byte(`{"error":"Forbidden","message":"Principal group mismatch"}`))
 				return
 			}
 			next.ServeHTTP(w, r)

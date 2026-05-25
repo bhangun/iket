@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,13 +10,19 @@ import (
 	"net/url"
 	"os"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/bhangun/iket/pkg/config"
+	"github.com/bhangun/iket/pkg/core/authcontext"
+	"github.com/bhangun/iket/pkg/core/credentials"
+	coreerrors "github.com/bhangun/iket/pkg/core/errors"
 	gatewaypkg "github.com/bhangun/iket/pkg/core/gateway"
 	"github.com/bhangun/iket/pkg/logging"
+	"github.com/bhangun/iket/pkg/plugin"
+	apikeyplugin "github.com/bhangun/iket/pkg/plugin/apikey"
 	"github.com/gorilla/mux"
 )
 
@@ -156,6 +163,45 @@ func TestServiceChangeSummaryReportsAddedRemovedAndUpdated(t *testing.T) {
 	}
 	if len(addedRoutes) != 2 {
 		t.Fatalf("expected two added routes, got %v", addedRoutes)
+	}
+}
+
+func TestCreateServiceDryRunDoesNotMutateLiveConfig(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Services: []config.ServiceConfig{{
+			Version: 1,
+			Services: []config.Service{{
+				Name: "identity",
+				Host: "http://identity-old:8080",
+				Routes: []config.RouterConfig{{
+					Path:    "/auth",
+					Methods: []string{"GET"},
+					Backends: []config.Backend{{
+						URLPattern: "/auth",
+					}},
+				}},
+			}},
+		}},
+	}
+	gw := mustTestGateway(t, cfg)
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+
+	body := strings.NewReader(`{"services":[{"name":"identity","host":"http://identity-new:8080","routes":[{"path":"/profile","methods":["GET"]}]}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/services?dry_run=true", body)
+	resp := httptest.NewRecorder()
+	api.createService(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	live := gw.GetConfig()
+	service := live.Services[0].Services[0]
+	if service.Host != "http://identity-old:8080" {
+		t.Fatalf("dry run mutated service host: %q", service.Host)
+	}
+	if len(service.Routes) != 1 || service.Routes[0].Path != "/auth" {
+		t.Fatalf("dry run mutated service routes: %+v", service.Routes)
 	}
 }
 
@@ -3206,6 +3252,2969 @@ func TestDiffGatewayRoutePolicyReturnsChangedFields(t *testing.T) {
 	}
 }
 
+func TestGetGatewayLimitClassDigestProfileReturnsResolvedInspection(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitClassDigestHiddenStrategyPolicyPresets: map[string]config.LimitClassDigestHiddenStrategyPolicy{
+				"base-hidden":  {MinReasons: 2, PriorityCap: 3},
+				"shared-exact": {DominantMode: "weighted_score", PriorityWeight: 7},
+			},
+			LimitClassDigestProfiles: map[string]config.LimitAlertRecipientProfile{
+				"base": {
+					LimitClassDigestTypes:                  []string{"alert"},
+					LimitClassDigestMinSeverity:            "warning",
+					LimitClassDigestMinBucketClassPriority: 4,
+				},
+				"overlay": {
+					LimitClassDigestTypes: []string{"snooze"},
+					LimitClassDigestTruncatedReasonBucketExactSeverityPolicyPresetChain: []string{"base-hidden"},
+				},
+				"strict": {
+					LimitClassDigestMinSeverity:                                    "elevated",
+					LimitClassDigestTruncatedReasonBucketExactSeverityPolicyPreset: "shared-exact",
+				},
+			},
+			NotificationWebhooks: []config.NotificationWebhook{{
+				Name:                             "pager",
+				URL:                              "https://example.com/pager",
+				Events:                           []string{"gateway.limit_class_alert_digest"},
+				LimitClassDigestProfileChain:     []string{"base", "overlay"},
+				LimitClassDigestProfile:          "strict",
+				LimitClassDigestMaxBucketClasses: 2,
+			}},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/gateway/limit-class-digest-profile?webhook=pager", nil)
+	resp := httptest.NewRecorder()
+	api.getGatewayLimitClassDigestProfile(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		Inspection struct {
+			WebhookName       string                   `json:"webhook_name"`
+			ProfileChain      []string                 `json:"profile_chain"`
+			Profile           string                   `json:"profile"`
+			AppliedProfiles   []map[string]interface{} `json:"applied_profiles"`
+			EffectiveProfile  map[string]interface{}   `json:"effective_profile"`
+			FieldSources      map[string]string        `json:"field_sources"`
+			AvailableProfiles []string                 `json:"available_profiles"`
+		} `json:"inspection"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.Inspection.WebhookName != "pager" || strings.Join(payload.Inspection.ProfileChain, ",") != "base,overlay" || payload.Inspection.Profile != "strict" {
+		t.Fatalf("unexpected inspection identity: %+v", payload.Inspection)
+	}
+	if len(payload.Inspection.AppliedProfiles) != 3 {
+		t.Fatalf("expected three applied profiles, got %+v", payload.Inspection.AppliedProfiles)
+	}
+	if payload.Inspection.FieldSources["limitClassDigestTypes"] != "profile_chain:overlay" {
+		t.Fatalf("expected limitClassDigestTypes source profile_chain:overlay, got %+v", payload.Inspection.FieldSources)
+	}
+	if payload.Inspection.FieldSources["limitClassDigestMinSeverity"] != "profile:strict" {
+		t.Fatalf("expected limitClassDigestMinSeverity source profile:strict, got %+v", payload.Inspection.FieldSources)
+	}
+	if payload.Inspection.FieldSources["limitClassDigestMaxBucketClasses"] != "webhook" {
+		t.Fatalf("expected limitClassDigestMaxBucketClasses source webhook, got %+v", payload.Inspection.FieldSources)
+	}
+	if payload.Inspection.FieldSources["limitClassDigestTruncatedReasonBucketExactSeverityPolicy"] != "profile:strict" {
+		t.Fatalf("expected exact severity policy source profile:strict, got %+v", payload.Inspection.FieldSources)
+	}
+	types, ok := payload.Inspection.EffectiveProfile["limitClassDigestTypes"].([]interface{})
+	if !ok || len(types) != 1 || types[0] != "snooze" {
+		t.Fatalf("expected resolved digest types snooze, got %+v", payload.Inspection.EffectiveProfile["limitClassDigestTypes"])
+	}
+	policy, ok := payload.Inspection.EffectiveProfile["limitClassDigestTruncatedReasonBucketExactSeverityPolicy"].(map[string]interface{})
+	if !ok || policy["dominantMode"] != "weighted_score" {
+		t.Fatalf("expected resolved exact severity policy from preset, got %+v", payload.Inspection.EffectiveProfile["limitClassDigestTruncatedReasonBucketExactSeverityPolicy"])
+	}
+	if len(payload.Inspection.AvailableProfiles) != 3 {
+		t.Fatalf("expected three available profiles, got %+v", payload.Inspection.AvailableProfiles)
+	}
+}
+
+func TestInspectGatewayLimitClassDigestAssertionPresetReturnsResolvedChain(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitClassDigestAssertionPresets: map[string]config.LimitClassDigestAssertionPreset{
+				"base-safety": {
+					Rules: []string{"exists"},
+				},
+				"prod-strict": {
+					PresetChain: []string{"base-safety"},
+					Groups: []config.LimitClassDigestAssertionGroup{{
+						Operator: "allOf",
+						Rules:    []string{"regex:^crit"},
+					}},
+				},
+			},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/gateway/limit-class-digest-assertion-preset?preset=prod-strict", nil)
+	resp := httptest.NewRecorder()
+	api.getGatewayLimitClassDigestAssertionPreset(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		Inspection struct {
+			PresetName     string                   `json:"preset_name"`
+			PresetChain    []string                 `json:"preset_chain"`
+			AppliedPresets []map[string]interface{} `json:"applied_presets"`
+			RuleSources    []string                 `json:"rule_sources"`
+			GroupSources   []string                 `json:"group_sources"`
+		} `json:"inspection"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.Inspection.PresetName != "prod-strict" || strings.Join(payload.Inspection.PresetChain, ",") != "base-safety" {
+		t.Fatalf("unexpected preset inspection identity: %+v", payload.Inspection)
+	}
+	if len(payload.Inspection.AppliedPresets) != 2 {
+		t.Fatalf("expected two applied presets, got %+v", payload.Inspection.AppliedPresets)
+	}
+	if len(payload.Inspection.RuleSources) != 1 || payload.Inspection.RuleSources[0] != "preset:base-safety" {
+		t.Fatalf("expected inherited rule source, got %+v", payload.Inspection.RuleSources)
+	}
+	if len(payload.Inspection.GroupSources) != 1 || payload.Inspection.GroupSources[0] != "preset:prod-strict" {
+		t.Fatalf("expected group source from prod-strict, got %+v", payload.Inspection.GroupSources)
+	}
+}
+
+func TestExplainGatewayLimitClassDigestAssertionPresetReturnsRulesTrace(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitClassDigestAssertionPresets: map[string]config.LimitClassDigestAssertionPreset{
+				"base-safety": {
+					Rules: []string{"exists"},
+				},
+				"prod-strict": {
+					PresetChain: []string{"base-safety"},
+					Rules:       []string{"not_contains:warning"},
+				},
+			},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/gateway/limit-class-digest-assertion-preset/explain?preset=prod-strict&kind=rules", nil)
+	resp := httptest.NewRecorder()
+	api.explainGatewayLimitClassDigestAssertionPreset(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		Explanation struct {
+			Kind       string        `json:"kind"`
+			FinalValue []interface{} `json:"final_value"`
+			Stages     []struct {
+				Stage   string        `json:"stage"`
+				Value   []interface{} `json:"value"`
+				Changed bool          `json:"changed"`
+			} `json:"stages"`
+		} `json:"explanation"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.Explanation.Kind != "rules" || len(payload.Explanation.FinalValue) != 2 {
+		t.Fatalf("unexpected assertion preset explanation: %+v", payload.Explanation)
+	}
+	if len(payload.Explanation.Stages) != 2 || payload.Explanation.Stages[0].Stage != "preset:base-safety" || payload.Explanation.Stages[1].Stage != "preset:prod-strict" {
+		t.Fatalf("unexpected preset explain stages: %+v", payload.Explanation.Stages)
+	}
+}
+
+func TestGetGatewayLimitClassDigestAssertionGroupPresetReturnsInspection(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitClassDigestAssertionGroupPresets: map[string]config.LimitClassDigestAssertionGroupPreset{
+				"base-groups": {
+					Groups: []config.LimitClassDigestAssertionGroup{{
+						Operator: "allOf",
+						Rules:    []string{"exists"},
+					}},
+				},
+				"strict-groups": {
+					PresetChain: []string{"base-groups"},
+					Groups: []config.LimitClassDigestAssertionGroup{{
+						Operator: "allOf",
+						Rules:    []string{"contains:regex:^strict"},
+					}},
+				},
+			},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/gateway/limit-class-digest-assertion-group-preset?preset=strict-groups", nil)
+	resp := httptest.NewRecorder()
+	api.getGatewayLimitClassDigestAssertionGroupPreset(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		Inspection struct {
+			PresetName     string                   `json:"preset_name"`
+			PresetChain    []string                 `json:"preset_chain"`
+			AppliedPresets []map[string]interface{} `json:"applied_presets"`
+			GroupSources   []string                 `json:"group_sources"`
+		} `json:"inspection"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.Inspection.PresetName != "strict-groups" || strings.Join(payload.Inspection.PresetChain, ",") != "base-groups" {
+		t.Fatalf("unexpected assertion group preset inspection identity: %+v", payload.Inspection)
+	}
+	if len(payload.Inspection.AppliedPresets) != 2 {
+		t.Fatalf("expected two applied group presets, got %+v", payload.Inspection.AppliedPresets)
+	}
+	if len(payload.Inspection.GroupSources) != 2 || payload.Inspection.GroupSources[0] != "preset:base-groups" || payload.Inspection.GroupSources[1] != "preset:strict-groups" {
+		t.Fatalf("unexpected group sources: %+v", payload.Inspection.GroupSources)
+	}
+}
+
+func TestDiffGatewayLimitClassDigestAssertionGroupPresetReturnsChangedFields(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitClassDigestAssertionGroupPresets: map[string]config.LimitClassDigestAssertionGroupPreset{
+				"base-groups": {
+					Groups: []config.LimitClassDigestAssertionGroup{{
+						Operator: "allOf",
+						Rules:    []string{"exists"},
+					}},
+				},
+				"strict-groups": {
+					PresetChain: []string{"base-groups"},
+					Groups: []config.LimitClassDigestAssertionGroup{{
+						Operator: "allOf",
+						Rules:    []string{"contains:regex:^strict"},
+					}},
+				},
+			},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/gateway/limit-class-digest-assertion-group-preset/diff?from_preset=strict-groups&to_preset=base-groups", nil)
+	resp := httptest.NewRecorder()
+	api.diffGatewayLimitClassDigestAssertionGroupPreset(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		Diff struct {
+			From struct {
+				PresetName string `json:"preset_name"`
+			} `json:"from"`
+			To struct {
+				PresetName string `json:"preset_name"`
+			} `json:"to"`
+			ChangedFields map[string]struct {
+				FromValue interface{} `json:"from_value"`
+				ToValue   interface{} `json:"to_value"`
+			} `json:"changed_fields"`
+		} `json:"diff"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.Diff.From.PresetName != "strict-groups" || payload.Diff.To.PresetName != "base-groups" {
+		t.Fatalf("unexpected assertion group preset diff identity: %+v", payload.Diff)
+	}
+	if _, ok := payload.Diff.ChangedFields["groups"]; !ok {
+		t.Fatalf("expected groups diff, got %+v", payload.Diff.ChangedFields)
+	}
+}
+
+func TestExplainGatewayLimitClassDigestAssertionGroupPresetReturnsTrace(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitClassDigestAssertionGroupPresets: map[string]config.LimitClassDigestAssertionGroupPreset{
+				"base-groups": {
+					Groups: []config.LimitClassDigestAssertionGroup{{
+						Operator: "allOf",
+						Rules:    []string{"exists"},
+					}},
+				},
+				"strict-groups": {
+					PresetChain: []string{"base-groups"},
+					Groups: []config.LimitClassDigestAssertionGroup{{
+						Operator: "allOf",
+						Rules:    []string{"contains:regex:^strict"},
+					}},
+				},
+			},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/gateway/limit-class-digest-assertion-group-preset/explain?preset=strict-groups", nil)
+	resp := httptest.NewRecorder()
+	api.explainGatewayLimitClassDigestAssertionGroupPreset(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		Explanation struct {
+			Kind       string        `json:"kind"`
+			FinalValue []interface{} `json:"final_value"`
+			Stages     []struct {
+				Stage   string        `json:"stage"`
+				Value   []interface{} `json:"value"`
+				Changed bool          `json:"changed"`
+			} `json:"stages"`
+		} `json:"explanation"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.Explanation.Kind != "groups" || len(payload.Explanation.FinalValue) != 2 {
+		t.Fatalf("unexpected assertion group preset explanation: %+v", payload.Explanation)
+	}
+	if len(payload.Explanation.Stages) != 2 || payload.Explanation.Stages[0].Stage != "preset:base-groups" || payload.Explanation.Stages[1].Stage != "preset:strict-groups" {
+		t.Fatalf("unexpected assertion group preset explain stages: %+v", payload.Explanation.Stages)
+	}
+}
+
+func TestDiffGatewayLimitClassDigestAssertionGroupPresetExplanationReturnsStageDiffs(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitClassDigestAssertionGroupPresets: map[string]config.LimitClassDigestAssertionGroupPreset{
+				"base-groups": {
+					Groups: []config.LimitClassDigestAssertionGroup{{
+						Operator: "allOf",
+						Rules:    []string{"exists"},
+					}},
+				},
+				"strict-groups": {
+					PresetChain: []string{"base-groups"},
+					Groups: []config.LimitClassDigestAssertionGroup{{
+						Operator: "allOf",
+						Rules:    []string{"contains:regex:^strict"},
+					}},
+				},
+			},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/gateway/limit-class-digest-assertion-group-preset/explain/diff?from_preset=strict-groups&to_preset=base-groups", nil)
+	resp := httptest.NewRecorder()
+	api.diffGatewayLimitClassDigestAssertionGroupPresetExplanation(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		Diff struct {
+			Kind         string `json:"kind"`
+			FinalChanged bool   `json:"final_changed"`
+			From         struct {
+				FinalValue []interface{} `json:"final_value"`
+			} `json:"from"`
+			To struct {
+				FinalValue []interface{} `json:"final_value"`
+			} `json:"to"`
+			ChangedStages map[string]struct {
+				FromValue []interface{} `json:"from_value"`
+				ToValue   []interface{} `json:"to_value"`
+			} `json:"changed_stages"`
+		} `json:"diff"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.Diff.Kind != "groups" || !payload.Diff.FinalChanged {
+		t.Fatalf("unexpected assertion group preset explain diff: %+v", payload.Diff)
+	}
+	if _, ok := payload.Diff.ChangedStages["preset:strict-groups"]; !ok {
+		t.Fatalf("expected strict-groups stage diff, got %+v", payload.Diff.ChangedStages)
+	}
+}
+
+func TestExplainGatewayLimitClassDigestAssertionGroupPresetBundleReturnsMultiplePresets(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitClassDigestAssertionGroupPresets: map[string]config.LimitClassDigestAssertionGroupPreset{
+				"base-groups": {
+					Groups: []config.LimitClassDigestAssertionGroup{{
+						Operator: "allOf",
+						Rules:    []string{"exists"},
+					}},
+				},
+				"strict-groups": {
+					PresetChain: []string{"base-groups"},
+					Groups: []config.LimitClassDigestAssertionGroup{{
+						Operator: "allOf",
+						Rules:    []string{"contains:regex:^strict"},
+					}},
+				},
+			},
+			LimitClassDigestAssertionGroupPresetExplainBundles: map[string]config.LimitClassDigestAssertionGroupPresetExplainBundle{
+				"core": {
+					Presets: []string{"base-groups", "strict-groups"},
+				},
+			},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/gateway/limit-class-digest-assertion-group-preset/explain/bundle?bundle=core", nil)
+	resp := httptest.NewRecorder()
+	api.explainGatewayLimitClassDigestAssertionGroupPresetBundle(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		Bundle struct {
+			Bundles      []string `json:"bundles"`
+			Presets      []string `json:"presets"`
+			Explanations map[string]struct {
+				Kind string `json:"kind"`
+			} `json:"explanations"`
+		} `json:"bundle"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(payload.Bundle.Bundles) != 1 || payload.Bundle.Bundles[0] != "core" {
+		t.Fatalf("unexpected assertion group preset bundle names: %+v", payload.Bundle.Bundles)
+	}
+	if len(payload.Bundle.Presets) != 2 {
+		t.Fatalf("expected two group presets in bundle, got %+v", payload.Bundle.Presets)
+	}
+	if payload.Bundle.Explanations["base-groups"].Kind != "groups" || payload.Bundle.Explanations["strict-groups"].Kind != "groups" {
+		t.Fatalf("unexpected group preset bundle explanations: %+v", payload.Bundle.Explanations)
+	}
+}
+
+func TestDiffGatewayLimitClassDigestAssertionGroupPresetExplanationBundleReturnsChangedPresets(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitClassDigestAssertionGroupPresets: map[string]config.LimitClassDigestAssertionGroupPreset{
+				"base-groups": {
+					Groups: []config.LimitClassDigestAssertionGroup{{
+						Operator: "allOf",
+						Rules:    []string{"exists"},
+					}},
+				},
+				"strict-groups": {
+					PresetChain: []string{"base-groups"},
+					Groups: []config.LimitClassDigestAssertionGroup{{
+						Operator: "allOf",
+						Rules:    []string{"contains:regex:^strict"},
+					}},
+				},
+			},
+			LimitClassDigestAssertionGroupPresetExplainBundles: map[string]config.LimitClassDigestAssertionGroupPresetExplainBundle{
+				"base": {
+					Presets: []string{"base-groups"},
+				},
+				"strict": {
+					Presets: []string{"strict-groups"},
+				},
+			},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/gateway/limit-class-digest-assertion-group-preset/explain/bundle/diff?from_bundle=base&to_bundle=strict", nil)
+	resp := httptest.NewRecorder()
+	api.diffGatewayLimitClassDigestAssertionGroupPresetExplanationBundle(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		Diff struct {
+			Presets        []string `json:"presets"`
+			ChangedPresets []string `json:"changed_presets"`
+			PresetDiffs    map[string]struct {
+				FinalChanged bool `json:"final_changed"`
+			} `json:"preset_diffs"`
+		} `json:"diff"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(payload.Diff.Presets) != 2 {
+		t.Fatalf("expected two presets in diff, got %+v", payload.Diff.Presets)
+	}
+	if len(payload.Diff.ChangedPresets) != 2 {
+		t.Fatalf("expected two changed presets, got %+v", payload.Diff.ChangedPresets)
+	}
+	if !payload.Diff.PresetDiffs["base-groups"].FinalChanged || !payload.Diff.PresetDiffs["strict-groups"].FinalChanged {
+		t.Fatalf("unexpected group preset bundle diff detail: %+v", payload.Diff.PresetDiffs)
+	}
+}
+
+func TestDiffGatewayLimitClassDigestAssertionPresetReturnsChangedFields(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitClassDigestAssertionPresets: map[string]config.LimitClassDigestAssertionPreset{
+				"base-safety": {
+					Rules: []string{"exists"},
+				},
+				"prod-strict": {
+					PresetChain: []string{"base-safety"},
+					Groups: []config.LimitClassDigestAssertionGroup{{
+						Operator: "allOf",
+						Rules:    []string{"regex:^crit"},
+					}},
+				},
+			},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/gateway/limit-class-digest-assertion-preset/diff?from_preset=prod-strict&to_preset=base-safety", nil)
+	resp := httptest.NewRecorder()
+	api.diffGatewayLimitClassDigestAssertionPreset(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		Diff struct {
+			From struct {
+				PresetName string `json:"preset_name"`
+			} `json:"from"`
+			To struct {
+				PresetName string `json:"preset_name"`
+			} `json:"to"`
+			ChangedFields map[string]struct {
+				FromValue interface{} `json:"from_value"`
+				ToValue   interface{} `json:"to_value"`
+			} `json:"changed_fields"`
+		} `json:"diff"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.Diff.From.PresetName != "prod-strict" || payload.Diff.To.PresetName != "base-safety" {
+		t.Fatalf("unexpected assertion preset diff identity: %+v", payload.Diff)
+	}
+	if _, ok := payload.Diff.ChangedFields["groups"]; !ok {
+		t.Fatalf("expected groups diff, got %+v", payload.Diff.ChangedFields)
+	}
+}
+
+func TestDiffGatewayLimitClassDigestAssertionPresetExplanationReturnsStageDiffs(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitClassDigestAssertionPresets: map[string]config.LimitClassDigestAssertionPreset{
+				"base-safety": {
+					Rules: []string{"exists"},
+				},
+				"prod-strict": {
+					PresetChain: []string{"base-safety"},
+					Rules:       []string{"not_contains:warning"},
+				},
+			},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/gateway/limit-class-digest-assertion-preset/explain/diff?from_preset=prod-strict&to_preset=base-safety&kind=rules", nil)
+	resp := httptest.NewRecorder()
+	api.diffGatewayLimitClassDigestAssertionPresetExplanation(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		Diff struct {
+			Kind         string `json:"kind"`
+			FinalChanged bool   `json:"final_changed"`
+			From         struct {
+				FinalValue []interface{} `json:"final_value"`
+			} `json:"from"`
+			To struct {
+				FinalValue []interface{} `json:"final_value"`
+			} `json:"to"`
+			ChangedStages map[string]struct {
+				FromValue []interface{} `json:"from_value"`
+				ToValue   []interface{} `json:"to_value"`
+			} `json:"changed_stages"`
+		} `json:"diff"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.Diff.Kind != "rules" || !payload.Diff.FinalChanged {
+		t.Fatalf("unexpected assertion preset explanation diff: %+v", payload.Diff)
+	}
+	if len(payload.Diff.From.FinalValue) != 2 || len(payload.Diff.To.FinalValue) != 1 {
+		t.Fatalf("unexpected final values in assertion preset explanation diff: %+v", payload.Diff)
+	}
+	stage, ok := payload.Diff.ChangedStages["preset:prod-strict"]
+	if !ok {
+		t.Fatalf("expected prod-strict changed stage, got %+v", payload.Diff.ChangedStages)
+	}
+	if len(stage.FromValue) != 1 || len(stage.ToValue) != 0 {
+		t.Fatalf("unexpected changed stage values: %+v", stage)
+	}
+}
+
+func TestExplainGatewayLimitClassDigestAssertionPresetBundleReturnsKinds(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitClassDigestAssertionPresets: map[string]config.LimitClassDigestAssertionPreset{
+				"base-safety": {
+					Rules: []string{"exists"},
+					Groups: []config.LimitClassDigestAssertionGroup{{
+						Operator: "allOf",
+						Rules:    []string{"regex:^crit"},
+					}},
+				},
+				"prod-strict": {
+					PresetChain: []string{"base-safety"},
+					Rules:       []string{"not_contains:warning"},
+				},
+			},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/gateway/limit-class-digest-assertion-preset/explain/bundle?preset=prod-strict&kind=rules&kind=groups", nil)
+	resp := httptest.NewRecorder()
+	api.explainGatewayLimitClassDigestAssertionPresetBundle(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		Bundle struct {
+			Inspection struct {
+				PresetName string `json:"preset_name"`
+			} `json:"inspection"`
+			Kinds        []string `json:"kinds"`
+			Explanations map[string]struct {
+				Kind string `json:"kind"`
+			} `json:"explanations"`
+		} `json:"bundle"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.Bundle.Inspection.PresetName != "prod-strict" {
+		t.Fatalf("unexpected preset bundle inspection: %+v", payload.Bundle.Inspection)
+	}
+	if len(payload.Bundle.Kinds) != 2 || payload.Bundle.Kinds[0] != "rules" || payload.Bundle.Kinds[1] != "groups" {
+		t.Fatalf("unexpected preset bundle kinds: %+v", payload.Bundle.Kinds)
+	}
+	if payload.Bundle.Explanations["rules"].Kind != "rules" || payload.Bundle.Explanations["groups"].Kind != "groups" {
+		t.Fatalf("unexpected preset bundle explanations: %+v", payload.Bundle.Explanations)
+	}
+}
+
+func TestExplainGatewayLimitClassDigestAssertionPresetBundleResolvesNamedBundles(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitClassDigestAssertionExplainBundles: map[string]config.LimitClassDigestAssertionExplainBundle{
+				"core": {Kinds: []string{"rules"}},
+			},
+			LimitClassDigestAssertionPresets: map[string]config.LimitClassDigestAssertionPreset{
+				"prod-strict": {
+					Rules: []string{"exists"},
+					Groups: []config.LimitClassDigestAssertionGroup{{
+						Operator: "allOf",
+						Rules:    []string{"regex:^crit"},
+					}},
+				},
+			},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/gateway/limit-class-digest-assertion-preset/explain/bundle?preset=prod-strict&bundle=core&kind=groups", nil)
+	resp := httptest.NewRecorder()
+	api.explainGatewayLimitClassDigestAssertionPresetBundle(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		Bundle struct {
+			Kinds []string `json:"kinds"`
+		} `json:"bundle"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(payload.Bundle.Kinds) != 2 || payload.Bundle.Kinds[0] != "rules" || payload.Bundle.Kinds[1] != "groups" {
+		t.Fatalf("unexpected named preset bundle kinds: %+v", payload.Bundle.Kinds)
+	}
+}
+
+func TestDiffGatewayLimitClassDigestAssertionPresetExplanationBundleReturnsChangedKinds(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitClassDigestAssertionExplainBundles: map[string]config.LimitClassDigestAssertionExplainBundle{
+				"core": {Kinds: []string{"rules", "groups"}},
+			},
+			LimitClassDigestAssertionPresets: map[string]config.LimitClassDigestAssertionPreset{
+				"base-safety": {
+					Rules: []string{"exists"},
+					Groups: []config.LimitClassDigestAssertionGroup{{
+						Operator: "allOf",
+						Rules:    []string{"regex:^crit"},
+					}},
+				},
+				"prod-strict": {
+					PresetChain: []string{"base-safety"},
+					Rules:       []string{"not_contains:warning"},
+				},
+			},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/gateway/limit-class-digest-assertion-preset/explain/bundle/diff?from_preset=prod-strict&to_preset=base-safety&bundle=core", nil)
+	resp := httptest.NewRecorder()
+	api.diffGatewayLimitClassDigestAssertionPresetExplanationBundle(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		Diff struct {
+			Bundles      []string `json:"bundles"`
+			Kinds        []string `json:"kinds"`
+			ChangedKinds []string `json:"changed_kinds"`
+			KindDiffs    map[string]struct {
+				FinalChanged bool `json:"final_changed"`
+			} `json:"kind_diffs"`
+		} `json:"diff"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(payload.Diff.Bundles) != 1 || payload.Diff.Bundles[0] != "core" {
+		t.Fatalf("unexpected assertion preset bundle diff bundles: %+v", payload.Diff.Bundles)
+	}
+	if len(payload.Diff.Kinds) != 2 || payload.Diff.Kinds[0] != "rules" || payload.Diff.Kinds[1] != "groups" {
+		t.Fatalf("unexpected assertion preset bundle diff kinds: %+v", payload.Diff.Kinds)
+	}
+	if len(payload.Diff.ChangedKinds) != 1 || payload.Diff.ChangedKinds[0] != "rules" {
+		t.Fatalf("unexpected assertion preset bundle diff changed kinds: %+v", payload.Diff.ChangedKinds)
+	}
+	if !payload.Diff.KindDiffs["rules"].FinalChanged || payload.Diff.KindDiffs["groups"].FinalChanged {
+		t.Fatalf("unexpected assertion preset bundle diff detail: %+v", payload.Diff.KindDiffs)
+	}
+}
+
+func TestDiffGatewayLimitClassDigestAssertionPresetExplanationBundleSupportsDiffProfiles(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitClassDigestAssertionExplainBundles: map[string]config.LimitClassDigestAssertionExplainBundle{
+				"core": {Kinds: []string{"rules", "groups"}},
+			},
+			LimitClassDigestAssertionGroupPresets: map[string]config.LimitClassDigestAssertionGroupPreset{
+				"shared-rules-check": {
+					Groups: []config.LimitClassDigestAssertionGroup{{
+						Operator: "allOf",
+						Rules:    []string{"contains:not_contains:warning"},
+					}},
+				},
+				"strict-groups-check": {
+					Groups: []config.LimitClassDigestAssertionGroup{{
+						Operator: "allOf",
+						Rules:    []string{"contains:regex:^strict"},
+					}},
+				},
+			},
+			LimitClassDigestAssertionExplainDiffProfiles: map[string]config.LimitClassDigestAssertionExplainDiffProfile{
+				"preset-audit": {
+					Bundles:             []string{"core"},
+					AllowedChangedKinds: []string{"rules"},
+					ExpectedFromValues: map[string]string{
+						"groups": `[{"operator":"allOf","rules":["regex:^strict"]}]`,
+					},
+					ExpectedToValues: map[string]string{
+						"rules": `["exists","not_contains:warning"]`,
+					},
+					AssertFromRules: map[string][]string{
+						"rules": {"contains:not_contains:warning"},
+					},
+					AssertToRules: map[string][]string{
+						"groups": {"contains:regex:^strict"},
+					},
+					AssertFromGroupPresets: map[string][]string{
+						"rules": {"shared-rules-check"},
+					},
+					AssertToGroupPresets: map[string][]string{
+						"groups": {"strict-groups-check"},
+					},
+					AssertFromGroups: map[string][]config.LimitClassDigestAssertionGroup{
+						"rules": {{
+							Operator: "allOf",
+							Rules:    []string{"exists", "contains:not_contains:warning"},
+						}},
+					},
+					AssertToGroups: map[string][]config.LimitClassDigestAssertionGroup{
+						"groups": {{
+							Operator: "allOf",
+							Rules:    []string{"contains:regex:^strict"},
+						}},
+					},
+				},
+			},
+			LimitClassDigestAssertionPresets: map[string]config.LimitClassDigestAssertionPreset{
+				"base-safety": {
+					Rules: []string{"exists"},
+					Groups: []config.LimitClassDigestAssertionGroup{{
+						Operator: "allOf",
+						Rules:    []string{"regex:^crit"},
+					}},
+				},
+				"prod-strict": {
+					PresetChain: []string{"base-safety"},
+					Rules:       []string{"not_contains:warning"},
+					Groups: []config.LimitClassDigestAssertionGroup{{
+						Operator: "allOf",
+						Rules:    []string{"regex:^strict"},
+					}},
+				},
+			},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/gateway/limit-class-digest-assertion-preset/explain/bundle/diff?from_preset=prod-strict&to_preset=base-safety&diff_profile=preset-audit", nil)
+	resp := httptest.NewRecorder()
+	api.diffGatewayLimitClassDigestAssertionPresetExplanationBundle(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		Diff struct {
+			DiffProfiles           []string `json:"diff_profiles"`
+			Bundles                []string `json:"bundles"`
+			Kinds                  []string `json:"kinds"`
+			ChangedKinds           []string `json:"changed_kinds"`
+			UnexpectedChangedKinds []string `json:"unexpected_changed_kinds"`
+			AssertionFailures      []struct {
+				Side  string `json:"side"`
+				Field string `json:"field"`
+				Rule  string `json:"rule"`
+			} `json:"assertion_failures"`
+		} `json:"diff"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(payload.Diff.DiffProfiles) != 1 || payload.Diff.DiffProfiles[0] != "preset-audit" {
+		t.Fatalf("unexpected assertion preset diff profiles: %+v", payload.Diff.DiffProfiles)
+	}
+	if len(payload.Diff.Bundles) != 1 || payload.Diff.Bundles[0] != "core" {
+		t.Fatalf("unexpected assertion preset diff bundles: %+v", payload.Diff.Bundles)
+	}
+	if len(payload.Diff.Kinds) != 2 {
+		t.Fatalf("unexpected assertion preset diff kinds: %+v", payload.Diff.Kinds)
+	}
+	if len(payload.Diff.ChangedKinds) != 2 {
+		t.Fatalf("unexpected assertion preset diff changed kinds: %+v", payload.Diff.ChangedKinds)
+	}
+	if len(payload.Diff.UnexpectedChangedKinds) != 1 || payload.Diff.UnexpectedChangedKinds[0] != "groups" {
+		t.Fatalf("unexpected assertion preset diff unexpected kinds: %+v", payload.Diff.UnexpectedChangedKinds)
+	}
+	if len(payload.Diff.AssertionFailures) != 5 {
+		t.Fatalf("expected five assertion failures, got %+v", payload.Diff.AssertionFailures)
+	}
+}
+
+func TestDiffGatewayLimitClassDigestProfileSupportsWebhookAndProfileTargets(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitClassDigestHiddenStrategyPolicyPresets: map[string]config.LimitClassDigestHiddenStrategyPolicy{
+				"shared-exact": {
+					DominantMode:   "weighted_score",
+					PriorityWeight: 7,
+				},
+			},
+			LimitClassDigestProfiles: map[string]config.LimitAlertRecipientProfile{
+				"base": {
+					LimitClassDigestTypes:                  []string{"alert"},
+					LimitClassDigestMinSeverity:            "warning",
+					LimitClassDigestMinBucketClassPriority: 4,
+				},
+				"strict": {
+					LimitClassDigestTypes:       []string{"snooze"},
+					LimitClassDigestMinSeverity: "critical",
+					LimitClassDigestTruncatedReasonBucketExactSeverityPolicyPreset: "shared-exact",
+				},
+			},
+			NotificationWebhooks: []config.NotificationWebhook{{
+				Name:                             "pager",
+				URL:                              "https://example.com/pager",
+				Events:                           []string{"gateway.limit_class_alert_digest"},
+				LimitClassDigestProfileChain:     []string{"base"},
+				LimitClassDigestProfile:          "strict",
+				LimitClassDigestMaxBucketClasses: 2,
+			}},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/gateway/limit-class-digest-profile/diff?from_webhook=pager&to_profile=base", nil)
+	resp := httptest.NewRecorder()
+	api.diffGatewayLimitClassDigestProfile(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		Diff struct {
+			From struct {
+				TargetType  string `json:"target_type"`
+				WebhookName string `json:"webhook_name"`
+			} `json:"from"`
+			To struct {
+				TargetType  string `json:"target_type"`
+				ProfileName string `json:"profile_name"`
+			} `json:"to"`
+			ChangedFields map[string]struct {
+				FromValue  interface{} `json:"from_value"`
+				ToValue    interface{} `json:"to_value"`
+				FromSource string      `json:"from_source"`
+				ToSource   string      `json:"to_source"`
+			} `json:"changed_fields"`
+		} `json:"diff"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.Diff.From.TargetType != "webhook" || payload.Diff.From.WebhookName != "pager" {
+		t.Fatalf("unexpected from inspection: %+v", payload.Diff.From)
+	}
+	if payload.Diff.To.TargetType != "profile" || payload.Diff.To.ProfileName != "base" {
+		t.Fatalf("unexpected to inspection: %+v", payload.Diff.To)
+	}
+	if payload.Diff.ChangedFields["limitClassDigestMaxBucketClasses"].FromSource != "webhook" {
+		t.Fatalf("expected webhook source for max bucket classes, got %+v", payload.Diff.ChangedFields["limitClassDigestMaxBucketClasses"])
+	}
+	if payload.Diff.ChangedFields["limitClassDigestMaxBucketClasses"].ToValue != nil {
+		t.Fatalf("expected nil profile-side max bucket classes, got %+v", payload.Diff.ChangedFields["limitClassDigestMaxBucketClasses"])
+	}
+	if payload.Diff.ChangedFields["limitClassDigestMinSeverity"].FromSource != "profile:strict" || payload.Diff.ChangedFields["limitClassDigestMinSeverity"].ToSource != "profile:base" {
+		t.Fatalf("expected strict vs base source attribution, got %+v", payload.Diff.ChangedFields["limitClassDigestMinSeverity"])
+	}
+	if _, ok := payload.Diff.ChangedFields["limitClassDigestTruncatedReasonBucketExactSeverityPolicy"]; !ok {
+		t.Fatalf("expected exact severity policy diff, got %+v", payload.Diff.ChangedFields)
+	}
+}
+
+func TestExplainGatewayLimitClassDigestProfileReturnsFieldTrace(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitClassDigestProfiles: map[string]config.LimitAlertRecipientProfile{
+				"base": {
+					LimitClassDigestMinSeverity: "warning",
+				},
+				"strict": {
+					LimitClassDigestMinSeverity: "elevated",
+				},
+			},
+			NotificationWebhooks: []config.NotificationWebhook{{
+				Name:                         "pager",
+				URL:                          "https://example.com/pager",
+				Events:                       []string{"gateway.limit_class_alert_digest"},
+				LimitClassDigestProfileChain: []string{"base"},
+				LimitClassDigestProfile:      "strict",
+				LimitClassDigestMinSeverity:  "critical",
+			}},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/gateway/limit-class-digest-profile/explain?webhook=pager&field=limitClassDigestMinSeverity", nil)
+	resp := httptest.NewRecorder()
+	api.explainGatewayLimitClassDigestProfile(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		Explanation struct {
+			Field       string      `json:"field"`
+			FinalValue  interface{} `json:"final_value"`
+			FinalSource string      `json:"final_source"`
+			Stages      []struct {
+				Stage   string      `json:"stage"`
+				Source  string      `json:"source"`
+				Value   interface{} `json:"value"`
+				Changed bool        `json:"changed"`
+			} `json:"stages"`
+		} `json:"explanation"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.Explanation.Field != "limitClassDigestMinSeverity" || payload.Explanation.FinalValue != "critical" || payload.Explanation.FinalSource != "webhook" {
+		t.Fatalf("unexpected explanation identity: %+v", payload.Explanation)
+	}
+	if len(payload.Explanation.Stages) != 3 {
+		t.Fatalf("expected three explanation stages, got %+v", payload.Explanation.Stages)
+	}
+	if payload.Explanation.Stages[0].Stage != "profile_chain:base" || payload.Explanation.Stages[0].Value != "warning" {
+		t.Fatalf("unexpected first stage: %+v", payload.Explanation.Stages[0])
+	}
+	if payload.Explanation.Stages[1].Stage != "profile:strict" || payload.Explanation.Stages[1].Value != "elevated" {
+		t.Fatalf("unexpected second stage: %+v", payload.Explanation.Stages[1])
+	}
+	if payload.Explanation.Stages[2].Stage != "webhook" || payload.Explanation.Stages[2].Value != "critical" {
+		t.Fatalf("unexpected third stage: %+v", payload.Explanation.Stages[2])
+	}
+}
+
+func TestDiffGatewayLimitClassDigestProfileExplanationReturnsStageDiffs(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitClassDigestProfiles: map[string]config.LimitAlertRecipientProfile{
+				"base": {
+					LimitClassDigestMinSeverity: "warning",
+				},
+				"strict": {
+					LimitClassDigestMinSeverity: "elevated",
+				},
+			},
+			NotificationWebhooks: []config.NotificationWebhook{{
+				Name:                         "pager",
+				URL:                          "https://example.com/pager",
+				Events:                       []string{"gateway.limit_class_alert_digest"},
+				LimitClassDigestProfileChain: []string{"base"},
+				LimitClassDigestProfile:      "strict",
+				LimitClassDigestMinSeverity:  "critical",
+			}},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/gateway/limit-class-digest-profile/explain/diff?from_webhook=pager&to_profile=base&field=limitClassDigestMinSeverity", nil)
+	resp := httptest.NewRecorder()
+	api.diffGatewayLimitClassDigestProfileExplanation(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		Diff struct {
+			Field        string `json:"field"`
+			FinalChanged bool   `json:"final_changed"`
+			From         struct {
+				FinalValue interface{} `json:"final_value"`
+			} `json:"from"`
+			To struct {
+				FinalValue interface{} `json:"final_value"`
+			} `json:"to"`
+			ChangedStages map[string]struct {
+				FromValue interface{} `json:"from_value"`
+				ToValue   interface{} `json:"to_value"`
+			} `json:"changed_stages"`
+		} `json:"diff"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.Diff.Field != "limitClassDigestMinSeverity" || !payload.Diff.FinalChanged {
+		t.Fatalf("unexpected explanation diff summary: %+v", payload.Diff)
+	}
+	if payload.Diff.From.FinalValue != "critical" || payload.Diff.To.FinalValue != "warning" {
+		t.Fatalf("unexpected final values: %+v", payload.Diff)
+	}
+	if stage := payload.Diff.ChangedStages["profile:strict"]; stage.FromValue != "elevated" || stage.ToValue != nil {
+		t.Fatalf("unexpected strict stage diff: %+v", stage)
+	}
+	if stage := payload.Diff.ChangedStages["webhook"]; stage.FromValue != "critical" || stage.ToValue != nil {
+		t.Fatalf("unexpected webhook stage diff: %+v", stage)
+	}
+}
+
+func TestExplainGatewayLimitClassDigestProfileBundleReturnsMultipleFieldTraces(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitClassDigestExplainBundles: map[string]config.LimitClassDigestExplainBundle{
+				"ops-core": {
+					Fields: []string{"limitClassDigestMinSeverity"},
+				},
+			},
+			LimitClassDigestProfiles: map[string]config.LimitAlertRecipientProfile{
+				"base": {
+					LimitClassDigestMinSeverity: "warning",
+					LimitClassDigestTypes:       []string{"alert"},
+				},
+				"strict": {
+					LimitClassDigestMinSeverity: "elevated",
+					LimitClassDigestTypes:       []string{"snooze"},
+				},
+			},
+			NotificationWebhooks: []config.NotificationWebhook{{
+				Name:                         "pager",
+				URL:                          "https://example.com/pager",
+				Events:                       []string{"gateway.limit_class_alert_digest"},
+				LimitClassDigestProfileChain: []string{"base"},
+				LimitClassDigestProfile:      "strict",
+				LimitClassDigestMinSeverity:  "critical",
+			}},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/gateway/limit-class-digest-profile/explain/bundle?webhook=pager&bundle=ops-core&field=limitClassDigestTypes", nil)
+	resp := httptest.NewRecorder()
+	api.explainGatewayLimitClassDigestProfileBundle(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		Bundle struct {
+			Inspection struct {
+				WebhookName string `json:"webhook_name"`
+			} `json:"inspection"`
+			Bundles      []string `json:"bundles"`
+			Fields       []string `json:"fields"`
+			Explanations map[string]struct {
+				Field      string      `json:"field"`
+				FinalValue interface{} `json:"final_value"`
+			} `json:"explanations"`
+		} `json:"bundle"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.Bundle.Inspection.WebhookName != "pager" {
+		t.Fatalf("unexpected inspection webhook: %+v", payload.Bundle.Inspection)
+	}
+	if len(payload.Bundle.Bundles) != 1 || payload.Bundle.Bundles[0] != "ops-core" {
+		t.Fatalf("unexpected bundle list: %+v", payload.Bundle.Bundles)
+	}
+	if len(payload.Bundle.Fields) != 2 || payload.Bundle.Fields[0] != "limitClassDigestMinSeverity" || payload.Bundle.Fields[1] != "limitClassDigestTypes" {
+		t.Fatalf("unexpected field list: %+v", payload.Bundle.Fields)
+	}
+	if payload.Bundle.Explanations["limitClassDigestMinSeverity"].FinalValue != "critical" {
+		t.Fatalf("unexpected min severity explanation: %+v", payload.Bundle.Explanations["limitClassDigestMinSeverity"])
+	}
+	types, ok := payload.Bundle.Explanations["limitClassDigestTypes"].FinalValue.([]interface{})
+	if !ok || len(types) != 1 || types[0] != "snooze" {
+		t.Fatalf("unexpected types explanation: %+v", payload.Bundle.Explanations["limitClassDigestTypes"])
+	}
+}
+
+func TestDiffGatewayLimitClassDigestProfileExplainBundleReturnsFieldDiffs(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitClassDigestExplainBundles: map[string]config.LimitClassDigestExplainBundle{
+				"ops-core": {
+					Fields: []string{"limitClassDigestMinSeverity", "limitClassDigestTypes", "limitClassDigestMaxBucketClasses"},
+				},
+			},
+			LimitClassDigestExplainDiffProfiles: map[string]config.LimitClassDigestExplainDiffProfile{
+				"pager-audit": {
+					FromRole:             "baseline",
+					ToRole:               "pager",
+					Bundles:              []string{"ops-core"},
+					AllowedChangedFields: []string{"limitClassDigestMinSeverity"},
+					ExpectedFromValues: map[string]string{
+						"limitClassDigestMinSeverity": `"critical"`,
+					},
+					ExpectedToValues: map[string]string{
+						"limitClassDigestTypes": `["snooze"]`,
+					},
+					AssertFromRules: map[string][]string{
+						"limitClassDigestTypes": {"contains:vip-only"},
+					},
+					AssertToRules: map[string][]string{
+						"limitClassDigestMaxBucketClasses": {"lte:0"},
+					},
+				},
+			},
+			LimitClassDigestProfiles: map[string]config.LimitAlertRecipientProfile{
+				"base": {
+					LimitClassDigestMinSeverity:      "warning",
+					LimitClassDigestTypes:            []string{"alert"},
+					LimitClassDigestMaxBucketClasses: 3,
+				},
+				"strict": {
+					LimitClassDigestMinSeverity:      "elevated",
+					LimitClassDigestTypes:            []string{"snooze"},
+					LimitClassDigestMaxBucketClasses: 1,
+				},
+			},
+			NotificationWebhooks: []config.NotificationWebhook{{
+				Name:                             "pager",
+				URL:                              "https://example.com/pager",
+				Events:                           []string{"gateway.limit_class_alert_digest"},
+				LimitClassDigestProfileChain:     []string{"base"},
+				LimitClassDigestProfile:          "strict",
+				LimitClassDigestMinSeverity:      "critical",
+				LimitClassDigestTypes:            []string{"alert"},
+				LimitClassDigestMaxBucketClasses: 2,
+			}},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/gateway/limit-class-digest-profile/explain/bundle/diff?from_webhook=pager&to_profile=base&diff_profile=pager-audit&from_role=baseline&to_role=pager", nil)
+	resp := httptest.NewRecorder()
+	api.diffGatewayLimitClassDigestProfileExplanationBundle(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		Diff struct {
+			DiffProfiles            []string `json:"diff_profiles"`
+			Bundles                 []string `json:"bundles"`
+			Fields                  []string `json:"fields"`
+			ChangedFields           []string `json:"changed_fields"`
+			UnexpectedChangedFields []string `json:"unexpected_changed_fields"`
+			AssertionFailures       []struct {
+				Side     string      `json:"side"`
+				Field    string      `json:"field"`
+				Rule     string      `json:"rule"`
+				Expected interface{} `json:"expected"`
+				Actual   interface{} `json:"actual"`
+			} `json:"assertion_failures"`
+			FieldDiffs map[string]struct {
+				FinalChanged bool `json:"final_changed"`
+			} `json:"field_diffs"`
+		} `json:"diff"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(payload.Diff.Bundles) != 1 || payload.Diff.Bundles[0] != "ops-core" {
+		t.Fatalf("unexpected diff bundles: %+v", payload.Diff.Bundles)
+	}
+	if len(payload.Diff.DiffProfiles) != 1 || payload.Diff.DiffProfiles[0] != "pager-audit" {
+		t.Fatalf("unexpected diff profiles: %+v", payload.Diff.DiffProfiles)
+	}
+	if len(payload.Diff.Fields) != 3 || payload.Diff.Fields[0] != "limitClassDigestMinSeverity" || payload.Diff.Fields[1] != "limitClassDigestTypes" || payload.Diff.Fields[2] != "limitClassDigestMaxBucketClasses" {
+		t.Fatalf("unexpected diff fields: %+v", payload.Diff.Fields)
+	}
+	if len(payload.Diff.ChangedFields) != 3 {
+		t.Fatalf("expected three changed fields, got %+v", payload.Diff.ChangedFields)
+	}
+	if len(payload.Diff.UnexpectedChangedFields) != 2 || payload.Diff.UnexpectedChangedFields[0] != "limitClassDigestTypes" || payload.Diff.UnexpectedChangedFields[1] != "limitClassDigestMaxBucketClasses" {
+		t.Fatalf("expected unexpected change on limitClassDigestTypes, got %+v", payload.Diff.UnexpectedChangedFields)
+	}
+	if len(payload.Diff.AssertionFailures) != 3 {
+		t.Fatalf("expected three assertion failures, got %+v", payload.Diff.AssertionFailures)
+	}
+	var foundFromContains, foundToExact, foundToLTE bool
+	for _, failure := range payload.Diff.AssertionFailures {
+		if failure.Side == "from" && failure.Field == "limitClassDigestTypes" && failure.Rule == "contains:vip-only" {
+			foundFromContains = true
+		}
+		if failure.Side == "to" && failure.Field == "limitClassDigestTypes" && failure.Rule == "" {
+			foundToExact = true
+		}
+		if failure.Side == "to" && failure.Field == "limitClassDigestMaxBucketClasses" && failure.Rule == "lte:0" {
+			foundToLTE = true
+		}
+	}
+	if !foundFromContains || !foundToExact || !foundToLTE {
+		t.Fatalf("expected contains, exact, and lte assertion failures, got %+v", payload.Diff.AssertionFailures)
+	}
+	if !payload.Diff.FieldDiffs["limitClassDigestMinSeverity"].FinalChanged || !payload.Diff.FieldDiffs["limitClassDigestTypes"].FinalChanged || !payload.Diff.FieldDiffs["limitClassDigestMaxBucketClasses"].FinalChanged {
+		t.Fatalf("expected final changes for all fields, got %+v", payload.Diff.FieldDiffs)
+	}
+}
+
+func TestDiffGatewayLimitClassDigestProfileExplainBundleRejectsRoleMismatch(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitClassDigestExplainBundles: map[string]config.LimitClassDigestExplainBundle{
+				"ops-core": {
+					Fields: []string{"limitClassDigestMinSeverity"},
+				},
+			},
+			LimitClassDigestExplainDiffProfiles: map[string]config.LimitClassDigestExplainDiffProfile{
+				"pager-audit": {
+					FromRole: "baseline",
+					ToRole:   "pager",
+					Bundles:  []string{"ops-core"},
+				},
+			},
+			LimitClassDigestProfiles: map[string]config.LimitAlertRecipientProfile{
+				"base": {LimitClassDigestMinSeverity: "warning"},
+			},
+			NotificationWebhooks: []config.NotificationWebhook{{
+				Name:                         "pager",
+				URL:                          "https://example.com/pager",
+				Events:                       []string{"gateway.limit_class_alert_digest"},
+				LimitClassDigestProfileChain: []string{"base"},
+				LimitClassDigestMinSeverity:  "critical",
+			}},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/gateway/limit-class-digest-profile/explain/bundle/diff?from_webhook=pager&to_profile=base&diff_profile=pager-audit&from_role=pager&to_role=baseline", nil)
+	resp := httptest.NewRecorder()
+	api.diffGatewayLimitClassDigestProfileExplanationBundle(resp, req)
+
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", resp.Code, resp.Body.String())
+	}
+}
+
+func TestEvaluateLimitClassDigestAssertionRuleSupportsRegexExistsAndNotContains(t *testing.T) {
+	if expected, actual, passed := evaluateLimitClassDigestAssertionRule("exists", "critical"); !passed || expected != "exists" || actual != "critical" {
+		t.Fatalf("expected exists rule to pass, got expected=%v actual=%v passed=%v", expected, actual, passed)
+	}
+	if _, _, passed := evaluateLimitClassDigestAssertionRule("exists", ""); passed {
+		t.Fatalf("expected exists rule to fail on empty string")
+	}
+	if expected, actual, passed := evaluateLimitClassDigestAssertionRule("regex:^crit", "critical"); !passed || expected != "^crit" || actual != "critical" {
+		t.Fatalf("expected regex rule to pass, got expected=%v actual=%v passed=%v", expected, actual, passed)
+	}
+	if _, _, passed := evaluateLimitClassDigestAssertionRule("regex:^crit", "warning"); passed {
+		t.Fatalf("expected regex rule to fail on non-matching string")
+	}
+	if expected, actual, passed := evaluateLimitClassDigestAssertionRule("not_contains:alert", []interface{}{"snooze", "vip"}); !passed || expected != "alert" || !reflect.DeepEqual(actual, []interface{}{"snooze", "vip"}) {
+		t.Fatalf("expected not_contains rule to pass, got expected=%v actual=%v passed=%v", expected, actual, passed)
+	}
+	if _, _, passed := evaluateLimitClassDigestAssertionRule("not_contains:alert", []interface{}{"alert", "vip"}); passed {
+		t.Fatalf("expected not_contains rule to fail when value is present")
+	}
+}
+
+func TestEvaluateLimitClassDigestAssertionGroupSupportsAllOfAndAnyOf(t *testing.T) {
+	allOf := config.LimitClassDigestAssertionGroup{
+		Operator: "allOf",
+		Rules:    []string{"exists", "regex:^crit"},
+	}
+	if result := evaluateLimitClassDigestAssertionGroup(allOf, "critical"); !result.Passed {
+		t.Fatalf("expected allOf group to pass, got %+v", result)
+	}
+	if result := evaluateLimitClassDigestAssertionGroup(allOf, "warning"); result.Passed || result.Expected != "allOf(exists,regex:^crit)" {
+		t.Fatalf("expected allOf group to fail with formatted expectation, got %+v", result)
+	}
+
+	anyOf := config.LimitClassDigestAssertionGroup{
+		Operator: "anyOf",
+		Rules:    []string{"contains:vip", "contains:gold"},
+	}
+	if result := evaluateLimitClassDigestAssertionGroup(anyOf, []interface{}{"gold", "standard"}); !result.Passed {
+		t.Fatalf("expected anyOf group to pass, got %+v", result)
+	}
+	if result := evaluateLimitClassDigestAssertionGroup(anyOf, []interface{}{"silver", "standard"}); result.Passed || result.Expected != "anyOf(contains:vip,contains:gold)" {
+		t.Fatalf("expected anyOf group to fail with formatted expectation, got %+v", result)
+	}
+
+	noneOf := config.LimitClassDigestAssertionGroup{
+		Operator: "noneOf",
+		Rules:    []string{"contains:blocked", "regex:^deny"},
+	}
+	if result := evaluateLimitClassDigestAssertionGroup(noneOf, "allowed-value"); !result.Passed {
+		t.Fatalf("expected noneOf group to pass, got %+v", result)
+	}
+	if result := evaluateLimitClassDigestAssertionGroup(noneOf, "deny-this"); result.Passed || result.Expected != "noneOf(contains:blocked,regex:^deny)" {
+		t.Fatalf("expected noneOf group to fail with formatted expectation, got %+v", result)
+	}
+
+	nested := config.LimitClassDigestAssertionGroup{
+		Operator: "allOf",
+		Rules:    []string{"exists"},
+		Groups: []config.LimitClassDigestAssertionGroup{
+			{
+				Operator: "anyOf",
+				Rules:    []string{"regex:^crit", "contains:vip"},
+			},
+		},
+	}
+	if result := evaluateLimitClassDigestAssertionGroup(nested, "critical"); !result.Passed {
+		t.Fatalf("expected nested group to pass, got %+v", result)
+	}
+	if result := evaluateLimitClassDigestAssertionGroup(nested, "standard"); result.Passed || result.Expected != "allOf(exists,anyOf(regex:^crit,contains:vip))" {
+		t.Fatalf("expected nested group to fail with formatted expectation, got %+v", result)
+	}
+}
+
+func TestResolveLimitClassDigestExplainBundleDiffInputsMergesAssertionPresets(t *testing.T) {
+	cfg := &config.Config{
+		Security: config.SecurityConfig{
+			LimitClassDigestAssertionPresets: map[string]config.LimitClassDigestAssertionPreset{
+				"base-safety": {
+					Rules: []string{"exists"},
+				},
+				"strict-severity": {
+					PresetChain: []string{"base-safety"},
+					Groups: []config.LimitClassDigestAssertionGroup{{
+						Operator: "allOf",
+						Rules:    []string{"regex:^crit"},
+					}},
+				},
+			},
+			LimitClassDigestExplainDiffProfiles: map[string]config.LimitClassDigestExplainDiffProfile{
+				"pager-audit": {
+					AssertFromPresets: map[string][]string{
+						"limitClassDigestMinSeverity": {"strict-severity"},
+					},
+					AssertFromRules: map[string][]string{
+						"limitClassDigestMinSeverity": {"not_contains:warning"},
+					},
+				},
+			},
+		},
+	}
+
+	_, _, _, _, _, fromRules, _, fromGroups, _, _, _, ok := resolveLimitClassDigestExplainBundleDiffInputs(cfg, []string{"pager-audit"}, nil, nil)
+	if !ok {
+		t.Fatalf("expected resolveLimitClassDigestExplainBundleDiffInputs to succeed")
+	}
+	if got := fromRules["limitClassDigestMinSeverity"]; len(got) != 2 || got[0] != "exists" || got[1] != "not_contains:warning" {
+		t.Fatalf("expected preset and inline rules to merge for limitClassDigestMinSeverity, got %+v", got)
+	}
+	if got := fromGroups["limitClassDigestMinSeverity"]; len(got) != 1 || got[0].Operator != "allOf" || len(got[0].Rules) != 1 || got[0].Rules[0] != "regex:^crit" {
+		t.Fatalf("expected preset groups to merge for limitClassDigestMinSeverity, got %+v", got)
+	}
+}
+
+func TestUpdateGatewayConfigReturnsManagedErrorWhenConfigUnavailable(t *testing.T) {
+	api := &ManagementAPI{
+		gateway: &gatewaypkg.Gateway{},
+		logger:  logging.NewLogger(false),
+	}
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/gateway/config", strings.NewReader(`{"server":{"port":8080}}`))
+	resp := httptest.NewRecorder()
+	api.updateGatewayConfig(resp, req)
+
+	if resp.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload ErrorResponse
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.Error.Code != coreerrors.CodeConfigNotAvailable {
+		t.Fatalf("expected code %s, got %s", coreerrors.CodeConfigNotAvailable, payload.Error.Code)
+	}
+}
+
+func TestEnrollmentEndpointsReturnManagedErrorWhenConfigUnavailable(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("failed to chdir temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
+
+	api := &ManagementAPI{
+		gateway: &gatewaypkg.Gateway{},
+		logger:  logging.NewLogger(false),
+	}
+	tokenRecord := enrollmentTokenRecord{
+		ID:        "tok",
+		Name:      "iket",
+		TokenHash: hashEnrollmentSecret("secret"),
+		CreatedAt: time.Now().UTC(),
+		ExpiresAt: time.Now().UTC().Add(time.Hour),
+	}
+	if err := saveEnrollmentTokenRecord(tokenRecord); err != nil {
+		t.Fatalf("failed to save test enrollment token: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		handler func(http.ResponseWriter, *http.Request)
+		request *http.Request
+	}{
+		{
+			name:    "create token",
+			handler: api.createEnrollmentToken,
+			request: httptest.NewRequest(http.MethodPost, "/api/v1/enrollment/tokens", strings.NewReader(`{"name":"iket"}`)),
+		},
+		{
+			name:    "redeem token",
+			handler: api.enrollClientCertificate,
+			request: httptest.NewRequest(http.MethodPost, "/api/v1/enrollment/certificates", strings.NewReader(`{"token":"tok.secret","csr_pem":"not-a-csr"}`)),
+		},
+		{
+			name:    "list tokens",
+			handler: api.listEnrollmentTokens,
+			request: httptest.NewRequest(http.MethodGet, "/api/v1/enrollment/tokens", nil),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := httptest.NewRecorder()
+			tt.handler(resp, tt.request)
+			if resp.Code != http.StatusInternalServerError {
+				t.Fatalf("expected 500, got %d: %s", resp.Code, resp.Body.String())
+			}
+			var payload ErrorResponse
+			if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+				t.Fatalf("failed to decode response: %v", err)
+			}
+			if payload.Error.Code != coreerrors.CodeConfigNotAvailable {
+				t.Fatalf("expected code %s, got %s", coreerrors.CodeConfigNotAvailable, payload.Error.Code)
+			}
+		})
+	}
+}
+
+func TestBuildGatewayConfigCandidateReplaceClearsOmittedFields(t *testing.T) {
+	current := gatewayConfigCandidateTestConfig()
+
+	candidate, err := buildGatewayConfigCandidate(current, "replace", map[string]interface{}{
+		"server": map[string]interface{}{"port": 9090},
+	})
+	if err != nil {
+		t.Fatalf("failed to build replacement candidate: %v", err)
+	}
+	if candidate.Server.Port != 9090 {
+		t.Fatalf("expected replacement port 9090, got %d", candidate.Server.Port)
+	}
+	if len(candidate.Services) != 0 {
+		t.Fatalf("replace candidate kept omitted services: %+v", candidate.Services)
+	}
+	if len(current.Services) == 0 {
+		t.Fatalf("source config was mutated")
+	}
+}
+
+func TestBuildGatewayConfigCandidateMergeKeepsOmittedFields(t *testing.T) {
+	current := gatewayConfigCandidateTestConfig()
+
+	candidate, err := buildGatewayConfigCandidate(current, "merge", map[string]interface{}{
+		"server": map[string]interface{}{"port": 9090},
+	})
+	if err != nil {
+		t.Fatalf("failed to build merged candidate: %v", err)
+	}
+	if candidate.Server.Port != 9090 {
+		t.Fatalf("expected merged port 9090, got %d", candidate.Server.Port)
+	}
+	if len(candidate.Services) != 1 || len(candidate.Services[0].Services) != 1 {
+		t.Fatalf("merge candidate dropped omitted services: %+v", candidate.Services)
+	}
+	if current.Server.Port != 8080 {
+		t.Fatalf("source config was mutated: port %d", current.Server.Port)
+	}
+}
+
+func TestAddClientMutationPolicyFailureDoesNotMutateLiveConfig(t *testing.T) {
+	cfg := clientMutationPolicyTestConfig()
+	api := newAPIKeyManagementAPI(t, cfg)
+
+	body := strings.NewReader(`{"id":"client-b","name":"Client B","key":"key-b","group":"ops","scopes":["read"],"tags":["blue"]}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/clients", body)
+	resp := httptest.NewRecorder()
+	api.addClient(resp, req)
+
+	if resp.Code == http.StatusOK {
+		t.Fatalf("expected mutation policy to reject unlabeled client add")
+	}
+	if got := apikeyClientCount(t, cfg); got != 1 {
+		t.Fatalf("client add mutated live config despite policy rejection; got %d clients", got)
+	}
+}
+
+func TestRemoveClientMutationPolicyFailureDoesNotMutateLiveConfig(t *testing.T) {
+	cfg := clientMutationPolicyTestConfig()
+	api := newAPIKeyManagementAPI(t, cfg)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/clients/key-a", nil)
+	req = mux.SetURLVars(req, map[string]string{"key": "key-a"})
+	resp := httptest.NewRecorder()
+	api.removeClient(resp, req)
+
+	if resp.Code == http.StatusOK {
+		t.Fatalf("expected mutation policy to reject unlabeled client removal")
+	}
+	if got := apikeyClientCount(t, cfg); got != 1 {
+		t.Fatalf("client removal mutated live config despite policy rejection; got %d clients", got)
+	}
+	if got := apikeyClientKeyAt(t, cfg, 0); got != "key-a" {
+		t.Fatalf("expected original client key to remain, got %q", got)
+	}
+}
+
+func TestAddClientGeneratesAPIKeyWhenOmitted(t *testing.T) {
+	cfg := clientMutationPolicyTestConfig()
+	hook := &recordingClientLifecycleHook{}
+	api := newAPIKeyManagementAPI(t, cfg,
+		WithAPIKeyGenerator(fixedAPIKeyGenerator{key: "iket_live_generated_test_key"}),
+		WithClientLifecycleHook(hook),
+	)
+
+	body := strings.NewReader(`{"id":"client-b","name":"Client B","group":"ops","scopes":["read"]}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/clients?label=client-test", body)
+	resp := httptest.NewRecorder()
+	api.addClient(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload APIResponse
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	data, ok := payload.Data.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected response data map, got %T", payload.Data)
+	}
+	if data["api_key"] != "iket_live_generated_test_key" {
+		t.Fatalf("expected generated api key to be returned once, got %+v", data)
+	}
+	if data["generated_key"] != true || data["one_time_secret"] != true {
+		t.Fatalf("expected generated one-time secret metadata, got %+v", data)
+	}
+	if data["key_fingerprint"] != apiKeyFingerprint("iket_live_generated_test_key") {
+		t.Fatalf("expected generated key fingerprint in response, got %+v", data)
+	}
+	liveCfg := api.gateway.GetConfig()
+	if got := apikeyClientCount(t, liveCfg); got != 2 {
+		t.Fatalf("expected generated client to be persisted, got %d clients", got)
+	}
+	if got := apikeyClientKeyAt(t, liveCfg, 1); got != "" {
+		t.Fatalf("expected generated key plaintext to stay out of config, got %q", got)
+	}
+	if got := apikeyClientHashAt(t, liveCfg, 1); got != credentials.APIKeyHash("iket_live_generated_test_key") {
+		t.Fatalf("expected generated key hash to be persisted for plugin runtime, got %q", got)
+	}
+	if hook.beforeAdd.Operation != ClientLifecycleOperationAdd || hook.beforeAdd.ClientID != "client-b" {
+		t.Fatalf("expected lifecycle hook to receive generated client add event, got %+v", hook.beforeAdd)
+	}
+	assertClientLifecycleIdentity(t, hook.beforeAdd, "client-b")
+	if !hook.beforeAdd.GeneratedKey || hook.beforeAdd.KeyFingerprint != apiKeyFingerprint("iket_live_generated_test_key") {
+		t.Fatalf("expected lifecycle event to carry generated key fingerprint only, got %+v", hook.beforeAdd)
+	}
+	if hook.afterAdd.ClientID != "client-b" {
+		t.Fatalf("expected lifecycle hook to observe successful client add, got %+v", hook.afterAdd)
+	}
+	assertClientLifecycleIdentity(t, hook.afterAdd, "client-b")
+}
+
+func TestListClientsRedactsAPIKeys(t *testing.T) {
+	cfg := clientMutationPolicyTestConfig()
+	api := newAPIKeyManagementAPI(t, cfg)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/clients", nil)
+	resp := httptest.NewRecorder()
+	api.listClients(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		Clients []map[string]interface{} `json:"clients"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode client list: %v", err)
+	}
+	if len(payload.Clients) != 1 {
+		t.Fatalf("expected one client, got %+v", payload.Clients)
+	}
+	client := payload.Clients[0]
+	if _, ok := client["key"]; ok {
+		t.Fatalf("expected client key to be redacted, got %+v", client)
+	}
+	if client["key_fingerprint"] != apiKeyFingerprint("key-a") || client["key_redacted"] != true {
+		t.Fatalf("expected redacted key metadata, got %+v", client)
+	}
+}
+
+func TestListClientsRequiresInventoryCapability(t *testing.T) {
+	cfg := clientMutationPolicyTestConfig()
+	registry := plugin.NewRegistry()
+	if err := registry.Register(&failingAPIKeyPlugin{}); err != nil {
+		t.Fatalf("failed to register api key plugin: %v", err)
+	}
+	api := NewManagementAPI(mustTestGateway(t, cfg), logging.NewLogger(false), registry)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/clients", nil)
+	resp := httptest.NewRecorder()
+	api.listClients(resp, req)
+
+	if resp.Code != http.StatusNotImplemented {
+		t.Fatalf("expected 501, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload ErrorResponse
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.Error.Code != coreerrors.CodePluginUnsupported {
+		t.Fatalf("expected unsupported plugin code, got %+v", payload.Error)
+	}
+}
+
+func TestGetClientReturnsRedactedInventoryRecord(t *testing.T) {
+	cfg := clientMutationPolicyTestConfig()
+	api := newAPIKeyManagementAPI(t, cfg)
+	fingerprint := credentials.APIKeyFingerprint("key-a")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/clients/"+fingerprint, nil)
+	req = mux.SetURLVars(req, map[string]string{"key": fingerprint})
+	resp := httptest.NewRecorder()
+	api.getClient(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload APIResponse
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	data, ok := payload.Data.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected response data map, got %T", payload.Data)
+	}
+	if data["id"] != "client-a" || data["key_fingerprint"] != fingerprint || data["key_redacted"] != true {
+		t.Fatalf("expected redacted client profile, got %+v", data)
+	}
+	if _, ok := data["key"]; ok {
+		t.Fatalf("expected get client response to omit raw key, got %+v", data)
+	}
+	if _, ok := data["key_hash"]; ok {
+		t.Fatalf("expected get client response to omit key hash, got %+v", data)
+	}
+}
+
+func TestGetClientReturnsNotFoundForUnknownCredential(t *testing.T) {
+	cfg := clientMutationPolicyTestConfig()
+	api := newAPIKeyManagementAPI(t, cfg)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/clients/missing", nil)
+	req = mux.SetURLVars(req, map[string]string{"key": "missing"})
+	resp := httptest.NewRecorder()
+	api.getClient(resp, req)
+
+	if resp.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload ErrorResponse
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.Error.Code != coreerrors.CodeClientNotFound {
+		t.Fatalf("expected client not found code, got %+v", payload.Error)
+	}
+}
+
+func TestGetClientIncludesRuntimeUsageTelemetry(t *testing.T) {
+	cfg := clientMutationPolicyTestConfig()
+	api := newAPIKeyManagementAPI(t, cfg)
+	assertAPIKeyRuntimeStatus(t, api, "key-a", http.StatusNoContent)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/clients/key-a", nil)
+	req = mux.SetURLVars(req, map[string]string{"key": "key-a"})
+	resp := httptest.NewRecorder()
+	api.getClient(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload APIResponse
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	data, ok := payload.Data.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected response data map, got %T", payload.Data)
+	}
+	if data["request_count"] != float64(1) {
+		t.Fatalf("expected runtime request count in client response, got %+v", data)
+	}
+	if stringValue(data["last_used_at"]) == "" {
+		t.Fatalf("expected runtime last_used_at in client response, got %+v", data)
+	}
+}
+
+func TestAddClientRejectsKeyWhenGenerateKeyRequested(t *testing.T) {
+	cfg := clientMutationPolicyTestConfig()
+	api := newAPIKeyManagementAPI(t, cfg)
+
+	body := strings.NewReader(`{"id":"client-b","name":"Client B","key":"manual-key","generate_key":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/clients?label=client-test", body)
+	resp := httptest.NewRecorder()
+	api.addClient(resp, req)
+
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if got := apikeyClientCount(t, cfg); got != 1 {
+		t.Fatalf("conflicting generated key request mutated config; got %d clients", got)
+	}
+}
+
+func TestAddClientLifecycleHookFailureDoesNotPersistConfig(t *testing.T) {
+	cfg := clientMutationPolicyTestConfig()
+	hook := &recordingClientLifecycleHook{
+		beforeAddErr: coreerrors.New(coreerrors.CodeForbidden, "billing subscription is not active"),
+	}
+	api := newAPIKeyManagementAPI(t, cfg,
+		WithAPIKeyGenerator(fixedAPIKeyGenerator{key: "iket_live_generated_test_key"}),
+		WithClientLifecycleHook(hook),
+	)
+
+	body := strings.NewReader(`{"id":"client-b","name":"Client B"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/clients?label=client-test", body)
+	resp := httptest.NewRecorder()
+	api.addClient(resp, req)
+
+	if resp.Code != http.StatusForbidden {
+		t.Fatalf("expected billing hook rejection 403, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if got := apikeyClientCount(t, cfg); got != 1 {
+		t.Fatalf("client add persisted config despite billing hook rejection; got %d clients", got)
+	}
+	if hook.beforeAdd.ClientID != "client-b" {
+		t.Fatalf("expected hook to receive client add event before rejection, got %+v", hook.beforeAdd)
+	}
+	if hook.afterAdd.ClientID != "" {
+		t.Fatalf("expected after hook to be skipped on rejected provisioning, got %+v", hook.afterAdd)
+	}
+}
+
+func TestAddClientRuntimeFailureDoesNotPersistConfig(t *testing.T) {
+	cfg := clientMutationPolicyTestConfig()
+	api := newFailingAPIKeyManagementAPI(t, cfg)
+
+	body := strings.NewReader(`{"id":"client-b","name":"Client B","key":"key-b"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/clients?label=client-test", body)
+	resp := httptest.NewRecorder()
+	api.addClient(resp, req)
+
+	if resp.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected runtime failure 503, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if got := apikeyClientCount(t, cfg); got != 1 {
+		t.Fatalf("client add persisted config despite runtime failure; got %d clients", got)
+	}
+}
+
+func TestRemoveClientRuntimeFailureDoesNotPersistConfig(t *testing.T) {
+	cfg := clientMutationPolicyTestConfig()
+	api := newFailingAPIKeyManagementAPI(t, cfg)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/clients/key-a?label=client-test", nil)
+	req = mux.SetURLVars(req, map[string]string{"key": "key-a"})
+	resp := httptest.NewRecorder()
+	api.removeClient(resp, req)
+
+	if resp.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected runtime failure 503, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if got := apikeyClientCount(t, cfg); got != 1 {
+		t.Fatalf("client removal persisted config despite runtime failure; got %d clients", got)
+	}
+	if got := apikeyClientKeyAt(t, cfg, 0); got != "key-a" {
+		t.Fatalf("expected original client key to remain, got %q", got)
+	}
+}
+
+func TestRemoveClientAcceptsKeyFingerprint(t *testing.T) {
+	cfg := clientMutationPolicyTestConfig()
+	api := newAPIKeyManagementAPI(t, cfg)
+	fingerprint := credentials.APIKeyFingerprint("key-a")
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/clients/"+fingerprint+"?label=client-test", nil)
+	req = mux.SetURLVars(req, map[string]string{"key": fingerprint})
+	resp := httptest.NewRecorder()
+	api.removeClient(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if got := apikeyClientCount(t, api.gateway.GetConfig()); got != 0 {
+		t.Fatalf("expected fingerprint removal to persist, got %d clients", got)
+	}
+}
+
+func TestRotateClientGeneratesHashedReplacementKey(t *testing.T) {
+	cfg := clientMutationPolicyTestConfig()
+	hook := &recordingClientLifecycleHook{}
+	api := newAPIKeyManagementAPI(t, cfg,
+		WithAPIKeyGenerator(fixedAPIKeyGenerator{key: "iket_live_rotated_test_key"}),
+		WithClientLifecycleHook(hook),
+	)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/clients/key-a/rotate?label=client-test", strings.NewReader(`{}`))
+	req = mux.SetURLVars(req, map[string]string{"key": "key-a"})
+	resp := httptest.NewRecorder()
+	api.rotateClient(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload APIResponse
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	data, ok := payload.Data.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected response data map, got %T", payload.Data)
+	}
+	if data["api_key"] != "iket_live_rotated_test_key" || data["one_time_secret"] != true {
+		t.Fatalf("expected rotated one-time secret, got %+v", data)
+	}
+	if data["old_key_fingerprint"] != credentials.APIKeyFingerprint("key-a") {
+		t.Fatalf("expected old fingerprint, got %+v", data)
+	}
+	if data["key_fingerprint"] != credentials.APIKeyFingerprint("iket_live_rotated_test_key") {
+		t.Fatalf("expected new fingerprint, got %+v", data)
+	}
+	liveCfg := api.gateway.GetConfig()
+	if got := apikeyClientCount(t, liveCfg); got != 1 {
+		t.Fatalf("expected one rotated client, got %d", got)
+	}
+	if got := apikeyClientKeyAt(t, liveCfg, 0); got != "" {
+		t.Fatalf("expected rotated key plaintext to stay out of config, got %q", got)
+	}
+	if got := apikeyClientHashAt(t, liveCfg, 0); got != credentials.APIKeyHash("iket_live_rotated_test_key") {
+		t.Fatalf("expected rotated key hash to be persisted, got %q", got)
+	}
+	if hook.beforeRotate.OldKeyFingerprint != credentials.APIKeyFingerprint("key-a") ||
+		hook.beforeRotate.KeyFingerprint != credentials.APIKeyFingerprint("iket_live_rotated_test_key") {
+		t.Fatalf("expected lifecycle hook to receive rotation fingerprints, got %+v", hook.beforeRotate)
+	}
+	assertClientLifecycleIdentity(t, hook.beforeRotate, "client-a")
+	if hook.afterRotate.ClientID != "client-a" {
+		t.Fatalf("expected lifecycle hook to observe successful rotation, got %+v", hook.afterRotate)
+	}
+	assertClientLifecycleIdentity(t, hook.afterRotate, "client-a")
+}
+
+func TestRotateClientAcceptsFingerprintLookup(t *testing.T) {
+	cfg := clientMutationPolicyTestConfig()
+	api := newAPIKeyManagementAPI(t, cfg)
+	fingerprint := credentials.APIKeyFingerprint("key-a")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/clients/"+fingerprint+"/rotate?label=client-test", strings.NewReader(`{"key":"manual-rotated-key"}`))
+	req = mux.SetURLVars(req, map[string]string{"key": fingerprint})
+	resp := httptest.NewRecorder()
+	api.rotateClient(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if got := apikeyClientHashAt(t, api.gateway.GetConfig(), 0); got != credentials.APIKeyHash("manual-rotated-key") {
+		t.Fatalf("expected manual rotated key hash, got %q", got)
+	}
+}
+
+func TestUpdateClientProfilePreservesSecretAndRefreshesRuntime(t *testing.T) {
+	cfg := clientMutationPolicyTestConfig()
+	hook := &recordingClientLifecycleHook{}
+	api := newAPIKeyManagementAPI(t, cfg, WithClientLifecycleHook(hook))
+
+	body := strings.NewReader(`{"name":"Client A Prime","group":"billing","scopes":["read","write"],"tags":["gold","beta"]}`)
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/clients/key-a?label=client-test", body)
+	req = mux.SetURLVars(req, map[string]string{"key": "key-a"})
+	resp := httptest.NewRecorder()
+	api.updateClient(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected update 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	liveCfg := api.gateway.GetConfig()
+	client := apikeyClientAt(t, liveCfg, 0)
+	if got := stringValue(client["name"]); got != "Client A Prime" {
+		t.Fatalf("expected updated client name, got %q", got)
+	}
+	if got := stringValue(client["group"]); got != "billing" {
+		t.Fatalf("expected updated client group, got %q", got)
+	}
+	if got := stringSliceValue(client["scopes"]); !reflect.DeepEqual(got, []string{"read", "write"}) {
+		t.Fatalf("expected updated scopes, got %+v", got)
+	}
+	if got := stringSliceValue(client["tags"]); !reflect.DeepEqual(got, []string{"gold", "beta"}) {
+		t.Fatalf("expected updated tags, got %+v", got)
+	}
+	if got := apikeyClientKeyAt(t, liveCfg, 0); got != "key-a" {
+		t.Fatalf("expected profile update to preserve existing key, got %q", got)
+	}
+	if hook.beforeUpdate.Operation != ClientLifecycleOperationUpdate || hook.beforeUpdate.ClientID != "client-a" {
+		t.Fatalf("expected update lifecycle event, got %+v", hook.beforeUpdate)
+	}
+	if hook.beforeUpdate.PreviousGroup != "ops" || hook.beforeUpdate.Group != "billing" {
+		t.Fatalf("expected lifecycle event to include previous and next group, got %+v", hook.beforeUpdate)
+	}
+	if !reflect.DeepEqual(hook.beforeUpdate.PreviousScopes, []string{"read"}) ||
+		!reflect.DeepEqual(hook.beforeUpdate.Scopes, []string{"read", "write"}) {
+		t.Fatalf("expected lifecycle event to include previous and next scopes, got %+v", hook.beforeUpdate)
+	}
+	if hook.afterUpdate.ClientID != "client-a" {
+		t.Fatalf("expected lifecycle hook to observe successful update, got %+v", hook.afterUpdate)
+	}
+	assertAPIKeyRuntimeClient(t, api, "key-a", "billing", []string{"read", "write"})
+}
+
+func TestUpdateClientLifecycleHookFailureDoesNotPersistConfig(t *testing.T) {
+	cfg := clientMutationPolicyTestConfig()
+	hook := &recordingClientLifecycleHook{
+		beforeUpdateErr: coreerrors.New(coreerrors.CodeForbidden, "billing account metadata is locked"),
+	}
+	api := newAPIKeyManagementAPI(t, cfg, WithClientLifecycleHook(hook))
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/clients/key-a?label=client-test", strings.NewReader(`{"group":"billing"}`))
+	req = mux.SetURLVars(req, map[string]string{"key": "key-a"})
+	resp := httptest.NewRecorder()
+	api.updateClient(resp, req)
+
+	if resp.Code != http.StatusForbidden {
+		t.Fatalf("expected billing hook rejection 403, got %d: %s", resp.Code, resp.Body.String())
+	}
+	client := apikeyClientAt(t, cfg, 0)
+	if got := stringValue(client["group"]); got != "ops" {
+		t.Fatalf("update persisted config despite billing hook rejection, got group %q", got)
+	}
+	if hook.afterUpdate.ClientID != "" {
+		t.Fatalf("expected after hook to be skipped on rejected update, got %+v", hook.afterUpdate)
+	}
+}
+
+func TestRotateClientLifecycleHookFailureDoesNotPersistConfig(t *testing.T) {
+	cfg := clientMutationPolicyTestConfig()
+	hook := &recordingClientLifecycleHook{
+		beforeRotateErr: coreerrors.New(coreerrors.CodeForbidden, "billing key mapping is locked"),
+	}
+	api := newAPIKeyManagementAPI(t, cfg,
+		WithAPIKeyGenerator(fixedAPIKeyGenerator{key: "iket_live_rotated_test_key"}),
+		WithClientLifecycleHook(hook),
+	)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/clients/key-a/rotate?label=client-test", strings.NewReader(`{}`))
+	req = mux.SetURLVars(req, map[string]string{"key": "key-a"})
+	resp := httptest.NewRecorder()
+	api.rotateClient(resp, req)
+
+	if resp.Code != http.StatusForbidden {
+		t.Fatalf("expected billing hook rejection 403, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if got := apikeyClientKeyAt(t, cfg, 0); got != "key-a" {
+		t.Fatalf("expected original key to remain after rejected rotation, got %q", got)
+	}
+	if hook.afterRotate.ClientID != "" {
+		t.Fatalf("expected after hook to be skipped on rejected rotation, got %+v", hook.afterRotate)
+	}
+}
+
+func TestDisableAndEnableClientUpdateRuntimeWithoutDeletingMetadata(t *testing.T) {
+	cfg := clientMutationPolicyTestConfig()
+	hook := &recordingClientLifecycleHook{}
+	api := newAPIKeyManagementAPI(t, cfg, WithClientLifecycleHook(hook))
+
+	disableReq := httptest.NewRequest(http.MethodPost, "/api/v1/clients/key-a/disable?label=client-test", nil)
+	disableReq = mux.SetURLVars(disableReq, map[string]string{"key": "key-a"})
+	disableResp := httptest.NewRecorder()
+	api.disableClient(disableResp, disableReq)
+
+	if disableResp.Code != http.StatusOK {
+		t.Fatalf("expected disable 200, got %d: %s", disableResp.Code, disableResp.Body.String())
+	}
+	liveCfg := api.gateway.GetConfig()
+	if got := apikeyClientCount(t, liveCfg); got != 1 {
+		t.Fatalf("expected disabled client metadata to remain, got %d clients", got)
+	}
+	if enabled := apikeyClientEnabledAt(t, liveCfg, 0); enabled {
+		t.Fatalf("expected client to be disabled in live config")
+	}
+	if hook.beforeStatus.Operation != ClientLifecycleOperationDisable || hook.beforeStatus.Enabled {
+		t.Fatalf("expected disable lifecycle event, got %+v", hook.beforeStatus)
+	}
+	if !hook.beforeStatus.PreviousEnabled {
+		t.Fatalf("expected disable event to include previous enabled state, got %+v", hook.beforeStatus)
+	}
+	assertAPIKeyRuntimeStatus(t, api, "key-a", http.StatusForbidden)
+
+	enableReq := httptest.NewRequest(http.MethodPost, "/api/v1/clients/key-a/enable?label=client-test", nil)
+	enableReq = mux.SetURLVars(enableReq, map[string]string{"key": "key-a"})
+	enableResp := httptest.NewRecorder()
+	api.enableClient(enableResp, enableReq)
+
+	if enableResp.Code != http.StatusOK {
+		t.Fatalf("expected enable 200, got %d: %s", enableResp.Code, enableResp.Body.String())
+	}
+	if enabled := apikeyClientEnabledAt(t, api.gateway.GetConfig(), 0); !enabled {
+		t.Fatalf("expected client to be enabled in live config")
+	}
+	if hook.afterStatus.Operation != ClientLifecycleOperationEnable || !hook.afterStatus.Enabled {
+		t.Fatalf("expected enable lifecycle event, got %+v", hook.afterStatus)
+	}
+	assertAPIKeyRuntimeStatus(t, api, "key-a", http.StatusNoContent)
+}
+
+func TestDisableClientLifecycleHookFailureDoesNotPersistConfig(t *testing.T) {
+	cfg := clientMutationPolicyTestConfig()
+	hook := &recordingClientLifecycleHook{
+		beforeStatusErr: coreerrors.New(coreerrors.CodeForbidden, "billing subscription status is locked"),
+	}
+	api := newAPIKeyManagementAPI(t, cfg, WithClientLifecycleHook(hook))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/clients/key-a/disable?label=client-test", nil)
+	req = mux.SetURLVars(req, map[string]string{"key": "key-a"})
+	resp := httptest.NewRecorder()
+	api.disableClient(resp, req)
+
+	if resp.Code != http.StatusForbidden {
+		t.Fatalf("expected billing hook rejection 403, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if enabled := apikeyClientEnabledAt(t, cfg, 0); !enabled {
+		t.Fatalf("disable persisted config despite billing hook rejection")
+	}
+	if hook.afterStatus.ClientID != "" {
+		t.Fatalf("expected after hook to be skipped on rejected status change, got %+v", hook.afterStatus)
+	}
+}
+
+func TestListPluginsIncludesDiagnosticsSummary(t *testing.T) {
+	cfg := apiKeyDiagnosticsTestConfig()
+	api := newAPIKeyManagementAPI(t, cfg)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/plugins", nil)
+	resp := httptest.NewRecorder()
+	api.listPlugins(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected plugin list 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode plugin list: %v", err)
+	}
+	plugins, ok := payload["plugins"].([]interface{})
+	if !ok {
+		t.Fatalf("expected plugin list payload, got %+v", payload)
+	}
+	var apiKeyInfo map[string]interface{}
+	for _, item := range plugins {
+		pluginInfo, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if stringValue(pluginInfo["name"]) == "apikey" {
+			apiKeyInfo = pluginInfo
+			break
+		}
+	}
+	if apiKeyInfo == nil {
+		t.Fatalf("expected API-key plugin in list, got %+v", plugins)
+	}
+	if stringValue(apiKeyInfo["type"]) != "auth" {
+		t.Fatalf("expected typed API-key plugin type auth, got %+v", apiKeyInfo["type"])
+	}
+	expectedCapabilities := []string{"typed", "tagged", "middleware", "health", "status_reporter", "diagnostics", "client_usage_registrar"}
+	if got := stringSliceValue(apiKeyInfo["capabilities"]); !reflect.DeepEqual(got, expectedCapabilities) {
+		t.Fatalf("expected API-key capabilities %v, got %v", expectedCapabilities, got)
+	}
+	if !boolValue(apiKeyInfo["diagnostics_available"]) {
+		t.Fatalf("expected diagnostics summary to be available, got %+v", apiKeyInfo)
+	}
+	if stringValue(apiKeyInfo["diagnostics_status"]) != "ok" {
+		t.Fatalf("expected ok diagnostics status, got %+v", apiKeyInfo["diagnostics_status"])
+	}
+	if _, ok := apiKeyInfo["diagnostics"]; ok {
+		t.Fatalf("expected plugin list to keep diagnostics compact, got full payload: %+v", apiKeyInfo["diagnostics"])
+	}
+	if warnings, ok := apiKeyInfo["diagnostics_warning_codes"]; ok {
+		if warningCodes := stringSliceValue(warnings); len(warningCodes) != 0 {
+			t.Fatalf("expected empty diagnostics warning codes, got %+v", warnings)
+		}
+	}
+}
+
+func TestListPluginsSupportsOperationalFilters(t *testing.T) {
+	cfg := apiKeyDiagnosticsTestConfig()
+	cfg.Plugins["diagnostics-only"] = map[string]interface{}{
+		"enabled": false,
+	}
+	api := newPluginFilterManagementAPI(t, cfg)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/plugins?type=auth&enabled=true&diagnostics_status=ok&capability=diagnostics&capabilities=client_usage_registrar,status_reporter", nil)
+	resp := httptest.NewRecorder()
+	api.listPlugins(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected filtered plugin list 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode filtered plugin list: %v", err)
+	}
+	if intValue(payload["total"]) != 1 {
+		t.Fatalf("expected one filtered plugin, got %+v", payload)
+	}
+	plugins, ok := payload["plugins"].([]interface{})
+	if !ok || len(plugins) != 1 {
+		t.Fatalf("expected one filtered plugin entry, got %+v", payload["plugins"])
+	}
+	apiKeyInfo, ok := plugins[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected plugin info map, got %T", plugins[0])
+	}
+	if stringValue(apiKeyInfo["name"]) != "apikey" {
+		t.Fatalf("expected API-key plugin after filters, got %+v", apiKeyInfo)
+	}
+	filters, ok := payload["filters"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected applied filters in response, got %+v", payload)
+	}
+	if stringValue(filters["type"]) != "auth" ||
+		!boolValue(filters["enabled"]) ||
+		stringValue(filters["diagnostics_status"]) != "ok" ||
+		!reflect.DeepEqual(stringSliceValue(filters["capabilities"]), []string{"diagnostics", "client_usage_registrar", "status_reporter"}) {
+		t.Fatalf("unexpected applied filter summary: %+v", filters)
+	}
+	summary, ok := payload["summary"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected plugin inventory summary, got %+v", payload)
+	}
+	if intValue(summary["total"]) != 2 ||
+		intValue(summary["matched"]) != 1 ||
+		intValue(summary["enabled"]) != 1 ||
+		intValue(summary["disabled"]) != 1 {
+		t.Fatalf("unexpected plugin summary counts: %+v", summary)
+	}
+	byType, _ := summary["by_type"].(map[string]interface{})
+	if intValue(byType["auth"]) != 1 || intValue(byType["unknown"]) != 1 {
+		t.Fatalf("unexpected plugin type facets: %+v", byType)
+	}
+	byDiagnosticsStatus, _ := summary["by_diagnostics_status"].(map[string]interface{})
+	if intValue(byDiagnosticsStatus["ok"]) != 1 || intValue(byDiagnosticsStatus["degraded"]) != 1 {
+		t.Fatalf("unexpected diagnostics status facets: %+v", byDiagnosticsStatus)
+	}
+	byCapability, _ := summary["by_capability"].(map[string]interface{})
+	if intValue(byCapability["diagnostics"]) != 2 ||
+		intValue(byCapability["client_usage_registrar"]) != 1 ||
+		intValue(byCapability["status_reporter"]) != 1 {
+		t.Fatalf("unexpected plugin capability facets: %+v", byCapability)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/plugins?enabled=false&capability=diagnostics&diagnostics_status=degraded", nil)
+	resp = httptest.NewRecorder()
+	api.listPlugins(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected diagnostics-only filtered list 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	payload = map[string]interface{}{}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode diagnostics-only filtered list: %v", err)
+	}
+	plugins, ok = payload["plugins"].([]interface{})
+	if intValue(payload["total"]) != 1 || !ok || len(plugins) != 1 {
+		t.Fatalf("expected one diagnostics-only plugin entry, got %+v", payload)
+	}
+	diagnosticsOnlyInfo, ok := plugins[0].(map[string]interface{})
+	if !ok || stringValue(diagnosticsOnlyInfo["name"]) != "diagnostics-only" {
+		t.Fatalf("expected diagnostics-only plugin after filters, got %+v", plugins[0])
+	}
+	if stringValue(diagnosticsOnlyInfo["diagnostics_status"]) != "degraded" {
+		t.Fatalf("expected degraded diagnostics status, got %+v", diagnosticsOnlyInfo)
+	}
+}
+
+func TestListPluginsRejectsInvalidEnabledFilter(t *testing.T) {
+	cfg := apiKeyDiagnosticsTestConfig()
+	api := newAPIKeyManagementAPI(t, cfg)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/plugins?enabled=maybe", nil)
+	resp := httptest.NewRecorder()
+	api.listPlugins(resp, req)
+
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid enabled filter 400, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload ErrorResponse
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode invalid filter response: %v", err)
+	}
+	if payload.Error.Message != "enabled filter must be true or false" {
+		t.Fatalf("unexpected invalid filter message: %+v", payload.Error)
+	}
+}
+
+func TestGetPluginDetailsIncludesTypedPluginAndDiagnostics(t *testing.T) {
+	cfg := apiKeyDiagnosticsTestConfig()
+	api := newAPIKeyManagementAPI(t, cfg)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/plugins/apikey", nil)
+	req = mux.SetURLVars(req, map[string]string{"name": "apikey"})
+	resp := httptest.NewRecorder()
+	api.getPluginDetails(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected plugin details 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode plugin details: %v", err)
+	}
+	if payload["type"] != "auth" {
+		t.Fatalf("expected typed API-key plugin type auth, got %+v", payload["type"])
+	}
+	expectedCapabilities := []string{"typed", "tagged", "middleware", "health", "status_reporter", "diagnostics", "client_usage_registrar"}
+	if got := stringSliceValue(payload["capabilities"]); !reflect.DeepEqual(got, expectedCapabilities) {
+		t.Fatalf("expected API-key capabilities %v, got %v", expectedCapabilities, got)
+	}
+	diagnostics, ok := payload["diagnostics"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected plugin diagnostics, got %+v", payload)
+	}
+	if diagnostics["status"] != "ok" {
+		t.Fatalf("expected ok diagnostics status, got %+v", diagnostics["status"])
+	}
+	if warningCodes, ok := diagnostics["warning_codes"].([]interface{}); !ok || len(warningCodes) != 0 {
+		t.Fatalf("expected empty diagnostics warning codes, got %+v", diagnostics["warning_codes"])
+	}
+	usageObservers, ok := diagnostics["usage_observers"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected usage observer diagnostics, got %+v", diagnostics)
+	}
+	if usageObservers["status"] != "ok" ||
+		usageObservers["delivery_mode"] != "async" ||
+		intValue(usageObservers["registered"]) != 0 ||
+		intValue(usageObservers["named"]) != 0 ||
+		intValue(usageObservers["unnamed"]) != 0 ||
+		stringValue(usageObservers["timeout"]) != "250ms" ||
+		intValue(usageObservers["async_max_in_flight"]) != 7 {
+		t.Fatalf("unexpected usage observer diagnostics: %+v", usageObservers)
+	}
+	if names, ok := usageObservers["names"].([]interface{}); !ok || len(names) != 0 {
+		t.Fatalf("expected empty usage observer names, got %+v", usageObservers["names"])
+	}
+	if warningCodes, ok := usageObservers["warning_codes"].([]interface{}); !ok || len(warningCodes) != 0 {
+		t.Fatalf("expected empty usage observer warning codes, got %+v", usageObservers["warning_codes"])
+	}
+}
+
+func TestGetPluginStatusSupportsDiagnosticsOnlyPlugins(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Plugins: map[string]map[string]interface{}{
+			"diagnostics-only": {
+				"enabled": true,
+			},
+		},
+	}
+	registry := plugin.NewRegistry()
+	if err := registry.Register(&managementDiagnosticsOnlyPlugin{
+		name: "diagnostics-only",
+		diagnostics: map[string]interface{}{
+			"status":        "degraded",
+			"warning_codes": []string{"export_backlog"},
+		},
+	}); err != nil {
+		t.Fatalf("failed to register diagnostics-only plugin: %v", err)
+	}
+	api := NewManagementAPI(mustTestGateway(t, cfg), logging.NewLogger(false), registry)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/plugins/diagnostics-only/status", nil)
+	req = mux.SetURLVars(req, map[string]string{"name": "diagnostics-only"})
+	resp := httptest.NewRecorder()
+	api.getPluginStatus(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected plugin status 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode plugin status: %v", err)
+	}
+	if stringValue(payload["status"]) != "degraded" {
+		t.Fatalf("expected diagnostics status fallback, got %+v", payload["status"])
+	}
+	if stringValue(payload["status_source"]) != "diagnostics" {
+		t.Fatalf("expected diagnostics status source, got %+v", payload["status_source"])
+	}
+	diagnostics, ok := payload["diagnostics"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected diagnostics payload, got %+v", payload)
+	}
+	if warningCodes := stringSliceValue(diagnostics["warning_codes"]); !reflect.DeepEqual(warningCodes, []string{"export_backlog"}) {
+		t.Fatalf("expected diagnostics warning codes, got %+v", diagnostics["warning_codes"])
+	}
+}
+
+func apiKeyDiagnosticsTestConfig() *config.Config {
+	return &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Plugins: map[string]map[string]interface{}{
+			"apikey": {
+				"enabled":                            true,
+				"usage_observer_async":               true,
+				"usage_observer_timeout":             "250ms",
+				"usage_observer_async_max_in_flight": 7,
+				"clients": []interface{}{
+					map[string]interface{}{
+						"id":       "client-a",
+						"name":     "Client A",
+						"key_hash": credentials.APIKeyHash("secret"),
+					},
+				},
+			},
+		},
+	}
+}
+
+func TestRemoveClientLifecycleHookFailureDoesNotPersistConfig(t *testing.T) {
+	cfg := clientMutationPolicyTestConfig()
+	hook := &recordingClientLifecycleHook{
+		beforeRemoveErr: coreerrors.New(coreerrors.CodeForbidden, "billing subscription is locked"),
+	}
+	api := newAPIKeyManagementAPI(t, cfg, WithClientLifecycleHook(hook))
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/clients/key-a?label=client-test", nil)
+	req = mux.SetURLVars(req, map[string]string{"key": "key-a"})
+	resp := httptest.NewRecorder()
+	api.removeClient(resp, req)
+
+	if resp.Code != http.StatusForbidden {
+		t.Fatalf("expected billing hook rejection 403, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if got := apikeyClientCount(t, cfg); got != 1 {
+		t.Fatalf("client removal persisted config despite billing hook rejection; got %d clients", got)
+	}
+	if hook.beforeRemove.ClientID != "client-a" || hook.beforeRemove.KeyFingerprint != apiKeyFingerprint("key-a") {
+		t.Fatalf("expected hook to receive removed client fingerprint, got %+v", hook.beforeRemove)
+	}
+	assertClientLifecycleIdentity(t, hook.beforeRemove, "client-a")
+	if hook.afterRemove.ClientID != "" {
+		t.Fatalf("expected after hook to be skipped on rejected removal, got %+v", hook.afterRemove)
+	}
+}
+
+func TestUpdatePluginConfigPolicyFailureDoesNotMutateRuntime(t *testing.T) {
+	cfg := pluginMutationPolicyTestConfig()
+	api, statefulPlugin := newStatefulPluginManagementAPI(t, cfg)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/plugins/stateful/config", strings.NewReader(`{"enabled":false}`))
+	req = mux.SetURLVars(req, map[string]string{"name": "stateful"})
+	resp := httptest.NewRecorder()
+	api.updatePluginConfig(resp, req)
+
+	if resp.Code == http.StatusOK {
+		t.Fatalf("expected mutation policy to reject unlabeled plugin config update")
+	}
+	if !statefulPlugin.enabled {
+		t.Fatalf("plugin runtime was mutated despite policy rejection")
+	}
+	if statefulPlugin.initializeCalls != 1 {
+		t.Fatalf("expected policy rejection to skip runtime initialize, got %d calls", statefulPlugin.initializeCalls)
+	}
+	if enabled, _ := cfg.Plugins["stateful"]["enabled"].(bool); !enabled {
+		t.Fatalf("live plugin config was mutated despite policy rejection")
+	}
+}
+
+func TestDisablePluginPolicyFailureDoesNotMutateRuntime(t *testing.T) {
+	cfg := pluginMutationPolicyTestConfig()
+	api, statefulPlugin := newStatefulPluginManagementAPI(t, cfg)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/plugins/stateful/disable", nil)
+	req = mux.SetURLVars(req, map[string]string{"name": "stateful"})
+	resp := httptest.NewRecorder()
+	api.disablePlugin(resp, req)
+
+	if resp.Code == http.StatusOK {
+		t.Fatalf("expected mutation policy to reject unlabeled plugin disable")
+	}
+	if !statefulPlugin.enabled {
+		t.Fatalf("plugin runtime was mutated despite policy rejection")
+	}
+	if statefulPlugin.initializeCalls != 1 {
+		t.Fatalf("expected policy rejection to skip runtime initialize, got %d calls", statefulPlugin.initializeCalls)
+	}
+	if enabled, _ := cfg.Plugins["stateful"]["enabled"].(bool); !enabled {
+		t.Fatalf("live plugin config was mutated despite policy rejection")
+	}
+}
+
+type managementStatefulPlugin struct {
+	name            string
+	enabled         bool
+	initializeCalls int
+}
+
+func (p *managementStatefulPlugin) Name() string {
+	return p.name
+}
+
+func (p *managementStatefulPlugin) Initialize(pluginCfg map[string]interface{}) error {
+	p.initializeCalls++
+	enabled, ok := pluginCfg["enabled"].(bool)
+	if !ok {
+		enabled = true
+	}
+	p.enabled = enabled
+	return nil
+}
+
+type managementDiagnosticsOnlyPlugin struct {
+	name        string
+	diagnostics map[string]interface{}
+}
+
+func (p *managementDiagnosticsOnlyPlugin) Name() string {
+	return p.name
+}
+
+func (p *managementDiagnosticsOnlyPlugin) Initialize(map[string]interface{}) error {
+	return nil
+}
+
+func (p *managementDiagnosticsOnlyPlugin) Diagnostics() map[string]interface{} {
+	return p.diagnostics
+}
+
+func newPluginFilterManagementAPI(t *testing.T, cfg *config.Config) *ManagementAPI {
+	t.Helper()
+	registry := plugin.NewRegistry()
+	apiKeyPlugin := &apikeyplugin.APIKeyPlugin{}
+	pluginCfg, _ := cfg.GetPluginConfig("apikey")
+	if err := apiKeyPlugin.Initialize(pluginCfg); err != nil {
+		t.Fatalf("failed to initialize api key plugin: %v", err)
+	}
+	if err := registry.Register(apiKeyPlugin); err != nil {
+		t.Fatalf("failed to register api key plugin: %v", err)
+	}
+	if err := registry.Register(&managementDiagnosticsOnlyPlugin{
+		name: "diagnostics-only",
+		diagnostics: map[string]interface{}{
+			"status":        "degraded",
+			"warning_codes": []string{"export_backlog"},
+		},
+	}); err != nil {
+		t.Fatalf("failed to register diagnostics-only plugin: %v", err)
+	}
+	return NewManagementAPI(mustTestGateway(t, cfg), logging.NewLogger(false), registry)
+}
+
+func newStatefulPluginManagementAPI(t *testing.T, cfg *config.Config) (*ManagementAPI, *managementStatefulPlugin) {
+	t.Helper()
+	registry := plugin.NewRegistry()
+	statefulPlugin := &managementStatefulPlugin{name: "stateful"}
+	pluginCfg, _ := cfg.GetPluginConfig("stateful")
+	if err := statefulPlugin.Initialize(pluginCfg); err != nil {
+		t.Fatalf("failed to initialize stateful plugin: %v", err)
+	}
+	if err := registry.Register(statefulPlugin); err != nil {
+		t.Fatalf("failed to register stateful plugin: %v", err)
+	}
+	return NewManagementAPI(mustTestGateway(t, cfg), logging.NewLogger(false), registry), statefulPlugin
+}
+
+func pluginMutationPolicyTestConfig() *config.Config {
+	return &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			MutationPolicy: config.MutationPolicy{
+				Enabled:        true,
+				RequireLabel:   true,
+				EnforcedScopes: []string{"plugins"},
+			},
+		},
+		Plugins: map[string]map[string]interface{}{
+			"stateful": {
+				"enabled": true,
+			},
+		},
+	}
+}
+
+func newAPIKeyManagementAPI(t *testing.T, cfg *config.Config, options ...ManagementAPIOption) *ManagementAPI {
+	t.Helper()
+	registry := plugin.NewRegistry()
+	apiKeyPlugin := &apikeyplugin.APIKeyPlugin{}
+	pluginCfg, _ := cfg.GetPluginConfig("apikey")
+	if err := apiKeyPlugin.Initialize(pluginCfg); err != nil {
+		t.Fatalf("failed to initialize api key plugin: %v", err)
+	}
+	if err := registry.Register(apiKeyPlugin); err != nil {
+		t.Fatalf("failed to register api key plugin: %v", err)
+	}
+	return NewManagementAPI(mustTestGateway(t, cfg), logging.NewLogger(false), registry, options...)
+}
+
+type fixedAPIKeyGenerator struct {
+	key string
+}
+
+func (g fixedAPIKeyGenerator) GenerateAPIKey() (string, error) {
+	return g.key, nil
+}
+
+type recordingClientLifecycleHook struct {
+	beforeAdd       ClientLifecycleEvent
+	afterAdd        ClientLifecycleEvent
+	beforeStatus    ClientLifecycleEvent
+	afterStatus     ClientLifecycleEvent
+	beforeUpdate    ClientLifecycleEvent
+	afterUpdate     ClientLifecycleEvent
+	beforeRotate    ClientLifecycleEvent
+	afterRotate     ClientLifecycleEvent
+	beforeRemove    ClientLifecycleEvent
+	afterRemove     ClientLifecycleEvent
+	beforeAddErr    error
+	beforeStatusErr error
+	beforeUpdateErr error
+	beforeRotateErr error
+	beforeRemoveErr error
+}
+
+func assertClientLifecycleIdentity(t *testing.T, event ClientLifecycleEvent, clientID string) {
+	t.Helper()
+	if event.Identity == nil {
+		t.Fatalf("expected lifecycle event identity for %s, got nil in %+v", clientID, event)
+	}
+	if event.Identity.Kind != authcontext.PrincipalIdentityClient ||
+		event.Identity.Source != "apikey" ||
+		event.Identity.Value != clientID ||
+		event.Identity.Sensitive {
+		t.Fatalf("expected API-key client lifecycle identity for %s, got %+v", clientID, event.Identity)
+	}
+}
+
+func (h *recordingClientLifecycleHook) BeforeClientAdd(_ context.Context, event ClientLifecycleEvent) error {
+	h.beforeAdd = event
+	return h.beforeAddErr
+}
+
+func (h *recordingClientLifecycleHook) AfterClientAdd(_ context.Context, event ClientLifecycleEvent) {
+	h.afterAdd = event
+}
+
+func (h *recordingClientLifecycleHook) BeforeClientStatusChange(_ context.Context, event ClientLifecycleEvent) error {
+	h.beforeStatus = event
+	return h.beforeStatusErr
+}
+
+func (h *recordingClientLifecycleHook) AfterClientStatusChange(_ context.Context, event ClientLifecycleEvent) {
+	h.afterStatus = event
+}
+
+func (h *recordingClientLifecycleHook) BeforeClientUpdate(_ context.Context, event ClientLifecycleEvent) error {
+	h.beforeUpdate = event
+	return h.beforeUpdateErr
+}
+
+func (h *recordingClientLifecycleHook) AfterClientUpdate(_ context.Context, event ClientLifecycleEvent) {
+	h.afterUpdate = event
+}
+
+func (h *recordingClientLifecycleHook) BeforeClientRotate(_ context.Context, event ClientLifecycleEvent) error {
+	h.beforeRotate = event
+	return h.beforeRotateErr
+}
+
+func (h *recordingClientLifecycleHook) AfterClientRotate(_ context.Context, event ClientLifecycleEvent) {
+	h.afterRotate = event
+}
+
+func (h *recordingClientLifecycleHook) BeforeClientRemove(_ context.Context, event ClientLifecycleEvent) error {
+	h.beforeRemove = event
+	return h.beforeRemoveErr
+}
+
+func (h *recordingClientLifecycleHook) AfterClientRemove(_ context.Context, event ClientLifecycleEvent) {
+	h.afterRemove = event
+}
+
+type failingAPIKeyPlugin struct {
+	initializeCalls int
+}
+
+func (p *failingAPIKeyPlugin) Name() string {
+	return "apikey"
+}
+
+func (p *failingAPIKeyPlugin) Initialize(map[string]interface{}) error {
+	p.initializeCalls++
+	if p.initializeCalls > 1 {
+		return fmt.Errorf("api key runtime reload failed")
+	}
+	return nil
+}
+
+func newFailingAPIKeyManagementAPI(t *testing.T, cfg *config.Config) *ManagementAPI {
+	t.Helper()
+	registry := plugin.NewRegistry()
+	apiKeyPlugin := &failingAPIKeyPlugin{}
+	pluginCfg, _ := cfg.GetPluginConfig("apikey")
+	if err := apiKeyPlugin.Initialize(pluginCfg); err != nil {
+		t.Fatalf("failed to initialize api key plugin: %v", err)
+	}
+	if err := registry.Register(apiKeyPlugin); err != nil {
+		t.Fatalf("failed to register api key plugin: %v", err)
+	}
+	return NewManagementAPI(mustTestGateway(t, cfg), logging.NewLogger(false), registry)
+}
+
+func clientMutationPolicyTestConfig() *config.Config {
+	return &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			MutationPolicy: config.MutationPolicy{
+				Enabled:        true,
+				RequireLabel:   true,
+				EnforcedScopes: []string{"clients"},
+			},
+		},
+		Plugins: map[string]map[string]interface{}{
+			"apikey": {
+				"enabled": true,
+				"clients": []interface{}{
+					map[string]interface{}{
+						"id":     "client-a",
+						"name":   "Client A",
+						"key":    "key-a",
+						"group":  "ops",
+						"scopes": []interface{}{"read"},
+						"tags":   []interface{}{"green"},
+					},
+				},
+			},
+		},
+	}
+}
+
+func apikeyClientCount(t *testing.T, cfg *config.Config) int {
+	t.Helper()
+	clients, ok := cfg.Plugins["apikey"]["clients"].([]interface{})
+	if !ok {
+		t.Fatalf("expected api key clients slice, got %T", cfg.Plugins["apikey"]["clients"])
+	}
+	return len(clients)
+}
+
+func apikeyClientKeyAt(t *testing.T, cfg *config.Config, index int) string {
+	t.Helper()
+	client := apikeyClientAt(t, cfg, index)
+	return stringValue(client["key"])
+}
+
+func apikeyClientHashAt(t *testing.T, cfg *config.Config, index int) string {
+	t.Helper()
+	client := apikeyClientAt(t, cfg, index)
+	return stringValue(client["key_hash"])
+}
+
+func apikeyClientEnabledAt(t *testing.T, cfg *config.Config, index int) bool {
+	t.Helper()
+	return apikeyClientEntryEnabled(apikeyClientAt(t, cfg, index))
+}
+
+func apikeyClientAt(t *testing.T, cfg *config.Config, index int) map[string]interface{} {
+	t.Helper()
+	clients, ok := cfg.Plugins["apikey"]["clients"].([]interface{})
+	if !ok {
+		t.Fatalf("expected api key clients slice, got %T", cfg.Plugins["apikey"]["clients"])
+	}
+	if index < 0 || index >= len(clients) {
+		t.Fatalf("client index %d out of range for %d clients", index, len(clients))
+	}
+	client, ok := clients[index].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected client map, got %T", clients[index])
+	}
+	return client
+}
+
+func assertAPIKeyRuntimeStatus(t *testing.T, api *ManagementAPI, key string, expectedStatus int) {
+	t.Helper()
+	p, err := api.registry.Get("apikey")
+	if err != nil {
+		t.Fatalf("failed to get api key plugin: %v", err)
+	}
+	apiKeyPlugin, ok := p.(*apikeyplugin.APIKeyPlugin)
+	if !ok {
+		t.Fatalf("expected api key plugin, got %T", p)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("X-API-Key", key)
+	resp := httptest.NewRecorder()
+	apiKeyPlugin.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})).ServeHTTP(resp, req)
+	if resp.Code != expectedStatus {
+		t.Fatalf("expected api key runtime status %d, got %d: %s", expectedStatus, resp.Code, resp.Body.String())
+	}
+}
+
+func assertAPIKeyRuntimeClient(t *testing.T, api *ManagementAPI, key, expectedGroup string, expectedScopes []string) {
+	t.Helper()
+	p, err := api.registry.Get("apikey")
+	if err != nil {
+		t.Fatalf("failed to get api key plugin: %v", err)
+	}
+	apiKeyPlugin, ok := p.(*apikeyplugin.APIKeyPlugin)
+	if !ok {
+		t.Fatalf("expected api key plugin, got %T", p)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("X-API-Key", key)
+	resp := httptest.NewRecorder()
+	apiKeyPlugin.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotGroup, ok := authcontext.APIKeyGroup(r.Context())
+		if !ok || gotGroup != expectedGroup {
+			t.Fatalf("expected runtime group %q, got %q ok=%v", expectedGroup, gotGroup, ok)
+		}
+		gotScopes, _ := authcontext.APIKeyScopes(r.Context())
+		if !reflect.DeepEqual(gotScopes, expectedScopes) {
+			t.Fatalf("expected runtime scopes %+v, got %+v", expectedScopes, gotScopes)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})).ServeHTTP(resp, req)
+	if resp.Code != http.StatusNoContent {
+		t.Fatalf("expected runtime request to pass, got %d: %s", resp.Code, resp.Body.String())
+	}
+}
+
+func gatewayConfigCandidateTestConfig() *config.Config {
+	return &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Services: []config.ServiceConfig{{
+			Version: 1,
+			Services: []config.Service{{
+				Name: "identity",
+				Host: "http://identity:8080",
+				Routes: []config.RouterConfig{{
+					Path:    "/auth",
+					Methods: []string{"GET"},
+					Backends: []config.Backend{{
+						URLPattern: "/auth",
+					}},
+				}},
+			}},
+		}},
+	}
+}
+
 func TestGetGatewayLimitHitsReturnsAggregatedCounters(t *testing.T) {
 	cfg := &config.Config{
 		Server: config.ServerConfig{Port: 8080},
@@ -3363,6 +6372,13 @@ func TestGetGatewayLimitClassesReturnsRecentClassPressure(t *testing.T) {
 				"vip-jwt": {
 					KeyType:     "jwt_sub",
 					BucketRegex: "^vip-",
+				},
+			},
+			MutationPolicy: config.MutationPolicy{
+				LimitClassAlertNotifications: config.PolicyAlertNotificationPolicy{
+					Enabled:  true,
+					Window:   "5m",
+					MinCount: 3,
 				},
 			},
 		},
@@ -4921,14 +7937,527 @@ func TestReconcileGatewayLimitClassAlertNotificationsAutoEmitsAndHonorsInterval(
 	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "vip-c", 0, base.Add(-10*time.Second))
 
 	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
-	api.reconcileGatewayLimitClassAlertNotifications(base)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/gateway/limit-class-alerts/notify?window=5m&min_count=3", nil)
+	resp := httptest.NewRecorder()
+	api.notifyGatewayLimitClassAlerts(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200 from notify-limit-class-alerts, got %d: %s", resp.Code, resp.Body.String())
+	}
 	if len(receivedEvents) != 2 {
 		t.Fatalf("expected digest plus one class alert on first reconcile, got %d (%v)", len(receivedEvents), receivedEvents)
 	}
 
+	api.queueDigestNotifyMu.Lock()
+	api.lastLimitClassAlertNotificationAt = base
+	api.queueDigestNotifyMu.Unlock()
 	api.reconcileGatewayLimitClassAlertNotifications(base.Add(30 * time.Second))
 	if len(receivedEvents) != 2 {
 		t.Fatalf("expected min interval to suppress duplicate class notifications, got %d (%v)", len(receivedEvents), receivedEvents)
+	}
+}
+
+func TestReconcileGatewayLimitClassAlertNotificationsHonorsDetailedMinBucketClassPriority(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("failed to chdir temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
+
+	type receivedEvent struct {
+		Event                string
+		Count                int
+		SummarizedCount      int
+		SummarizedByClassLen int
+		TopSummarizedClass   string
+	}
+	received := make([]receivedEvent, 0, 8)
+	server := newNotificationTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode webhook payload: %v", err)
+		}
+		data, _ := payload["data"].(map[string]interface{})
+		count := 0
+		if alerts, ok := data["alerts"].([]interface{}); ok {
+			count = len(alerts)
+		}
+		summarizedCount := 0
+		if value, ok := data["summarized_class_alert_count"]; ok {
+			summarizedCount = intValue(value)
+		}
+		summarizedByClassLen := 0
+		topSummarizedClass := ""
+		if summarized, ok := data["summarized_class_alerts_by_class"].([]interface{}); ok {
+			summarizedByClassLen = len(summarized)
+			if len(summarized) > 0 {
+				if entry, ok := summarized[0].(map[string]interface{}); ok {
+					topSummarizedClass = strings.TrimSpace(fmt.Sprint(entry["bucket_class"]))
+				}
+			}
+		}
+		received = append(received, receivedEvent{
+			Event:                strings.TrimSpace(fmt.Sprint(payload["event"])),
+			Count:                count,
+			SummarizedCount:      summarizedCount,
+			SummarizedByClassLen: summarizedByClassLen,
+			TopSummarizedClass:   topSummarizedClass,
+		})
+		w.WriteHeader(http.StatusOK)
+	})
+	defer server.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitAlertBucketClasses: map[string]config.LimitAlertBucketClassConfig{
+				"vip-jwt": {
+					KeyType:     "jwt_sub",
+					BucketRegex: "^vip-",
+					Priority:    10,
+				},
+				"standard-jwt": {
+					KeyType:     "jwt_sub",
+					BucketRegex: "^std-",
+					Priority:    1,
+				},
+			},
+			MutationPolicy: config.MutationPolicy{
+				LimitClassAlertNotifications: config.PolicyAlertNotificationPolicy{
+					Enabled:                        true,
+					Interval:                       "1m",
+					MinNotificationInterval:        "1m",
+					Window:                         "5m",
+					MinCount:                       3,
+					MinSeverity:                    "warning",
+					DetailedMinBucketClassPriority: 5,
+				},
+			},
+			NotificationWebhooks: []config.NotificationWebhook{
+				{
+					URL:    server.URL,
+					Events: []string{"gateway.limit_class_alert_digest", "gateway.limit_class_alert"},
+				},
+			},
+		},
+		Services: []config.ServiceConfig{{
+			Version: 1,
+			Services: []config.Service{{
+				Name: "agent",
+				Host: "http://agent-default:8080",
+				Routes: []config.RouterConfig{{
+					Path:    "/ai/chat",
+					Methods: []string{"POST"},
+					Backends: []config.Backend{
+						{URLPattern: "/"},
+					},
+				}},
+			}},
+		}},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	route := cfg.Services[0].Services[0].Routes[0]
+	route.ServiceName = "agent"
+	base := time.Now().UTC()
+	for _, bucket := range []string{"vip-a", "vip-b", "vip-c"} {
+		gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", bucket, 0, base.Add(-20*time.Second))
+	}
+	for _, bucket := range []string{"std-a", "std-b", "std-c"} {
+		gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", bucket, 0, base.Add(-10*time.Second))
+	}
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	api.reconcileGatewayLimitClassAlertNotifications(base)
+	if len(received) != 3 {
+		t.Fatalf("expected digest plus two class alerts, got %d (%+v)", len(received), received)
+	}
+	digest := received[0]
+	if digest.Event != "gateway.limit_class_alert_digest" || digest.Count != 1 || digest.SummarizedCount != 1 || digest.SummarizedByClassLen != 1 || digest.TopSummarizedClass != "standard-jwt" {
+		t.Fatalf("expected digest to keep one detailed class alert and summarize one lower-priority class, got %+v", digest)
+	}
+}
+
+func TestReconcileGatewayLimitClassAlertNotificationsHonorsDetailedMaxBucketClasses(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("failed to chdir temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
+
+	type receivedEvent struct {
+		Event                string
+		Count                int
+		SummarizedCount      int
+		SummarizedByClassLen int
+		TopSummarizedClass   string
+	}
+	received := make([]receivedEvent, 0, 8)
+	server := newNotificationTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode webhook payload: %v", err)
+		}
+		data, _ := payload["data"].(map[string]interface{})
+		count := 0
+		if alerts, ok := data["alerts"].([]interface{}); ok {
+			count = len(alerts)
+		}
+		summarizedCount := 0
+		if value, ok := data["summarized_class_alert_count"]; ok {
+			summarizedCount = intValue(value)
+		}
+		summarizedByClassLen := 0
+		topSummarizedClass := ""
+		if summarized, ok := data["summarized_class_alerts_by_class"].([]interface{}); ok {
+			summarizedByClassLen = len(summarized)
+			if len(summarized) > 0 {
+				if entry, ok := summarized[0].(map[string]interface{}); ok {
+					topSummarizedClass = strings.TrimSpace(fmt.Sprint(entry["bucket_class"]))
+				}
+			}
+		}
+		received = append(received, receivedEvent{
+			Event:                strings.TrimSpace(fmt.Sprint(payload["event"])),
+			Count:                count,
+			SummarizedCount:      summarizedCount,
+			SummarizedByClassLen: summarizedByClassLen,
+			TopSummarizedClass:   topSummarizedClass,
+		})
+		w.WriteHeader(http.StatusOK)
+	})
+	defer server.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitAlertBucketClasses: map[string]config.LimitAlertBucketClassConfig{
+				"vip-jwt": {
+					KeyType:     "jwt_sub",
+					BucketRegex: "^vip-",
+					Priority:    10,
+				},
+				"gold-jwt": {
+					KeyType:     "jwt_sub",
+					BucketRegex: "^gold-",
+					Priority:    7,
+				},
+			},
+			MutationPolicy: config.MutationPolicy{
+				LimitClassAlertNotifications: config.PolicyAlertNotificationPolicy{
+					Enabled:                        true,
+					Interval:                       "1m",
+					MinNotificationInterval:        "1m",
+					Window:                         "5m",
+					MinCount:                       3,
+					MinSeverity:                    "warning",
+					DetailedMinBucketClassPriority: 5,
+					DetailedMaxBucketClasses:       1,
+				},
+			},
+			NotificationWebhooks: []config.NotificationWebhook{
+				{
+					URL:    server.URL,
+					Events: []string{"gateway.limit_class_alert_digest", "gateway.limit_class_alert"},
+				},
+			},
+		},
+		Services: []config.ServiceConfig{{
+			Version: 1,
+			Services: []config.Service{{
+				Name: "agent",
+				Host: "http://agent-default:8080",
+				Routes: []config.RouterConfig{{
+					Path:    "/ai/chat",
+					Methods: []string{"POST"},
+					Backends: []config.Backend{
+						{URLPattern: "/"},
+					},
+				}},
+			}},
+		}},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	route := cfg.Services[0].Services[0].Routes[0]
+	route.ServiceName = "agent"
+	base := time.Now().UTC()
+	for _, bucket := range []string{"vip-a", "vip-b", "vip-c"} {
+		gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", bucket, 0, base.Add(-20*time.Second))
+	}
+	for _, bucket := range []string{"gold-a", "gold-b", "gold-c"} {
+		gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", bucket, 0, base.Add(-10*time.Second))
+	}
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	api.reconcileGatewayLimitClassAlertNotifications(base)
+	if len(received) != 3 {
+		t.Fatalf("expected digest plus two class alerts, got %d (%+v)", len(received), received)
+	}
+	digest := received[0]
+	if digest.Event != "gateway.limit_class_alert_digest" || digest.Count != 1 || digest.SummarizedCount != 1 || digest.SummarizedByClassLen != 1 || digest.TopSummarizedClass != "gold-jwt" {
+		t.Fatalf("expected digest quota to keep only the top class detailed and summarize the next class, got %+v", digest)
+	}
+}
+
+func TestNotifyGatewayLimitClassAlertsShapesDigestPerWebhookBudget(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("failed to chdir temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
+
+	type digestView struct {
+		Count           int
+		SummarizedCount int
+	}
+	views := make([]digestView, 0, 2)
+	serverA := newNotificationTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode webhook payload: %v", err)
+		}
+		if strings.TrimSpace(fmt.Sprint(payload["event"])) == "gateway.limit_class_alert_digest" {
+			data, _ := payload["data"].(map[string]interface{})
+			count := 0
+			if alerts, ok := data["alerts"].([]interface{}); ok {
+				count = len(alerts)
+			}
+			views = append(views, digestView{
+				Count:           count,
+				SummarizedCount: intValue(data["summarized_class_alert_count"]),
+			})
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	defer serverA.Close()
+	serverB := newNotificationTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode webhook payload: %v", err)
+		}
+		if strings.TrimSpace(fmt.Sprint(payload["event"])) == "gateway.limit_class_alert_digest" {
+			data, _ := payload["data"].(map[string]interface{})
+			count := 0
+			if alerts, ok := data["alerts"].([]interface{}); ok {
+				count = len(alerts)
+			}
+			views = append(views, digestView{
+				Count:           count,
+				SummarizedCount: intValue(data["summarized_class_alert_count"]),
+			})
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	defer serverB.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitAlertBucketClasses: map[string]config.LimitAlertBucketClassConfig{
+				"vip-jwt":  {KeyType: "jwt_sub", BucketRegex: "^vip-", Priority: 10},
+				"gold-jwt": {KeyType: "jwt_sub", BucketRegex: "^gold-", Priority: 7},
+			},
+			LimitAlertProfiles: map[string]config.LimitAlertRecipientProfile{
+				"top-one": {LimitClassDigestMaxBucketClasses: 1},
+				"top-two": {LimitClassDigestMaxBucketClasses: 2},
+			},
+			NotificationWebhooks: []config.NotificationWebhook{
+				{URL: serverA.URL, Events: []string{"gateway.limit_class_alert_digest"}, LimitAlertProfile: "top-one"},
+				{URL: serverB.URL, Events: []string{"gateway.limit_class_alert_digest"}, LimitAlertProfile: "top-two"},
+			},
+		},
+		Services: []config.ServiceConfig{{
+			Version: 1,
+			Services: []config.Service{{
+				Name: "agent",
+				Host: "http://agent-default:8080",
+				Routes: []config.RouterConfig{{
+					Path:    "/ai/chat",
+					Methods: []string{"POST"},
+					Backends: []config.Backend{
+						{URLPattern: "/"},
+					},
+				}},
+			}},
+		}},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	route := cfg.Services[0].Services[0].Routes[0]
+	route.ServiceName = "agent"
+	now := time.Now().UTC()
+	for _, bucket := range []string{"vip-a", "vip-b", "vip-c"} {
+		gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", bucket, 0, now.Add(-20*time.Second))
+	}
+	for _, bucket := range []string{"gold-a", "gold-b", "gold-c"} {
+		gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", bucket, 0, now.Add(-10*time.Second))
+	}
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/gateway/limit-class-alerts/notify?window=5m&min_count=3", nil)
+	resp := httptest.NewRecorder()
+	api.notifyGatewayLimitClassAlerts(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if len(views) != 2 {
+		t.Fatalf("expected two per-webhook digest views, got %d (%+v)", len(views), views)
+	}
+	if views[0].Count != 1 || views[0].SummarizedCount != 1 {
+		t.Fatalf("expected top-one receiver to get one detailed class and one summarized class, got %+v", views[0])
+	}
+	if views[1].Count != 2 || views[1].SummarizedCount != 0 {
+		t.Fatalf("expected top-two receiver to get both detailed classes, got %+v", views[1])
+	}
+}
+
+func TestNotifyGatewayLimitClassAlertsShapesDigestPerWebhookSeverity(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("failed to chdir temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
+
+	type digestView struct {
+		Count           int
+		SummarizedCount int
+	}
+	views := make([]digestView, 0, 2)
+	serverA := newNotificationTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode webhook payload: %v", err)
+		}
+		if strings.TrimSpace(fmt.Sprint(payload["event"])) == "gateway.limit_class_alert_digest" {
+			data, _ := payload["data"].(map[string]interface{})
+			count := 0
+			if alerts, ok := data["alerts"].([]interface{}); ok {
+				count = len(alerts)
+			}
+			views = append(views, digestView{
+				Count:           count,
+				SummarizedCount: intValue(data["summarized_class_alert_count"]),
+			})
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	defer serverA.Close()
+	serverB := newNotificationTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode webhook payload: %v", err)
+		}
+		if strings.TrimSpace(fmt.Sprint(payload["event"])) == "gateway.limit_class_alert_digest" {
+			data, _ := payload["data"].(map[string]interface{})
+			count := 0
+			if alerts, ok := data["alerts"].([]interface{}); ok {
+				count = len(alerts)
+			}
+			views = append(views, digestView{
+				Count:           count,
+				SummarizedCount: intValue(data["summarized_class_alert_count"]),
+			})
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	defer serverB.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitAlertBucketClasses: map[string]config.LimitAlertBucketClassConfig{
+				"vip-jwt":  {KeyType: "jwt_sub", BucketRegex: "^vip-", Priority: 10},
+				"gold-jwt": {KeyType: "jwt_sub", BucketRegex: "^gold-", Priority: 7},
+			},
+			LimitAlertProfiles: map[string]config.LimitAlertRecipientProfile{
+				"critical-only": {LimitClassDigestMinSeverity: "critical"},
+				"warning-plus":  {LimitClassDigestMinSeverity: "warning"},
+			},
+			NotificationWebhooks: []config.NotificationWebhook{
+				{URL: serverA.URL, Events: []string{"gateway.limit_class_alert_digest"}, LimitAlertProfile: "critical-only"},
+				{URL: serverB.URL, Events: []string{"gateway.limit_class_alert_digest"}, LimitAlertProfile: "warning-plus"},
+			},
+		},
+		Services: []config.ServiceConfig{{
+			Version: 1,
+			Services: []config.Service{{
+				Name: "agent",
+				Host: "http://agent-default:8080",
+				Routes: []config.RouterConfig{{
+					Path:    "/ai/chat",
+					Methods: []string{"POST"},
+					Backends: []config.Backend{
+						{URLPattern: "/"},
+					},
+				}},
+			}},
+		}},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	route := cfg.Services[0].Services[0].Routes[0]
+	route.ServiceName = "agent"
+	now := time.Now().UTC()
+	for _, bucket := range []string{"vip-a", "vip-b", "vip-c", "vip-d", "vip-e", "vip-f", "vip-g", "vip-h", "vip-i", "vip-j", "vip-k", "vip-l"} {
+		gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", bucket, 0, now.Add(-20*time.Second))
+	}
+	for _, bucket := range []string{"gold-a", "gold-b", "gold-c"} {
+		gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", bucket, 0, now.Add(-10*time.Second))
+	}
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/gateway/limit-class-alerts/notify?window=5m&min_count=3", nil)
+	resp := httptest.NewRecorder()
+	api.notifyGatewayLimitClassAlerts(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if len(views) != 2 {
+		t.Fatalf("expected two per-webhook severity-shaped digest views, got %d (%+v)", len(views), views)
+	}
+	if views[0].Count != 1 || views[0].SummarizedCount != 1 {
+		t.Fatalf("expected critical-only receiver to keep only the critical class detailed, got %+v", views[0])
+	}
+	if views[1].Count != 2 || views[1].SummarizedCount != 0 {
+		t.Fatalf("expected warning-plus receiver to keep both classes detailed, got %+v", views[1])
 	}
 }
 
@@ -5150,7 +8679,35 @@ func TestNotifyGatewayLimitClassAlertsHonorsWebhookClassFiltersAndCooldown(t *te
 	}
 }
 
-func TestGetGatewayLimitClassIncidentsReturnsOpenIncidents(t *testing.T) {
+func TestNotifyGatewayLimitClassAlertsHonorsWebhookClassPriorityFloor(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("failed to chdir temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
+
+	received := make([]string, 0, 6)
+	server := newNotificationTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode webhook payload: %v", err)
+		}
+		data, _ := payload["data"].(map[string]interface{})
+		received = append(received,
+			strings.TrimSpace(fmt.Sprint(payload["event"]))+":"+
+				strings.TrimSpace(fmt.Sprint(data["bucket_class"]))+":"+
+				strings.TrimSpace(fmt.Sprint(data["bucket_class_priority"])))
+		w.WriteHeader(http.StatusOK)
+	})
+	defer server.Close()
+
 	cfg := &config.Config{
 		Server: config.ServerConfig{Port: 8080},
 		Security: config.SecurityConfig{
@@ -5158,6 +8715,24 @@ func TestGetGatewayLimitClassIncidentsReturnsOpenIncidents(t *testing.T) {
 				"vip-jwt": {
 					KeyType:     "jwt_sub",
 					BucketRegex: "^vip-",
+					Priority:    10,
+				},
+				"standard-jwt": {
+					KeyType:     "jwt_sub",
+					BucketRegex: "^std-",
+					Priority:    1,
+				},
+			},
+			LimitAlertProfiles: map[string]config.LimitAlertRecipientProfile{
+				"high-priority-only": {
+					MinLimitAlertBucketClassPriority: 5,
+				},
+			},
+			NotificationWebhooks: []config.NotificationWebhook{
+				{
+					URL:               server.URL,
+					Events:            []string{"gateway.limit_class_alert"},
+					LimitAlertProfile: "high-priority-only",
 				},
 			},
 		},
@@ -5182,13 +8757,79 @@ func TestGetGatewayLimitClassIncidentsReturnsOpenIncidents(t *testing.T) {
 	}
 	route := cfg.Services[0].Services[0].Routes[0]
 	route.ServiceName = "agent"
-	base := time.Now().UTC()
-	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "vip-a", 0, base.Add(-30*time.Second))
-	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "vip-b", 0, base.Add(-20*time.Second))
-	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "vip-c", 0, base.Add(-10*time.Second))
+	now := time.Now().UTC()
+	for _, bucket := range []string{"vip-a", "vip-b", "vip-c"} {
+		gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", bucket, 0, now.Add(-2*time.Minute))
+	}
+	for _, bucket := range []string{"std-a", "std-b", "std-c"} {
+		gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", bucket, 0, now.Add(-90*time.Second))
+	}
 
 	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
-	api.reconcileGatewayLimitClassAlertNotifications(base)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/gateway/limit-class-alerts/notify?window=5m&min_count=3", nil)
+	resp := httptest.NewRecorder()
+	api.notifyGatewayLimitClassAlerts(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if len(received) != 1 || received[0] != "gateway.limit_class_alert:vip-jwt:10" {
+		t.Fatalf("expected only high-priority class alert delivery, got %v", received)
+	}
+}
+
+func TestGetGatewayLimitClassIncidentsReturnsOpenIncidents(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitAlertBucketClasses: map[string]config.LimitAlertBucketClassConfig{
+				"vip-jwt": {
+					KeyType:     "jwt_sub",
+					BucketRegex: "^vip-",
+				},
+			},
+			MutationPolicy: config.MutationPolicy{
+				LimitClassAlertNotifications: config.PolicyAlertNotificationPolicy{
+					Enabled:  true,
+					Window:   "5m",
+					MinCount: 3,
+				},
+			},
+		},
+		Services: []config.ServiceConfig{{
+			Version: 1,
+			Services: []config.Service{{
+				Name: "agent",
+				Host: "http://agent-default:8080",
+				Routes: []config.RouterConfig{{
+					Path:    "/ai/chat",
+					Methods: []string{"POST"},
+					Backends: []config.Backend{
+						{URLPattern: "/"},
+					},
+				}},
+			}},
+		}},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	base := time.Now().UTC()
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	api.updateGatewayLimitClassAlertIncidentState([]gatewaypkg.RouteLimitClassAlert{
+		{
+			Severity:            "elevated",
+			ServiceName:         "agent",
+			RoutePath:           "/ai/chat",
+			LimitType:           "concurrency_queue_full",
+			KeyType:             "jwt_sub",
+			BucketClass:         "vip-jwt",
+			Count:               3,
+			QueueFullRejections: 3,
+		},
+	}, base)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/gateway/limit-class-incidents", nil)
 	resp := httptest.NewRecorder()
@@ -5220,6 +8861,3714 @@ func TestGetGatewayLimitClassIncidentsReturnsOpenIncidents(t *testing.T) {
 	incident := payload.Incidents[0]
 	if strings.TrimSpace(incident.IncidentID) == "" || incident.Severity != "elevated" || incident.ServiceName != "agent" || incident.RoutePath != "/ai/chat" || incident.LimitType != "concurrency_queue_full" || incident.KeyType != "jwt_sub" || incident.BucketClass != "vip-jwt" || incident.Count != 3 || incident.IncidentAgeSeconds < 0 {
 		t.Fatalf("unexpected class incident payload: %+v", incident)
+	}
+}
+
+func TestGetGatewayLimitClassIncidentsSupportsFilters(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	base := time.Now().UTC()
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	api.updateGatewayLimitClassAlertIncidentState([]gatewaypkg.RouteLimitClassAlert{
+		{
+			Severity:            "critical",
+			ServiceName:         "agent",
+			RoutePath:           "/ai/chat",
+			LimitType:           "concurrency_queue_full",
+			KeyType:             "jwt_sub",
+			BucketClass:         "vip-jwt",
+			Count:               5,
+			QueueFullRejections: 5,
+		},
+		{
+			Severity:            "warning",
+			ServiceName:         "search",
+			RoutePath:           "/ai/search",
+			LimitType:           "rate_limit",
+			KeyType:             "api_key",
+			BucketClass:         "standard-key",
+			Count:               3,
+			QueueFullRejections: 0,
+		},
+	}, base)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/gateway/limit-class-incidents?severity=critical&bucket_class=vip-jwt&limit_type=concurrency_queue_full", nil)
+	resp := httptest.NewRecorder()
+	api.getGatewayLimitClassIncidents(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		TotalIncidents int `json:"total_incidents"`
+		Incidents      []struct {
+			Severity    string `json:"severity"`
+			ServiceName string `json:"service_name"`
+			RoutePath   string `json:"route_path"`
+			LimitType   string `json:"limit_type"`
+			KeyType     string `json:"key_type"`
+			BucketClass string `json:"bucket_class"`
+		} `json:"incidents"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.TotalIncidents != 1 || len(payload.Incidents) != 1 {
+		t.Fatalf("expected exactly one filtered class incident, got %+v", payload)
+	}
+	incident := payload.Incidents[0]
+	if incident.Severity != "critical" || incident.ServiceName != "agent" || incident.RoutePath != "/ai/chat" || incident.LimitType != "concurrency_queue_full" || incident.KeyType != "jwt_sub" || incident.BucketClass != "vip-jwt" {
+		t.Fatalf("unexpected filtered class incident payload: %+v", incident)
+	}
+}
+
+func TestAcknowledgeGatewayLimitClassIncidentUpdatesStateAndEmitsEvent(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("failed to chdir temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
+
+	type webhookRecord struct {
+		Event          string
+		IncidentID     string
+		AcknowledgedBy string
+		Note           string
+	}
+	received := make([]webhookRecord, 0, 2)
+	server := newNotificationTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode webhook payload: %v", err)
+		}
+		data, _ := payload["data"].(map[string]interface{})
+		received = append(received, webhookRecord{
+			Event:          strings.TrimSpace(fmt.Sprint(payload["event"])),
+			IncidentID:     strings.TrimSpace(fmt.Sprint(data["incident_id"])),
+			AcknowledgedBy: strings.TrimSpace(fmt.Sprint(data["acknowledged_by"])),
+			Note:           strings.TrimSpace(fmt.Sprint(data["acknowledge_note"])),
+		})
+		w.WriteHeader(http.StatusOK)
+	})
+	defer server.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			NotificationWebhooks: []config.NotificationWebhook{{
+				URL:    server.URL,
+				Events: []string{"gateway.limit_class_alert_acknowledged"},
+			}},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	base := time.Now().UTC()
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	api.updateGatewayLimitClassAlertIncidentState([]gatewaypkg.RouteLimitClassAlert{{
+		Severity:            "critical",
+		ServiceName:         "agent",
+		RoutePath:           "/ai/chat",
+		LimitType:           "concurrency_queue_full",
+		KeyType:             "jwt_sub",
+		BucketClass:         "vip-jwt",
+		Count:               5,
+		QueueFullRejections: 5,
+	}}, base)
+
+	var incidentID string
+	api.queueDigestNotifyMu.Lock()
+	for _, state := range api.limitClassAlertIncidentState {
+		incidentID = strings.TrimSpace(state.IncidentID)
+		break
+	}
+	api.queueDigestNotifyMu.Unlock()
+	if incidentID == "" {
+		t.Fatalf("expected a created limit class incident id")
+	}
+
+	body := strings.NewReader(`{"reviewer":"ops-lead","note":"tracking under incident board"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/gateway/limit-class-incidents/"+incidentID+"/acknowledge", body)
+	req = mux.SetURLVars(req, map[string]string{"id": incidentID})
+	resp := httptest.NewRecorder()
+	api.acknowledgeGatewayLimitClassIncident(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		Success bool `json:"success"`
+		Data    struct {
+			IncidentID      string `json:"incident_id"`
+			Acknowledged    bool   `json:"acknowledged"`
+			AcknowledgedBy  string `json:"acknowledged_by"`
+			AcknowledgeNote string `json:"acknowledge_note"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if !payload.Success || payload.Data.IncidentID != incidentID || !payload.Data.Acknowledged || payload.Data.AcknowledgedBy != "ops-lead" || payload.Data.AcknowledgeNote != "tracking under incident board" {
+		t.Fatalf("unexpected acknowledge response payload: %+v", payload)
+	}
+	api.queueDigestNotifyMu.Lock()
+	found := false
+	for _, state := range api.limitClassAlertIncidentState {
+		if strings.TrimSpace(state.IncidentID) != incidentID {
+			continue
+		}
+		found = true
+		if state.AcknowledgedAt.IsZero() || state.AcknowledgedBy != "ops-lead" || state.AcknowledgeNote != "tracking under incident board" {
+			t.Fatalf("unexpected acknowledged state: %+v", state)
+		}
+	}
+	api.queueDigestNotifyMu.Unlock()
+	if !found {
+		t.Fatalf("expected acknowledged incident to remain open in state")
+	}
+	if len(received) != 1 || received[0].Event != "gateway.limit_class_alert_acknowledged" || received[0].IncidentID != incidentID || received[0].AcknowledgedBy != "ops-lead" || received[0].Note != "tracking under incident board" {
+		t.Fatalf("unexpected acknowledgement webhook payloads: %+v", received)
+	}
+}
+
+func TestSnoozeGatewayLimitClassIncidentUpdatesStateAndSuppressesNotify(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("failed to chdir temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
+
+	type webhookRecord struct {
+		Event      string
+		IncidentID string
+		SnoozedBy  string
+	}
+	received := make([]webhookRecord, 0, 4)
+	server := newNotificationTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode webhook payload: %v", err)
+		}
+		data, _ := payload["data"].(map[string]interface{})
+		received = append(received, webhookRecord{
+			Event:      strings.TrimSpace(fmt.Sprint(payload["event"])),
+			IncidentID: strings.TrimSpace(fmt.Sprint(data["incident_id"])),
+			SnoozedBy:  strings.TrimSpace(fmt.Sprint(data["snoozed_by"])),
+		})
+		w.WriteHeader(http.StatusOK)
+	})
+	defer server.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitAlertBucketClasses: map[string]config.LimitAlertBucketClassConfig{
+				"vip-jwt": {
+					KeyType:     "jwt_sub",
+					BucketRegex: "^vip-",
+				},
+			},
+			NotificationWebhooks: []config.NotificationWebhook{{
+				URL: server.URL,
+				Events: []string{
+					"gateway.limit_class_alert_snoozed",
+					"gateway.limit_class_alert_digest",
+					"gateway.limit_class_alert",
+				},
+			}},
+		},
+		Services: []config.ServiceConfig{{
+			Version: 1,
+			Services: []config.Service{{
+				Name: "agent",
+				Host: "http://agent-default:8080",
+				Routes: []config.RouterConfig{{
+					Path:    "/ai/chat",
+					Methods: []string{"POST"},
+					Backends: []config.Backend{
+						{URLPattern: "/"},
+					},
+				}},
+			}},
+		}},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	route := cfg.Services[0].Services[0].Routes[0]
+	route.ServiceName = "agent"
+	base := time.Now().UTC()
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "vip-a", 0, base.Add(-30*time.Second))
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "vip-b", 0, base.Add(-20*time.Second))
+	gw.RecordRouteLimitHitForBucketTest(route, "concurrency_queue_full", "jwt_sub", "vip-c", 0, base.Add(-10*time.Second))
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	summary := gw.RouteLimitClassAlertSummaryAt(base, 5*time.Minute, 3)
+	api.updateGatewayLimitClassAlertIncidentState(summary.Alerts, base)
+
+	var incidentID string
+	api.queueDigestNotifyMu.Lock()
+	for _, state := range api.limitClassAlertIncidentState {
+		incidentID = strings.TrimSpace(state.IncidentID)
+		break
+	}
+	api.queueDigestNotifyMu.Unlock()
+	if incidentID == "" {
+		t.Fatalf("expected a created limit class incident id")
+	}
+
+	body := strings.NewReader(`{"reviewer":"ops-lead","duration":"15m","note":"muting repeated alerts during active mitigation"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/gateway/limit-class-incidents/"+incidentID+"/snooze", body)
+	req = mux.SetURLVars(req, map[string]string{"id": incidentID})
+	resp := httptest.NewRecorder()
+	api.snoozeGatewayLimitClassIncident(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var snoozePayload struct {
+		Success bool `json:"success"`
+		Data    struct {
+			IncidentID string `json:"incident_id"`
+			Snoozed    bool   `json:"snoozed"`
+			SnoozedBy  string `json:"snoozed_by"`
+			SnoozeNote string `json:"snooze_note"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &snoozePayload); err != nil {
+		t.Fatalf("failed to decode snooze response: %v", err)
+	}
+	if !snoozePayload.Success || snoozePayload.Data.IncidentID != incidentID || !snoozePayload.Data.Snoozed || snoozePayload.Data.SnoozedBy != "ops-lead" || snoozePayload.Data.SnoozeNote != "muting repeated alerts during active mitigation" {
+		t.Fatalf("unexpected snooze response payload: %+v", snoozePayload)
+	}
+
+	received = received[:0]
+	notifyReq := httptest.NewRequest(http.MethodPost, "/api/v1/gateway/limit-class-alerts/notify", nil)
+	notifyResp := httptest.NewRecorder()
+	api.notifyGatewayLimitClassAlerts(notifyResp, notifyReq)
+
+	if notifyResp.Code != http.StatusOK {
+		t.Fatalf("expected 200 from notify, got %d: %s", notifyResp.Code, notifyResp.Body.String())
+	}
+	var notifyPayload struct {
+		TotalAlerts      int `json:"total_alerts"`
+		DigestDeliveries int `json:"digest_deliveries"`
+		AlertDeliveries  int `json:"alert_deliveries"`
+	}
+	if err := json.Unmarshal(notifyResp.Body.Bytes(), &notifyPayload); err != nil {
+		t.Fatalf("failed to decode notify response: %v", err)
+	}
+	if notifyPayload.TotalAlerts != 0 || notifyPayload.DigestDeliveries != 0 || notifyPayload.AlertDeliveries != 0 {
+		t.Fatalf("expected snoozed incident to suppress class alert notifications, got %+v", notifyPayload)
+	}
+	if len(received) != 0 {
+		t.Fatalf("expected no class alert webhooks while snoozed, got %+v", received)
+	}
+}
+
+func TestGetGatewayLimitClassSnoozesSupportsExpiringWithinFilter(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	base := time.Now().UTC()
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	api.updateGatewayLimitClassAlertIncidentState([]gatewaypkg.RouteLimitClassAlert{
+		{
+			Severity:            "critical",
+			ServiceName:         "agent",
+			RoutePath:           "/ai/chat",
+			LimitType:           "concurrency_queue_full",
+			KeyType:             "jwt_sub",
+			BucketClass:         "vip-jwt",
+			Count:               5,
+			QueueFullRejections: 5,
+		},
+		{
+			Severity:            "warning",
+			ServiceName:         "search",
+			RoutePath:           "/ai/search",
+			LimitType:           "rate_limit",
+			KeyType:             "api_key",
+			BucketClass:         "standard-key",
+			Count:               3,
+			QueueFullRejections: 0,
+		},
+	}, base)
+
+	api.queueDigestNotifyMu.Lock()
+	for key, state := range api.limitClassAlertIncidentState {
+		switch strings.TrimSpace(state.BucketClass) {
+		case "vip-jwt":
+			state.SnoozedUntil = base.Add(10 * time.Minute)
+			state.SnoozedBy = "ops-lead"
+			state.SnoozeNote = "vip mitigation"
+		case "standard-key":
+			state.SnoozedUntil = base.Add(45 * time.Minute)
+			state.SnoozedBy = "ops-bot"
+			state.SnoozeNote = "lower priority monitoring"
+		}
+		api.limitClassAlertIncidentState[key] = state
+	}
+	api.queueDigestNotifyMu.Unlock()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/gateway/limit-class-snoozes?expiring_within=15m", nil)
+	resp := httptest.NewRecorder()
+	api.getGatewayLimitClassSnoozes(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		TotalSnoozes   int    `json:"total_snoozes"`
+		ExpiringWithin string `json:"expiring_within"`
+		Snoozes        []struct {
+			BucketClass            string  `json:"bucket_class"`
+			SnoozedBy              string  `json:"snoozed_by"`
+			SnoozeNote             string  `json:"snooze_note"`
+			RemainingSnoozeSeconds float64 `json:"remaining_snooze_seconds"`
+			ExpiringSoon           bool    `json:"expiring_soon"`
+		} `json:"snoozes"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.TotalSnoozes != 1 || payload.ExpiringWithin != "15m" || len(payload.Snoozes) != 1 {
+		t.Fatalf("expected one expiring-soon snooze, got %+v", payload)
+	}
+	snooze := payload.Snoozes[0]
+	if snooze.BucketClass != "vip-jwt" || snooze.SnoozedBy != "ops-lead" || snooze.SnoozeNote != "vip mitigation" || !snooze.ExpiringSoon || snooze.RemainingSnoozeSeconds <= 0 {
+		t.Fatalf("unexpected snooze payload: %+v", snooze)
+	}
+}
+
+func TestNotifyGatewayLimitClassSnoozesEmitsExpiryEvents(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("failed to chdir temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
+
+	received := make([]string, 0, 4)
+	server := newNotificationTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode webhook payload: %v", err)
+		}
+		received = append(received, strings.TrimSpace(fmt.Sprint(payload["event"])))
+		w.WriteHeader(http.StatusOK)
+	})
+	defer server.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			NotificationWebhooks: []config.NotificationWebhook{{
+				URL: server.URL,
+				Events: []string{
+					"gateway.limit_class_snooze_expiring_digest",
+					"gateway.limit_class_snooze_expiring",
+				},
+			}},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	base := time.Now().UTC()
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	api.updateGatewayLimitClassAlertIncidentState([]gatewaypkg.RouteLimitClassAlert{{
+		Severity:            "critical",
+		ServiceName:         "agent",
+		RoutePath:           "/ai/chat",
+		LimitType:           "concurrency_queue_full",
+		KeyType:             "jwt_sub",
+		BucketClass:         "vip-jwt",
+		Count:               5,
+		QueueFullRejections: 5,
+	}}, base)
+	api.queueDigestNotifyMu.Lock()
+	for key, state := range api.limitClassAlertIncidentState {
+		state.SnoozedUntil = base.Add(10 * time.Minute)
+		state.SnoozedBy = "ops-lead"
+		api.limitClassAlertIncidentState[key] = state
+	}
+	api.queueDigestNotifyMu.Unlock()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/gateway/limit-class-snoozes/notify?expiring_within=15m", nil)
+	resp := httptest.NewRecorder()
+	api.notifyGatewayLimitClassSnoozes(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	var payload struct {
+		TotalSnoozes     int `json:"total_snoozes"`
+		DigestDeliveries int `json:"digest_deliveries"`
+		SnoozeDeliveries int `json:"snooze_deliveries"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if payload.TotalSnoozes != 1 || payload.DigestDeliveries != 1 || payload.SnoozeDeliveries != 1 {
+		t.Fatalf("unexpected snooze notify payload: %+v", payload)
+	}
+	if len(received) != 2 || received[0] != "gateway.limit_class_snooze_expiring_digest" || received[1] != "gateway.limit_class_snooze_expiring" {
+		t.Fatalf("expected snooze expiry digest and per-snooze events, got %v", received)
+	}
+}
+
+func TestNotifyGatewayLimitClassSnoozesHonorsWebhookCooldown(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("failed to chdir temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
+
+	received := make([]string, 0, 4)
+	server := newNotificationTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode webhook payload: %v", err)
+		}
+		received = append(received, strings.TrimSpace(fmt.Sprint(payload["event"])))
+		w.WriteHeader(http.StatusOK)
+	})
+	defer server.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			NotificationWebhooks: []config.NotificationWebhook{{
+				URL:                            server.URL,
+				Events:                         []string{"gateway.limit_class_snooze_expiring"},
+				LimitClassSnoozeExpiryCooldown: "30m",
+			}},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	base := time.Now().UTC()
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	api.updateGatewayLimitClassAlertIncidentState([]gatewaypkg.RouteLimitClassAlert{{
+		Severity:            "critical",
+		ServiceName:         "agent",
+		RoutePath:           "/ai/chat",
+		LimitType:           "concurrency_queue_full",
+		KeyType:             "jwt_sub",
+		BucketClass:         "vip-jwt",
+		Count:               5,
+		QueueFullRejections: 5,
+	}}, base)
+	api.queueDigestNotifyMu.Lock()
+	for key, state := range api.limitClassAlertIncidentState {
+		state.SnoozedUntil = base.Add(10 * time.Minute)
+		state.SnoozedBy = "ops-lead"
+		api.limitClassAlertIncidentState[key] = state
+	}
+	api.queueDigestNotifyMu.Unlock()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/gateway/limit-class-snoozes/notify?expiring_within=15m", nil)
+	resp := httptest.NewRecorder()
+	api.notifyGatewayLimitClassSnoozes(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if len(received) != 1 || received[0] != "gateway.limit_class_snooze_expiring" {
+		t.Fatalf("expected first snooze expiry delivery, got %v", received)
+	}
+
+	resp = httptest.NewRecorder()
+	api.notifyGatewayLimitClassSnoozes(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200 on second notify, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if len(received) != 1 {
+		t.Fatalf("expected webhook cooldown to suppress duplicate snooze expiry delivery, got %v", received)
+	}
+}
+
+func TestNotifyGatewayLimitClassSnoozesHonorsWebhookRemainingThreshold(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("failed to chdir temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
+
+	received := make([]string, 0, 4)
+	server := newNotificationTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode webhook payload: %v", err)
+		}
+		received = append(received, strings.TrimSpace(fmt.Sprint(payload["event"])))
+		w.WriteHeader(http.StatusOK)
+	})
+	defer server.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			NotificationWebhooks: []config.NotificationWebhook{{
+				URL:                          server.URL,
+				Events:                       []string{"gateway.limit_class_snooze_expiring"},
+				LimitClassSnoozeExpiryWithin: "5m",
+			}},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	base := time.Now().UTC()
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	api.updateGatewayLimitClassAlertIncidentState([]gatewaypkg.RouteLimitClassAlert{{
+		Severity:            "critical",
+		ServiceName:         "agent",
+		RoutePath:           "/ai/chat",
+		LimitType:           "concurrency_queue_full",
+		KeyType:             "jwt_sub",
+		BucketClass:         "vip-jwt",
+		Count:               5,
+		QueueFullRejections: 5,
+	}}, base)
+	api.queueDigestNotifyMu.Lock()
+	for key, state := range api.limitClassAlertIncidentState {
+		state.SnoozedUntil = base.Add(10 * time.Minute)
+		state.SnoozedBy = "ops-lead"
+		api.limitClassAlertIncidentState[key] = state
+	}
+	api.queueDigestNotifyMu.Unlock()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/gateway/limit-class-snoozes/notify?expiring_within=15m", nil)
+	resp := httptest.NewRecorder()
+	api.notifyGatewayLimitClassSnoozes(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if len(received) != 0 {
+		t.Fatalf("expected webhook remaining threshold to suppress 10m snooze expiry warning, got %v", received)
+	}
+
+	api.queueDigestNotifyMu.Lock()
+	for key, state := range api.limitClassAlertIncidentState {
+		state.SnoozedUntil = base.Add(4 * time.Minute)
+		api.limitClassAlertIncidentState[key] = state
+	}
+	api.queueDigestNotifyMu.Unlock()
+
+	resp = httptest.NewRecorder()
+	api.notifyGatewayLimitClassSnoozes(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200 on second notify, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if len(received) != 1 || received[0] != "gateway.limit_class_snooze_expiring" {
+		t.Fatalf("expected 4m remaining snooze to satisfy webhook threshold, got %v", received)
+	}
+}
+
+func TestNotifyGatewayLimitClassSnoozesHonorsWebhookSeverityFloor(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("failed to chdir temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
+
+	received := make([]string, 0, 4)
+	server := newNotificationTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode webhook payload: %v", err)
+		}
+		received = append(received, strings.TrimSpace(fmt.Sprint(payload["event"]))+":"+strings.TrimSpace(fmt.Sprint(payload["data"].(map[string]interface{})["severity"])))
+		w.WriteHeader(http.StatusOK)
+	})
+	defer server.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			NotificationWebhooks: []config.NotificationWebhook{{
+				URL:                   server.URL,
+				Events:                []string{"gateway.limit_class_snooze_expiring"},
+				MinLimitAlertSeverity: "critical",
+			}},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	base := time.Now().UTC()
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	api.updateGatewayLimitClassAlertIncidentState([]gatewaypkg.RouteLimitClassAlert{{
+		Severity:            "critical",
+		ServiceName:         "agent",
+		RoutePath:           "/ai/chat",
+		LimitType:           "concurrency_queue_full",
+		KeyType:             "jwt_sub",
+		BucketClass:         "vip-jwt",
+		Count:               5,
+		QueueFullRejections: 5,
+	}}, base)
+	api.queueDigestNotifyMu.Lock()
+	for key, state := range api.limitClassAlertIncidentState {
+		state.SnoozedUntil = base.Add(10 * time.Minute)
+		state.SnoozedBy = "ops-lead"
+		api.limitClassAlertIncidentState[key] = state
+	}
+	api.queueDigestNotifyMu.Unlock()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/gateway/limit-class-snoozes/notify?expiring_within=15m", nil)
+	resp := httptest.NewRecorder()
+	api.notifyGatewayLimitClassSnoozes(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if len(received) != 0 {
+		t.Fatalf("expected critical floor to suppress elevated 10m snooze warning, got %v", received)
+	}
+
+	api.queueDigestNotifyMu.Lock()
+	for key, state := range api.limitClassAlertIncidentState {
+		state.SnoozedUntil = base.Add(4 * time.Minute)
+		api.limitClassAlertIncidentState[key] = state
+	}
+	api.queueDigestNotifyMu.Unlock()
+
+	resp = httptest.NewRecorder()
+	api.notifyGatewayLimitClassSnoozes(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200 on second notify, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if len(received) != 1 || received[0] != "gateway.limit_class_snooze_expiring:critical" {
+		t.Fatalf("expected 4m remaining snooze to emit critical wake-up warning, got %v", received)
+	}
+}
+
+func TestNotifyGatewayLimitClassSnoozesHonorsWebhookStageFilter(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("failed to chdir temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
+
+	received := make([]string, 0, 4)
+	server := newNotificationTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode webhook payload: %v", err)
+		}
+		data, _ := payload["data"].(map[string]interface{})
+		received = append(received, strings.TrimSpace(fmt.Sprint(payload["event"]))+":"+strings.TrimSpace(fmt.Sprint(data["snooze_stage"])))
+		w.WriteHeader(http.StatusOK)
+	})
+	defer server.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			NotificationWebhooks: []config.NotificationWebhook{{
+				URL:                          server.URL,
+				Events:                       []string{"gateway.limit_class_snooze_expiring"},
+				LimitClassSnoozeExpiryStages: []string{"critical"},
+			}},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	base := time.Now().UTC()
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	api.updateGatewayLimitClassAlertIncidentState([]gatewaypkg.RouteLimitClassAlert{{
+		Severity:            "critical",
+		ServiceName:         "agent",
+		RoutePath:           "/ai/chat",
+		LimitType:           "concurrency_queue_full",
+		KeyType:             "jwt_sub",
+		BucketClass:         "vip-jwt",
+		Count:               5,
+		QueueFullRejections: 5,
+	}}, base)
+	api.queueDigestNotifyMu.Lock()
+	for key, state := range api.limitClassAlertIncidentState {
+		state.SnoozedUntil = base.Add(10 * time.Minute)
+		state.SnoozedBy = "ops-lead"
+		api.limitClassAlertIncidentState[key] = state
+	}
+	api.queueDigestNotifyMu.Unlock()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/gateway/limit-class-snoozes/notify?expiring_within=15m", nil)
+	resp := httptest.NewRecorder()
+	api.notifyGatewayLimitClassSnoozes(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if len(received) != 0 {
+		t.Fatalf("expected critical stage filter to suppress elevated 10m snooze warning, got %v", received)
+	}
+
+	api.queueDigestNotifyMu.Lock()
+	for key, state := range api.limitClassAlertIncidentState {
+		state.SnoozedUntil = base.Add(4 * time.Minute)
+		api.limitClassAlertIncidentState[key] = state
+	}
+	api.queueDigestNotifyMu.Unlock()
+
+	resp = httptest.NewRecorder()
+	api.notifyGatewayLimitClassSnoozes(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200 on second notify, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if len(received) != 1 || received[0] != "gateway.limit_class_snooze_expiring:critical" {
+		t.Fatalf("expected 4m remaining snooze to satisfy critical stage filter, got %v", received)
+	}
+}
+
+func TestNotifyGatewayLimitClassSnoozesUsesConfiguredStageThresholds(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("failed to chdir temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
+
+	received := make([]string, 0, 4)
+	server := newNotificationTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode webhook payload: %v", err)
+		}
+		data, _ := payload["data"].(map[string]interface{})
+		received = append(received, strings.TrimSpace(fmt.Sprint(payload["event"]))+":"+strings.TrimSpace(fmt.Sprint(data["snooze_stage"])))
+		w.WriteHeader(http.StatusOK)
+	})
+	defer server.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			NotificationWebhooks: []config.NotificationWebhook{{
+				URL:                          server.URL,
+				Events:                       []string{"gateway.limit_class_snooze_expiring"},
+				LimitClassSnoozeExpiryStages: []string{"critical"},
+			}},
+			MutationPolicy: config.MutationPolicy{
+				LimitClassSnoozeNotifications: config.PolicyAlertNotificationPolicy{
+					SnoozeElevatedWithin: "20m",
+					SnoozeCriticalWithin: "12m",
+				},
+			},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	base := time.Now().UTC()
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	api.updateGatewayLimitClassAlertIncidentState([]gatewaypkg.RouteLimitClassAlert{{
+		Severity:            "critical",
+		ServiceName:         "agent",
+		RoutePath:           "/ai/chat",
+		LimitType:           "concurrency_queue_full",
+		KeyType:             "jwt_sub",
+		BucketClass:         "vip-jwt",
+		Count:               5,
+		QueueFullRejections: 5,
+	}}, base)
+	api.queueDigestNotifyMu.Lock()
+	for key, state := range api.limitClassAlertIncidentState {
+		state.SnoozedUntil = base.Add(10 * time.Minute)
+		state.SnoozedBy = "ops-lead"
+		api.limitClassAlertIncidentState[key] = state
+	}
+	api.queueDigestNotifyMu.Unlock()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/gateway/limit-class-snoozes/notify?expiring_within=15m", nil)
+	resp := httptest.NewRecorder()
+	api.notifyGatewayLimitClassSnoozes(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if len(received) != 1 || received[0] != "gateway.limit_class_snooze_expiring:critical" {
+		t.Fatalf("expected configured 12m critical threshold to classify 10m remaining snooze as critical, got %v", received)
+	}
+}
+
+func TestNotifyGatewayLimitClassSnoozesUsesBucketClassStageThresholds(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("failed to chdir temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
+
+	received := make([]string, 0, 4)
+	server := newNotificationTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode webhook payload: %v", err)
+		}
+		data, _ := payload["data"].(map[string]interface{})
+		received = append(received, strings.TrimSpace(fmt.Sprint(payload["event"]))+":"+strings.TrimSpace(fmt.Sprint(data["snooze_stage"])))
+		w.WriteHeader(http.StatusOK)
+	})
+	defer server.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitAlertBucketClasses: map[string]config.LimitAlertBucketClassConfig{
+				"vip-jwt": {
+					KeyType:              "jwt_sub",
+					BucketRegex:          "^vip-",
+					SnoozeElevatedWithin: "20m",
+					SnoozeCriticalWithin: "12m",
+				},
+			},
+			NotificationWebhooks: []config.NotificationWebhook{{
+				URL:                          server.URL,
+				Events:                       []string{"gateway.limit_class_snooze_expiring"},
+				LimitClassSnoozeExpiryStages: []string{"critical"},
+			}},
+			MutationPolicy: config.MutationPolicy{
+				LimitClassSnoozeNotifications: config.PolicyAlertNotificationPolicy{
+					SnoozeElevatedWithin: "15m",
+					SnoozeCriticalWithin: "5m",
+				},
+			},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	base := time.Now().UTC()
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	api.updateGatewayLimitClassAlertIncidentState([]gatewaypkg.RouteLimitClassAlert{{
+		Severity:            "critical",
+		ServiceName:         "agent",
+		RoutePath:           "/ai/chat",
+		LimitType:           "concurrency_queue_full",
+		KeyType:             "jwt_sub",
+		BucketClass:         "vip-jwt",
+		Count:               5,
+		QueueFullRejections: 5,
+	}}, base)
+	api.queueDigestNotifyMu.Lock()
+	for key, state := range api.limitClassAlertIncidentState {
+		state.SnoozedUntil = base.Add(10 * time.Minute)
+		state.SnoozedBy = "ops-lead"
+		api.limitClassAlertIncidentState[key] = state
+	}
+	api.queueDigestNotifyMu.Unlock()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/gateway/limit-class-snoozes/notify?expiring_within=15m", nil)
+	resp := httptest.NewRecorder()
+	api.notifyGatewayLimitClassSnoozes(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if len(received) != 1 || received[0] != "gateway.limit_class_snooze_expiring:critical" {
+		t.Fatalf("expected bucket class thresholds to classify 10m remaining snooze as critical, got %v", received)
+	}
+}
+
+func TestReconcileGatewayLimitClassSnoozeNotificationsAutoEmitsAndHonorsOnlyOnChange(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("failed to chdir temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
+
+	receivedEvents := make([]string, 0, 4)
+	server := newNotificationTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode webhook payload: %v", err)
+		}
+		receivedEvents = append(receivedEvents, fmt.Sprint(payload["event"]))
+		w.WriteHeader(http.StatusOK)
+	})
+	defer server.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			NotificationWebhooks: []config.NotificationWebhook{{
+				URL: server.URL,
+				Events: []string{
+					"gateway.limit_class_snooze_expiring_digest",
+					"gateway.limit_class_snooze_expiring",
+				},
+			}},
+			MutationPolicy: config.MutationPolicy{
+				LimitClassSnoozeNotifications: config.PolicyAlertNotificationPolicy{
+					Enabled:                 true,
+					Interval:                "1m",
+					MinNotificationInterval: "1m",
+					OnlyOnChange:            true,
+					Window:                  "15m",
+				},
+			},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	base := time.Now().UTC()
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	api.updateGatewayLimitClassAlertIncidentState([]gatewaypkg.RouteLimitClassAlert{{
+		Severity:            "critical",
+		ServiceName:         "agent",
+		RoutePath:           "/ai/chat",
+		LimitType:           "concurrency_queue_full",
+		KeyType:             "jwt_sub",
+		BucketClass:         "vip-jwt",
+		Count:               5,
+		QueueFullRejections: 5,
+	}}, base)
+	api.queueDigestNotifyMu.Lock()
+	for key, state := range api.limitClassAlertIncidentState {
+		state.SnoozedUntil = base.Add(10 * time.Minute)
+		state.SnoozedBy = "ops-lead"
+		api.limitClassAlertIncidentState[key] = state
+	}
+	api.queueDigestNotifyMu.Unlock()
+
+	api.reconcileGatewayLimitClassSnoozeNotifications(base)
+	if len(receivedEvents) != 2 {
+		t.Fatalf("expected digest plus one snooze expiry event, got %d (%v)", len(receivedEvents), receivedEvents)
+	}
+
+	api.queueDigestNotifyMu.Lock()
+	api.lastLimitClassSnoozeNotificationAt = base
+	api.queueDigestNotifyMu.Unlock()
+	api.reconcileGatewayLimitClassSnoozeNotifications(base.Add(30 * time.Second))
+	if len(receivedEvents) != 2 {
+		t.Fatalf("expected min interval to suppress duplicate snooze expiry notifications, got %d (%v)", len(receivedEvents), receivedEvents)
+	}
+
+	api.queueDigestNotifyMu.Lock()
+	api.lastLimitClassSnoozeNotificationAt = base.Add(-2 * time.Minute)
+	api.queueDigestNotifyMu.Unlock()
+	api.reconcileGatewayLimitClassSnoozeNotifications(base.Add(2 * time.Minute))
+	if len(receivedEvents) != 2 {
+		t.Fatalf("expected unchanged snooze expiry checksum to suppress duplicate notifications, got %d (%v)", len(receivedEvents), receivedEvents)
+	}
+}
+
+func TestReconcileGatewayLimitClassSnoozeNotificationsEmitsStageChanged(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("failed to chdir temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
+
+	type receivedEvent struct {
+		Event       string
+		Previous    string
+		Current     string
+		IncidentID  string
+		SnoozeStage string
+	}
+	received := make([]receivedEvent, 0, 8)
+	server := newNotificationTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode webhook payload: %v", err)
+		}
+		data, _ := payload["data"].(map[string]interface{})
+		received = append(received, receivedEvent{
+			Event:       strings.TrimSpace(fmt.Sprint(payload["event"])),
+			Previous:    strings.TrimSpace(fmt.Sprint(data["previous_stage"])),
+			Current:     strings.TrimSpace(fmt.Sprint(data["current_stage"])),
+			IncidentID:  strings.TrimSpace(fmt.Sprint(data["incident_id"])),
+			SnoozeStage: strings.TrimSpace(fmt.Sprint(data["snooze_stage"])),
+		})
+		w.WriteHeader(http.StatusOK)
+	})
+	defer server.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			NotificationWebhooks: []config.NotificationWebhook{{
+				URL:    server.URL,
+				Events: []string{"gateway.limit_class_snooze_expiring", "gateway.limit_class_snooze_stage_changed"},
+			}},
+			MutationPolicy: config.MutationPolicy{
+				LimitClassSnoozeNotifications: config.PolicyAlertNotificationPolicy{
+					Enabled:                 true,
+					Interval:                "1m",
+					MinNotificationInterval: "1m",
+					Window:                  "15m",
+					SnoozeElevatedWithin:    "15m",
+					SnoozeCriticalWithin:    "5m",
+				},
+			},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	base := time.Now().UTC()
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	api.updateGatewayLimitClassAlertIncidentState([]gatewaypkg.RouteLimitClassAlert{{
+		Severity:            "critical",
+		ServiceName:         "agent",
+		RoutePath:           "/ai/chat",
+		LimitType:           "concurrency_queue_full",
+		KeyType:             "jwt_sub",
+		BucketClass:         "vip-jwt",
+		Count:               5,
+		QueueFullRejections: 5,
+	}}, base)
+	api.queueDigestNotifyMu.Lock()
+	for key, state := range api.limitClassAlertIncidentState {
+		state.SnoozedUntil = base.Add(10 * time.Minute)
+		state.SnoozedBy = "ops-lead"
+		api.limitClassAlertIncidentState[key] = state
+	}
+	api.queueDigestNotifyMu.Unlock()
+
+	api.reconcileGatewayLimitClassSnoozeNotifications(base)
+	if len(received) != 1 || received[0].Event != "gateway.limit_class_snooze_expiring" || received[0].SnoozeStage != "elevated" {
+		t.Fatalf("expected initial elevated snooze expiry event, got %+v", received)
+	}
+
+	api.reconcileGatewayLimitClassSnoozeNotifications(base.Add(6 * time.Minute))
+	if len(received) != 3 {
+		t.Fatalf("expected second expiry plus stage-changed event, got %d (%+v)", len(received), received)
+	}
+	stageChanged := received[2]
+	if stageChanged.Event != "gateway.limit_class_snooze_stage_changed" || stageChanged.Previous != "elevated" || stageChanged.Current != "critical" || stageChanged.SnoozeStage != "critical" || stageChanged.IncidentID == "" {
+		t.Fatalf("expected elevated->critical snooze stage change event, got %+v", stageChanged)
+	}
+}
+
+func TestReconcileGatewayLimitClassSnoozeNotificationsEmitsResumed(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("failed to chdir temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
+
+	type receivedEvent struct {
+		Event       string
+		Previous    string
+		Current     string
+		IncidentID  string
+		SnoozeStage string
+	}
+	received := make([]receivedEvent, 0, 8)
+	server := newNotificationTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode webhook payload: %v", err)
+		}
+		data, _ := payload["data"].(map[string]interface{})
+		received = append(received, receivedEvent{
+			Event:       strings.TrimSpace(fmt.Sprint(payload["event"])),
+			Previous:    strings.TrimSpace(fmt.Sprint(data["previous_stage"])),
+			Current:     strings.TrimSpace(fmt.Sprint(data["current_stage"])),
+			IncidentID:  strings.TrimSpace(fmt.Sprint(data["incident_id"])),
+			SnoozeStage: strings.TrimSpace(fmt.Sprint(data["snooze_stage"])),
+		})
+		w.WriteHeader(http.StatusOK)
+	})
+	defer server.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			NotificationWebhooks: []config.NotificationWebhook{{
+				URL:    server.URL,
+				Events: []string{"gateway.limit_class_snooze_expiring", "gateway.limit_class_snooze_resumed"},
+			}},
+			MutationPolicy: config.MutationPolicy{
+				LimitClassSnoozeNotifications: config.PolicyAlertNotificationPolicy{
+					Enabled:                 true,
+					Interval:                "1m",
+					MinNotificationInterval: "1m",
+					Window:                  "15m",
+					SnoozeElevatedWithin:    "15m",
+					SnoozeCriticalWithin:    "5m",
+				},
+			},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	base := time.Now().UTC()
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	api.updateGatewayLimitClassAlertIncidentState([]gatewaypkg.RouteLimitClassAlert{{
+		Severity:            "critical",
+		ServiceName:         "agent",
+		RoutePath:           "/ai/chat",
+		LimitType:           "concurrency_queue_full",
+		KeyType:             "jwt_sub",
+		BucketClass:         "vip-jwt",
+		Count:               5,
+		QueueFullRejections: 5,
+	}}, base)
+	api.queueDigestNotifyMu.Lock()
+	for key, state := range api.limitClassAlertIncidentState {
+		state.SnoozedUntil = base.Add(4 * time.Minute)
+		state.SnoozedBy = "ops-lead"
+		api.limitClassAlertIncidentState[key] = state
+	}
+	api.queueDigestNotifyMu.Unlock()
+
+	api.reconcileGatewayLimitClassSnoozeNotifications(base)
+	if len(received) != 1 || received[0].Event != "gateway.limit_class_snooze_expiring" || received[0].SnoozeStage != "critical" {
+		t.Fatalf("expected initial critical snooze expiry event, got %+v", received)
+	}
+
+	api.reconcileGatewayLimitClassSnoozeNotifications(base.Add(5 * time.Minute))
+	if len(received) != 2 {
+		t.Fatalf("expected resumed event after snooze expiry, got %d (%+v)", len(received), received)
+	}
+	resumed := received[1]
+	if resumed.Event != "gateway.limit_class_snooze_resumed" || resumed.Previous != "critical" || resumed.Current != "resumed" || resumed.SnoozeStage != "critical" || resumed.IncidentID == "" {
+		t.Fatalf("expected snooze resumed event, got %+v", resumed)
+	}
+}
+
+func TestReconcileGatewayLimitClassSnoozeNotificationsHonorsWebhookEventTypeFilter(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("failed to chdir temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
+
+	received := make([]string, 0, 8)
+	server := newNotificationTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode webhook payload: %v", err)
+		}
+		received = append(received, strings.TrimSpace(fmt.Sprint(payload["event"])))
+		w.WriteHeader(http.StatusOK)
+	})
+	defer server.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			NotificationWebhooks: []config.NotificationWebhook{{
+				URL:                        server.URL,
+				Events:                     []string{"gateway.limit_class_snooze_expiring", "gateway.limit_class_snooze_resumed"},
+				LimitClassSnoozeEventTypes: []string{"resumed"},
+			}},
+			MutationPolicy: config.MutationPolicy{
+				LimitClassSnoozeNotifications: config.PolicyAlertNotificationPolicy{
+					Enabled:                 true,
+					Interval:                "1m",
+					MinNotificationInterval: "1m",
+					Window:                  "15m",
+					SnoozeElevatedWithin:    "15m",
+					SnoozeCriticalWithin:    "5m",
+				},
+			},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	base := time.Now().UTC()
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	api.updateGatewayLimitClassAlertIncidentState([]gatewaypkg.RouteLimitClassAlert{{
+		Severity:            "critical",
+		ServiceName:         "agent",
+		RoutePath:           "/ai/chat",
+		LimitType:           "concurrency_queue_full",
+		KeyType:             "jwt_sub",
+		BucketClass:         "vip-jwt",
+		Count:               5,
+		QueueFullRejections: 5,
+	}}, base)
+	api.queueDigestNotifyMu.Lock()
+	for key, state := range api.limitClassAlertIncidentState {
+		state.SnoozedUntil = base.Add(4 * time.Minute)
+		state.SnoozedBy = "ops-lead"
+		api.limitClassAlertIncidentState[key] = state
+	}
+	api.queueDigestNotifyMu.Unlock()
+
+	api.reconcileGatewayLimitClassSnoozeNotifications(base)
+	if len(received) != 0 {
+		t.Fatalf("expected resumed-only filter to suppress expiring event, got %v", received)
+	}
+
+	api.reconcileGatewayLimitClassSnoozeNotifications(base.Add(5 * time.Minute))
+	if len(received) != 1 || received[0] != "gateway.limit_class_snooze_resumed" {
+		t.Fatalf("expected resumed-only filter to deliver only resumed event, got %v", received)
+	}
+}
+
+func TestReconcileGatewayLimitClassSnoozeNotificationsHonorsBucketClassEventPolicy(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("failed to chdir temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
+
+	received := make([]string, 0, 8)
+	server := newNotificationTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode webhook payload: %v", err)
+		}
+		received = append(received, strings.TrimSpace(fmt.Sprint(payload["event"])))
+		w.WriteHeader(http.StatusOK)
+	})
+	defer server.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitAlertBucketClasses: map[string]config.LimitAlertBucketClassConfig{
+				"vip-jwt": {
+					KeyType:          "jwt_sub",
+					BucketRegex:      "^vip-",
+					SnoozeEventTypes: []string{"resumed"},
+				},
+			},
+			NotificationWebhooks: []config.NotificationWebhook{{
+				URL:    server.URL,
+				Events: []string{"gateway.limit_class_snooze_expiring", "gateway.limit_class_snooze_resumed"},
+			}},
+			MutationPolicy: config.MutationPolicy{
+				LimitClassSnoozeNotifications: config.PolicyAlertNotificationPolicy{
+					Enabled:                 true,
+					Interval:                "1m",
+					MinNotificationInterval: "1m",
+					Window:                  "15m",
+					SnoozeElevatedWithin:    "15m",
+					SnoozeCriticalWithin:    "5m",
+				},
+			},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	base := time.Now().UTC()
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	api.updateGatewayLimitClassAlertIncidentState([]gatewaypkg.RouteLimitClassAlert{{
+		Severity:            "critical",
+		ServiceName:         "agent",
+		RoutePath:           "/ai/chat",
+		LimitType:           "concurrency_queue_full",
+		KeyType:             "jwt_sub",
+		BucketClass:         "vip-jwt",
+		Count:               5,
+		QueueFullRejections: 5,
+	}}, base)
+	api.queueDigestNotifyMu.Lock()
+	for key, state := range api.limitClassAlertIncidentState {
+		state.SnoozedUntil = base.Add(4 * time.Minute)
+		state.SnoozedBy = "ops-lead"
+		api.limitClassAlertIncidentState[key] = state
+	}
+	api.queueDigestNotifyMu.Unlock()
+
+	api.reconcileGatewayLimitClassSnoozeNotifications(base)
+	if len(received) != 0 {
+		t.Fatalf("expected bucket class resumed-only policy to suppress expiring event, got %v", received)
+	}
+
+	api.reconcileGatewayLimitClassSnoozeNotifications(base.Add(5 * time.Minute))
+	if len(received) != 1 || received[0] != "gateway.limit_class_snooze_resumed" {
+		t.Fatalf("expected bucket class resumed-only policy to emit only resumed event, got %v", received)
+	}
+}
+
+func TestReconcileGatewayLimitClassSnoozeNotificationsHonorsBucketClassDigestExclusion(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("failed to chdir temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
+
+	type receivedEvent struct {
+		Event              string
+		Count              int
+		ExcludedCount      int
+		ExcludedByClassLen int
+		TopExcludedClass   string
+	}
+	received := make([]receivedEvent, 0, 8)
+	server := newNotificationTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode webhook payload: %v", err)
+		}
+		data, _ := payload["data"].(map[string]interface{})
+		count := 0
+		if snoozes, ok := data["snoozes"].([]interface{}); ok {
+			count = len(snoozes)
+		}
+		excludedCount := 0
+		if value, ok := data["excluded_class_snooze_count"]; ok {
+			excludedCount = intValue(value)
+		}
+		excludedByClassLen := 0
+		if excluded, ok := data["excluded_class_snoozes_by_class"].([]interface{}); ok {
+			excludedByClassLen = len(excluded)
+		}
+		topExcludedClass := ""
+		if excluded, ok := data["excluded_class_snoozes_by_class"].([]interface{}); ok && len(excluded) > 0 {
+			if entry, ok := excluded[0].(map[string]interface{}); ok {
+				topExcludedClass = strings.TrimSpace(fmt.Sprint(entry["bucket_class"]))
+			}
+		}
+		received = append(received, receivedEvent{
+			Event:              strings.TrimSpace(fmt.Sprint(payload["event"])),
+			Count:              count,
+			ExcludedCount:      excludedCount,
+			ExcludedByClassLen: excludedByClassLen,
+			TopExcludedClass:   topExcludedClass,
+		})
+		w.WriteHeader(http.StatusOK)
+	})
+	defer server.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitAlertBucketClasses: map[string]config.LimitAlertBucketClassConfig{
+				"vip-jwt": {
+					KeyType:                 "jwt_sub",
+					BucketRegex:             "^vip-",
+					Priority:                10,
+					SnoozeExcludeFromDigest: true,
+				},
+				"standard-jwt": {
+					KeyType:                 "jwt_sub",
+					BucketRegex:             "^standard-",
+					Priority:                1,
+					SnoozeExcludeFromDigest: true,
+				},
+			},
+			NotificationWebhooks: []config.NotificationWebhook{{
+				URL:    server.URL,
+				Events: []string{"gateway.limit_class_snooze_expiring_digest", "gateway.limit_class_snooze_expiring"},
+			}},
+			MutationPolicy: config.MutationPolicy{
+				LimitClassSnoozeNotifications: config.PolicyAlertNotificationPolicy{
+					Enabled:                 true,
+					Interval:                "1m",
+					MinNotificationInterval: "1m",
+					Window:                  "15m",
+					SnoozeElevatedWithin:    "15m",
+					SnoozeCriticalWithin:    "5m",
+				},
+			},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	base := time.Now().UTC()
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	api.updateGatewayLimitClassAlertIncidentState([]gatewaypkg.RouteLimitClassAlert{{
+		Severity:            "critical",
+		ServiceName:         "agent",
+		RoutePath:           "/ai/chat",
+		LimitType:           "concurrency_queue_full",
+		KeyType:             "jwt_sub",
+		BucketClass:         "vip-jwt",
+		Count:               5,
+		QueueFullRejections: 5,
+	}}, base)
+	api.queueDigestNotifyMu.Lock()
+	for key, state := range api.limitClassAlertIncidentState {
+		state.SnoozedUntil = base.Add(4 * time.Minute)
+		state.SnoozedBy = "ops-lead"
+		api.limitClassAlertIncidentState[key] = state
+	}
+	api.queueDigestNotifyMu.Unlock()
+
+	api.reconcileGatewayLimitClassSnoozeNotifications(base)
+	if len(received) != 1 || received[0].Event != "gateway.limit_class_snooze_expiring" {
+		t.Fatalf("expected digest exclusion to suppress digest and keep expiring event, got %+v", received)
+	}
+}
+
+func TestReconcileGatewayLimitClassSnoozeNotificationsDigestExclusionAddsSummaryCounts(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("failed to chdir temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
+
+	type receivedEvent struct {
+		Event              string
+		Count              int
+		ExcludedCount      int
+		ExcludedByClassLen int
+		TopExcludedClass   string
+	}
+	received := make([]receivedEvent, 0, 8)
+	server := newNotificationTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode webhook payload: %v", err)
+		}
+		data, _ := payload["data"].(map[string]interface{})
+		count := 0
+		if snoozes, ok := data["snoozes"].([]interface{}); ok {
+			count = len(snoozes)
+		}
+		excludedCount := 0
+		if value, ok := data["excluded_class_snooze_count"]; ok {
+			excludedCount = intValue(value)
+		}
+		excludedByClassLen := 0
+		topExcludedClass := ""
+		if excluded, ok := data["excluded_class_snoozes_by_class"].([]interface{}); ok {
+			excludedByClassLen = len(excluded)
+			if len(excluded) > 0 {
+				if entry, ok := excluded[0].(map[string]interface{}); ok {
+					topExcludedClass = strings.TrimSpace(fmt.Sprint(entry["bucket_class"]))
+				}
+			}
+		}
+		received = append(received, receivedEvent{
+			Event:              strings.TrimSpace(fmt.Sprint(payload["event"])),
+			Count:              count,
+			ExcludedCount:      excludedCount,
+			ExcludedByClassLen: excludedByClassLen,
+			TopExcludedClass:   topExcludedClass,
+		})
+		w.WriteHeader(http.StatusOK)
+	})
+	defer server.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitAlertBucketClasses: map[string]config.LimitAlertBucketClassConfig{
+				"vip-jwt": {
+					KeyType:                 "jwt_sub",
+					BucketRegex:             "^vip-",
+					SnoozeExcludeFromDigest: true,
+				},
+			},
+			NotificationWebhooks: []config.NotificationWebhook{{
+				URL:    server.URL,
+				Events: []string{"gateway.limit_class_snooze_expiring_digest", "gateway.limit_class_snooze_expiring"},
+			}},
+			MutationPolicy: config.MutationPolicy{
+				LimitClassSnoozeNotifications: config.PolicyAlertNotificationPolicy{
+					Enabled:                 true,
+					Interval:                "1m",
+					MinNotificationInterval: "1m",
+					Window:                  "15m",
+					SnoozeElevatedWithin:    "15m",
+					SnoozeCriticalWithin:    "5m",
+				},
+			},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	base := time.Now().UTC()
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	api.updateGatewayLimitClassAlertIncidentState([]gatewaypkg.RouteLimitClassAlert{
+		{
+			Severity:            "critical",
+			ServiceName:         "agent",
+			RoutePath:           "/ai/chat",
+			LimitType:           "concurrency_queue_full",
+			KeyType:             "jwt_sub",
+			BucketClass:         "vip-jwt",
+			Count:               5,
+			QueueFullRejections: 5,
+		},
+		{
+			Severity:            "critical",
+			ServiceName:         "agent",
+			RoutePath:           "/ai/search",
+			LimitType:           "concurrency_queue_full",
+			KeyType:             "jwt_sub",
+			BucketClass:         "standard-jwt",
+			Count:               5,
+			QueueFullRejections: 5,
+		},
+		{
+			Severity:            "critical",
+			ServiceName:         "agent",
+			RoutePath:           "/ai/search-2",
+			LimitType:           "concurrency_queue_full",
+			KeyType:             "jwt_sub",
+			BucketClass:         "standard-jwt",
+			Count:               5,
+			QueueFullRejections: 5,
+		},
+		{
+			Severity:            "critical",
+			ServiceName:         "agent",
+			RoutePath:           "/ai/public",
+			LimitType:           "concurrency_queue_full",
+			KeyType:             "jwt_sub",
+			BucketClass:         "public-jwt",
+			Count:               5,
+			QueueFullRejections: 5,
+		},
+	}, base)
+	api.queueDigestNotifyMu.Lock()
+	for key, state := range api.limitClassAlertIncidentState {
+		state.SnoozedUntil = base.Add(4 * time.Minute)
+		state.SnoozedBy = "ops-lead"
+		api.limitClassAlertIncidentState[key] = state
+	}
+	api.queueDigestNotifyMu.Unlock()
+
+	api.reconcileGatewayLimitClassSnoozeNotifications(base)
+	if len(received) != 5 {
+		t.Fatalf("expected digest plus four expiring events, got %d (%+v)", len(received), received)
+	}
+	digest := received[0]
+	if digest.Event != "gateway.limit_class_snooze_expiring_digest" || digest.Count != 3 || digest.ExcludedCount != 1 || digest.ExcludedByClassLen != 1 || digest.TopExcludedClass != "vip-jwt" {
+		t.Fatalf("expected digest to keep three visible snoozes plus one excluded-class summary, got %+v", digest)
+	}
+}
+
+func TestReconcileGatewayLimitClassSnoozeNotificationsHonorsDetailedMinBucketClassPriority(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("failed to chdir temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
+
+	type receivedEvent struct {
+		Event              string
+		Count              int
+		ExcludedCount      int
+		ExcludedByClassLen int
+		TopExcludedClass   string
+	}
+	received := make([]receivedEvent, 0, 8)
+	server := newNotificationTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode webhook payload: %v", err)
+		}
+		data, _ := payload["data"].(map[string]interface{})
+		count := 0
+		if snoozes, ok := data["snoozes"].([]interface{}); ok {
+			count = len(snoozes)
+		}
+		excludedCount := 0
+		if value, ok := data["excluded_class_snooze_count"]; ok {
+			excludedCount = intValue(value)
+		}
+		excludedByClassLen := 0
+		topExcludedClass := ""
+		if excluded, ok := data["excluded_class_snoozes_by_class"].([]interface{}); ok {
+			excludedByClassLen = len(excluded)
+			if len(excluded) > 0 {
+				if entry, ok := excluded[0].(map[string]interface{}); ok {
+					topExcludedClass = strings.TrimSpace(fmt.Sprint(entry["bucket_class"]))
+				}
+			}
+		}
+		received = append(received, receivedEvent{
+			Event:              strings.TrimSpace(fmt.Sprint(payload["event"])),
+			Count:              count,
+			ExcludedCount:      excludedCount,
+			ExcludedByClassLen: excludedByClassLen,
+			TopExcludedClass:   topExcludedClass,
+		})
+		w.WriteHeader(http.StatusOK)
+	})
+	defer server.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitAlertBucketClasses: map[string]config.LimitAlertBucketClassConfig{
+				"vip-jwt": {
+					KeyType:     "jwt_sub",
+					BucketRegex: "^vip-",
+					Priority:    10,
+				},
+				"standard-jwt": {
+					KeyType:     "jwt_sub",
+					BucketRegex: "^standard-",
+					Priority:    1,
+				},
+			},
+			NotificationWebhooks: []config.NotificationWebhook{{
+				URL:    server.URL,
+				Events: []string{"gateway.limit_class_snooze_expiring_digest", "gateway.limit_class_snooze_expiring"},
+			}},
+			MutationPolicy: config.MutationPolicy{
+				LimitClassSnoozeNotifications: config.PolicyAlertNotificationPolicy{
+					Enabled:                        true,
+					Interval:                       "1m",
+					MinNotificationInterval:        "1m",
+					Window:                         "15m",
+					SnoozeElevatedWithin:           "15m",
+					SnoozeCriticalWithin:           "5m",
+					DetailedMinBucketClassPriority: 5,
+				},
+			},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	base := time.Now().UTC()
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	api.updateGatewayLimitClassAlertIncidentState([]gatewaypkg.RouteLimitClassAlert{
+		{
+			Severity:            "critical",
+			ServiceName:         "agent",
+			RoutePath:           "/ai/chat",
+			LimitType:           "concurrency_queue_full",
+			KeyType:             "jwt_sub",
+			BucketClass:         "vip-jwt",
+			Count:               5,
+			QueueFullRejections: 5,
+		},
+		{
+			Severity:            "critical",
+			ServiceName:         "agent",
+			RoutePath:           "/ai/search",
+			LimitType:           "concurrency_queue_full",
+			KeyType:             "jwt_sub",
+			BucketClass:         "standard-jwt",
+			Count:               5,
+			QueueFullRejections: 5,
+		},
+	}, base)
+	api.queueDigestNotifyMu.Lock()
+	for key, state := range api.limitClassAlertIncidentState {
+		state.SnoozedUntil = base.Add(4 * time.Minute)
+		state.SnoozedBy = "ops-lead"
+		api.limitClassAlertIncidentState[key] = state
+	}
+	api.queueDigestNotifyMu.Unlock()
+
+	api.reconcileGatewayLimitClassSnoozeNotifications(base)
+	if len(received) != 3 {
+		t.Fatalf("expected digest plus two expiring events, got %d (%+v)", len(received), received)
+	}
+	digest := received[0]
+	if digest.Event != "gateway.limit_class_snooze_expiring_digest" || digest.Count != 1 || digest.ExcludedCount != 1 || digest.ExcludedByClassLen != 1 || digest.TopExcludedClass != "standard-jwt" {
+		t.Fatalf("expected digest to keep one detailed snooze and summarize one lower-priority class, got %+v", digest)
+	}
+}
+
+func TestReconcileGatewayLimitClassSnoozeNotificationsHonorsDetailedMaxBucketClasses(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("failed to chdir temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
+
+	type receivedEvent struct {
+		Event              string
+		Count              int
+		ExcludedCount      int
+		ExcludedByClassLen int
+		TopExcludedClass   string
+	}
+	received := make([]receivedEvent, 0, 8)
+	server := newNotificationTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode webhook payload: %v", err)
+		}
+		data, _ := payload["data"].(map[string]interface{})
+		count := 0
+		if snoozes, ok := data["snoozes"].([]interface{}); ok {
+			count = len(snoozes)
+		}
+		excludedCount := 0
+		if value, ok := data["excluded_class_snooze_count"]; ok {
+			excludedCount = intValue(value)
+		}
+		excludedByClassLen := 0
+		topExcludedClass := ""
+		if excluded, ok := data["excluded_class_snoozes_by_class"].([]interface{}); ok {
+			excludedByClassLen = len(excluded)
+			if len(excluded) > 0 {
+				if entry, ok := excluded[0].(map[string]interface{}); ok {
+					topExcludedClass = strings.TrimSpace(fmt.Sprint(entry["bucket_class"]))
+				}
+			}
+		}
+		received = append(received, receivedEvent{
+			Event:              strings.TrimSpace(fmt.Sprint(payload["event"])),
+			Count:              count,
+			ExcludedCount:      excludedCount,
+			ExcludedByClassLen: excludedByClassLen,
+			TopExcludedClass:   topExcludedClass,
+		})
+		w.WriteHeader(http.StatusOK)
+	})
+	defer server.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitAlertBucketClasses: map[string]config.LimitAlertBucketClassConfig{
+				"vip-jwt": {
+					KeyType:     "jwt_sub",
+					BucketRegex: "^vip-",
+					Priority:    10,
+				},
+				"gold-jwt": {
+					KeyType:     "jwt_sub",
+					BucketRegex: "^gold-",
+					Priority:    7,
+				},
+			},
+			NotificationWebhooks: []config.NotificationWebhook{{
+				URL:    server.URL,
+				Events: []string{"gateway.limit_class_snooze_expiring_digest", "gateway.limit_class_snooze_expiring"},
+			}},
+			MutationPolicy: config.MutationPolicy{
+				LimitClassSnoozeNotifications: config.PolicyAlertNotificationPolicy{
+					Enabled:                        true,
+					Interval:                       "1m",
+					MinNotificationInterval:        "1m",
+					Window:                         "15m",
+					SnoozeElevatedWithin:           "15m",
+					SnoozeCriticalWithin:           "5m",
+					DetailedMinBucketClassPriority: 5,
+					DetailedMaxBucketClasses:       1,
+				},
+			},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	base := time.Now().UTC()
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	api.updateGatewayLimitClassAlertIncidentState([]gatewaypkg.RouteLimitClassAlert{
+		{
+			Severity:            "critical",
+			ServiceName:         "agent",
+			RoutePath:           "/ai/chat",
+			LimitType:           "concurrency_queue_full",
+			KeyType:             "jwt_sub",
+			BucketClass:         "vip-jwt",
+			Count:               5,
+			QueueFullRejections: 5,
+		},
+		{
+			Severity:            "critical",
+			ServiceName:         "agent",
+			RoutePath:           "/ai/search",
+			LimitType:           "concurrency_queue_full",
+			KeyType:             "jwt_sub",
+			BucketClass:         "gold-jwt",
+			Count:               5,
+			QueueFullRejections: 5,
+		},
+	}, base)
+	api.queueDigestNotifyMu.Lock()
+	for key, state := range api.limitClassAlertIncidentState {
+		state.SnoozedUntil = base.Add(4 * time.Minute)
+		state.SnoozedBy = "ops-lead"
+		api.limitClassAlertIncidentState[key] = state
+	}
+	api.queueDigestNotifyMu.Unlock()
+
+	api.reconcileGatewayLimitClassSnoozeNotifications(base)
+	if len(received) != 3 {
+		t.Fatalf("expected digest plus two expiring events, got %d (%+v)", len(received), received)
+	}
+	digest := received[0]
+	if digest.Event != "gateway.limit_class_snooze_expiring_digest" || digest.Count != 1 || digest.ExcludedCount != 1 || digest.ExcludedByClassLen != 1 || digest.TopExcludedClass != "gold-jwt" {
+		t.Fatalf("expected digest quota to keep only the top class snooze detailed and summarize the next class, got %+v", digest)
+	}
+}
+
+func TestNotifyGatewayLimitClassSnoozesShapesDigestPerWebhookBudget(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("failed to chdir temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
+
+	type digestView struct {
+		Count         int
+		ExcludedCount int
+	}
+	views := make([]digestView, 0, 2)
+	serverA := newNotificationTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode webhook payload: %v", err)
+		}
+		if strings.TrimSpace(fmt.Sprint(payload["event"])) == "gateway.limit_class_snooze_expiring_digest" {
+			data, _ := payload["data"].(map[string]interface{})
+			count := 0
+			if snoozes, ok := data["snoozes"].([]interface{}); ok {
+				count = len(snoozes)
+			}
+			views = append(views, digestView{
+				Count:         count,
+				ExcludedCount: intValue(data["excluded_class_snooze_count"]),
+			})
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	defer serverA.Close()
+	serverB := newNotificationTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode webhook payload: %v", err)
+		}
+		if strings.TrimSpace(fmt.Sprint(payload["event"])) == "gateway.limit_class_snooze_expiring_digest" {
+			data, _ := payload["data"].(map[string]interface{})
+			count := 0
+			if snoozes, ok := data["snoozes"].([]interface{}); ok {
+				count = len(snoozes)
+			}
+			views = append(views, digestView{
+				Count:         count,
+				ExcludedCount: intValue(data["excluded_class_snooze_count"]),
+			})
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	defer serverB.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitAlertBucketClasses: map[string]config.LimitAlertBucketClassConfig{
+				"vip-jwt":  {KeyType: "jwt_sub", BucketRegex: "^vip-", Priority: 10},
+				"gold-jwt": {KeyType: "jwt_sub", BucketRegex: "^gold-", Priority: 7},
+			},
+			LimitAlertProfiles: map[string]config.LimitAlertRecipientProfile{
+				"top-one": {LimitClassDigestMaxBucketClasses: 1},
+				"top-two": {LimitClassDigestMaxBucketClasses: 2},
+			},
+			NotificationWebhooks: []config.NotificationWebhook{
+				{URL: serverA.URL, Events: []string{"gateway.limit_class_snooze_expiring_digest"}, LimitAlertProfile: "top-one"},
+				{URL: serverB.URL, Events: []string{"gateway.limit_class_snooze_expiring_digest"}, LimitAlertProfile: "top-two"},
+			},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	base := time.Now().UTC()
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	api.updateGatewayLimitClassAlertIncidentState([]gatewaypkg.RouteLimitClassAlert{
+		{
+			Severity:            "critical",
+			ServiceName:         "agent",
+			RoutePath:           "/ai/chat",
+			LimitType:           "concurrency_queue_full",
+			KeyType:             "jwt_sub",
+			BucketClass:         "vip-jwt",
+			Count:               5,
+			QueueFullRejections: 5,
+		},
+		{
+			Severity:            "critical",
+			ServiceName:         "agent",
+			RoutePath:           "/ai/search",
+			LimitType:           "concurrency_queue_full",
+			KeyType:             "jwt_sub",
+			BucketClass:         "gold-jwt",
+			Count:               5,
+			QueueFullRejections: 5,
+		},
+	}, base)
+	api.queueDigestNotifyMu.Lock()
+	for key, state := range api.limitClassAlertIncidentState {
+		state.SnoozedUntil = base.Add(4 * time.Minute)
+		state.SnoozedBy = "ops-lead"
+		api.limitClassAlertIncidentState[key] = state
+	}
+	api.queueDigestNotifyMu.Unlock()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/gateway/limit-class-snoozes/notify?expiring_within=15m", nil)
+	resp := httptest.NewRecorder()
+	api.notifyGatewayLimitClassSnoozes(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if len(views) != 2 {
+		t.Fatalf("expected two per-webhook snooze digest views, got %d (%+v)", len(views), views)
+	}
+	if views[0].Count != 1 || views[0].ExcludedCount != 1 {
+		t.Fatalf("expected top-one receiver to get one detailed snooze and one excluded snooze, got %+v", views[0])
+	}
+	if views[1].Count != 2 || views[1].ExcludedCount != 0 {
+		t.Fatalf("expected top-two receiver to get both detailed snoozes, got %+v", views[1])
+	}
+}
+
+func TestNotifyGatewayLimitClassSnoozesShapesDigestPerWebhookSeverity(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working directory: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("failed to chdir temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
+
+	type digestView struct {
+		Count         int
+		ExcludedCount int
+	}
+	views := make([]digestView, 0, 2)
+	serverA := newNotificationTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode webhook payload: %v", err)
+		}
+		if strings.TrimSpace(fmt.Sprint(payload["event"])) == "gateway.limit_class_snooze_expiring_digest" {
+			data, _ := payload["data"].(map[string]interface{})
+			count := 0
+			if snoozes, ok := data["snoozes"].([]interface{}); ok {
+				count = len(snoozes)
+			}
+			views = append(views, digestView{
+				Count:         count,
+				ExcludedCount: intValue(data["excluded_class_snooze_count"]),
+			})
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	defer serverA.Close()
+	serverB := newNotificationTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("failed to decode webhook payload: %v", err)
+		}
+		if strings.TrimSpace(fmt.Sprint(payload["event"])) == "gateway.limit_class_snooze_expiring_digest" {
+			data, _ := payload["data"].(map[string]interface{})
+			count := 0
+			if snoozes, ok := data["snoozes"].([]interface{}); ok {
+				count = len(snoozes)
+			}
+			views = append(views, digestView{
+				Count:         count,
+				ExcludedCount: intValue(data["excluded_class_snooze_count"]),
+			})
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	defer serverB.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitAlertBucketClasses: map[string]config.LimitAlertBucketClassConfig{
+				"vip-jwt":  {KeyType: "jwt_sub", BucketRegex: "^vip-", Priority: 10},
+				"gold-jwt": {KeyType: "jwt_sub", BucketRegex: "^gold-", Priority: 7},
+			},
+			LimitAlertProfiles: map[string]config.LimitAlertRecipientProfile{
+				"critical-only": {LimitClassDigestMinSeverity: "critical"},
+				"warning-plus":  {LimitClassDigestMinSeverity: "warning"},
+			},
+			NotificationWebhooks: []config.NotificationWebhook{
+				{URL: serverA.URL, Events: []string{"gateway.limit_class_snooze_expiring_digest"}, LimitAlertProfile: "critical-only"},
+				{URL: serverB.URL, Events: []string{"gateway.limit_class_snooze_expiring_digest"}, LimitAlertProfile: "warning-plus"},
+			},
+		},
+	}
+	gw, err := gatewaypkg.NewGateway(gatewaypkg.Dependencies{Config: cfg, Logger: logging.NewLogger(false)}, "test")
+	if err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	base := time.Now().UTC()
+
+	api := NewManagementAPI(gw, logging.NewLogger(false), nil)
+	api.updateGatewayLimitClassAlertIncidentState([]gatewaypkg.RouteLimitClassAlert{
+		{
+			Severity:            "critical",
+			ServiceName:         "agent",
+			RoutePath:           "/ai/chat",
+			LimitType:           "concurrency_queue_full",
+			KeyType:             "jwt_sub",
+			BucketClass:         "vip-jwt",
+			Count:               5,
+			QueueFullRejections: 5,
+		},
+		{
+			Severity:            "critical",
+			ServiceName:         "agent",
+			RoutePath:           "/ai/search",
+			LimitType:           "concurrency_queue_full",
+			KeyType:             "jwt_sub",
+			BucketClass:         "gold-jwt",
+			Count:               5,
+			QueueFullRejections: 5,
+		},
+	}, base)
+	api.queueDigestNotifyMu.Lock()
+	for key, state := range api.limitClassAlertIncidentState {
+		if state.BucketClass == "vip-jwt" {
+			state.SnoozedUntil = base.Add(4 * time.Minute)
+		} else {
+			state.SnoozedUntil = base.Add(10 * time.Minute)
+		}
+		state.SnoozedBy = "ops-lead"
+		api.limitClassAlertIncidentState[key] = state
+	}
+	api.queueDigestNotifyMu.Unlock()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/gateway/limit-class-snoozes/notify?expiring_within=15m", nil)
+	resp := httptest.NewRecorder()
+	api.notifyGatewayLimitClassSnoozes(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+	if len(views) != 2 {
+		t.Fatalf("expected two per-webhook severity-shaped snooze digest views, got %d (%+v)", len(views), views)
+	}
+	if views[0].Count != 1 || views[0].ExcludedCount != 1 {
+		t.Fatalf("expected critical-only receiver to keep only the critical snooze detailed, got %+v", views[0])
+	}
+	if views[1].Count != 2 || views[1].ExcludedCount != 0 {
+		t.Fatalf("expected warning-plus receiver to keep both snoozes detailed, got %+v", views[1])
+	}
+}
+
+func TestShapeLimitClassDigestPayloadForReceiverHonorsExactSeverities(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitAlertBucketClasses: map[string]config.LimitAlertBucketClassConfig{
+				"vip-jwt":      {KeyType: "jwt_sub", BucketRegex: "^vip-", Priority: 10},
+				"gold-jwt":     {KeyType: "jwt_sub", BucketRegex: "^gold-", Priority: 7},
+				"standard-jwt": {KeyType: "jwt_sub", BucketRegex: "^standard-", Priority: 5},
+			},
+		},
+	}
+	api := NewManagementAPI(mustTestGateway(t, cfg), logging.NewLogger(false), nil)
+	payload := managementWebhookEvent{
+		Event: "gateway.limit_class_snooze_expiring_digest",
+		Data: map[string]interface{}{
+			"snoozes": []interface{}{
+				map[string]interface{}{"severity": "critical", "bucket_class": "vip-jwt"},
+				map[string]interface{}{"severity": "elevated", "bucket_class": "gold-jwt"},
+				map[string]interface{}{"severity": "warning", "bucket_class": "standard-jwt"},
+			},
+		},
+	}
+
+	shaped := api.shapeLimitClassDigestPayloadForReceiver(config.NotificationWebhook{
+		LimitClassDigestSeverities: []string{"warning", "critical"},
+	}, payload)
+	data := shaped.Data
+
+	snoozes, ok := data["snoozes"].([]interface{})
+	if !ok {
+		t.Fatalf("expected shaped snoozes slice, got %T", data["snoozes"])
+	}
+	if len(snoozes) != 2 {
+		t.Fatalf("expected warning and critical snoozes to remain detailed, got %d (%v)", len(snoozes), snoozes)
+	}
+	gotSeverities := make([]string, 0, len(snoozes))
+	for _, item := range snoozes {
+		entry, _ := item.(map[string]interface{})
+		gotSeverities = append(gotSeverities, normalizeSLABreachTier(fmt.Sprint(entry["severity"])))
+	}
+	sort.Strings(gotSeverities)
+	if strings.Join(gotSeverities, ",") != "critical,warning" {
+		t.Fatalf("expected detailed severities critical and warning, got %v", gotSeverities)
+	}
+	if intValue(data["excluded_class_snooze_count"]) != 1 {
+		t.Fatalf("expected one excluded snooze, got %+v", data["excluded_class_snooze_count"])
+	}
+	if receiverSeverities, ok := data["receiver_detailed_severities"].([]string); ok {
+		sort.Strings(receiverSeverities)
+		if strings.Join(receiverSeverities, ",") != "critical,warning" {
+			t.Fatalf("expected receiver severities critical and warning, got %v", receiverSeverities)
+		}
+	} else {
+		t.Fatalf("expected receiver_detailed_severities []string, got %T", data["receiver_detailed_severities"])
+	}
+}
+
+func TestEffectiveNotificationWebhookLimitAlertProfileInheritsDefaults(t *testing.T) {
+	profileSeverities := []string{"critical"}
+	profiles := map[string]config.LimitAlertRecipientProfile{
+		"ops": {
+			MinLimitAlertSeverity:                  "elevated",
+			MinLimitAlertBucketClassPriority:       7,
+			LimitClassDigestMinSeverity:            "warning",
+			LimitClassDigestTypes:                  []string{"snooze"},
+			LimitClassDigestSeverities:             profileSeverities,
+			LimitClassDigestMinBucketClassPriority: 5,
+			LimitClassDigestMaxBucketClasses:       2,
+			LimitAlertTypes:                        []string{"concurrency_queue_full"},
+			LimitAlertKeyTypes:                     []string{"jwt_sub"},
+			LimitAlertBucketClasses:                []string{"vip-jwt"},
+			LimitAlertBucketIDRegex:                "^vip-",
+			LimitAlertCooldown:                     "10m",
+			LimitClassSnoozeExpiryCooldown:         "5m",
+			LimitClassSnoozeExpiryWithin:           "15m",
+			LimitClassSnoozeExpiryStages:           []string{"critical"},
+			LimitClassSnoozeEventTypes:             []string{"expiring"},
+			LimitClassDigestTruncatedReasonBucketExactSeverityPolicyPresetChain: []string{"base-hidden"},
+			LimitClassDigestTruncatedReasonBucketExactSeverityPolicyPreset:      "shared-exact",
+		},
+	}
+	webhook := effectiveNotificationWebhookLimitAlertProfile(config.NotificationWebhook{
+		LimitAlertProfile:     "ops",
+		MinLimitAlertSeverity: "critical",
+		LimitAlertTypes:       []string{"rate_limit"},
+	}, profiles)
+
+	if webhook.MinLimitAlertSeverity != "critical" {
+		t.Fatalf("expected explicit min severity to win, got %q", webhook.MinLimitAlertSeverity)
+	}
+	if strings.Join(webhook.LimitAlertTypes, ",") != "rate_limit" {
+		t.Fatalf("expected explicit alert types to win, got %v", webhook.LimitAlertTypes)
+	}
+	if webhook.MinLimitAlertBucketClassPriority != 7 || webhook.LimitClassDigestMaxBucketClasses != 2 {
+		t.Fatalf("expected integer profile defaults to inherit, got %+v", webhook)
+	}
+	if strings.Join(webhook.LimitClassDigestTypes, ",") != "snooze" || strings.Join(webhook.LimitClassDigestSeverities, ",") != "critical" {
+		t.Fatalf("expected digest profile slices to inherit, got types=%v severities=%v", webhook.LimitClassDigestTypes, webhook.LimitClassDigestSeverities)
+	}
+	if webhook.LimitAlertCooldown != "10m" || webhook.LimitClassSnoozeExpiryWithin != "15m" {
+		t.Fatalf("expected cooldown/window profile defaults to inherit, got %+v", webhook)
+	}
+	if strings.Join(webhook.LimitClassDigestTruncatedReasonBucketExactSeverityPolicyPresetChain, ",") != "base-hidden" {
+		t.Fatalf("expected hidden strategy policy preset chain to inherit, got %v", webhook.LimitClassDigestTruncatedReasonBucketExactSeverityPolicyPresetChain)
+	}
+	if webhook.LimitClassDigestTruncatedReasonBucketExactSeverityPolicyPreset != "shared-exact" {
+		t.Fatalf("expected hidden strategy policy preset to inherit, got %q", webhook.LimitClassDigestTruncatedReasonBucketExactSeverityPolicyPreset)
+	}
+
+	profileSeverities[0] = "warning"
+	if strings.Join(webhook.LimitClassDigestSeverities, ",") != "critical" {
+		t.Fatalf("expected inherited slices to be cloned, got %v", webhook.LimitClassDigestSeverities)
+	}
+}
+
+func TestEffectiveNotificationWebhookLimitClassDigestProfileInheritsDefaults(t *testing.T) {
+	profiles := map[string]config.LimitAlertRecipientProfile{
+		"shared-digest": {
+			LimitClassDigestTypes:                                               []string{"snooze"},
+			LimitClassDigestSummaryOnlyTypes:                                    []string{"alert"},
+			LimitClassDigestMinSeverity:                                         "elevated",
+			LimitClassDigestMinBucketClassPriority:                              8,
+			LimitClassDigestTruncatedReasonBucketMode:                           "detailed",
+			LimitClassDigestTruncatedReasonBucketHiddenStrategyOrder:            []string{"max_reasons", "exact_severity"},
+			LimitClassDigestTruncatedReasonBucketExactSeverityPolicyPresetChain: []string{"base-hidden"},
+			LimitClassDigestTruncatedReasonBucketExactSeverityPolicyPreset:      "shared-exact",
+		},
+	}
+
+	webhook := effectiveNotificationWebhookLimitClassDigestProfile(config.NotificationWebhook{
+		LimitClassDigestProfile:          "shared-digest",
+		LimitClassDigestMinSeverity:      "critical",
+		LimitClassDigestSummaryOnlyTypes: []string{"snooze"},
+	}, profiles)
+
+	if webhook.LimitClassDigestMinSeverity != "critical" {
+		t.Fatalf("expected explicit digest min severity to win, got %q", webhook.LimitClassDigestMinSeverity)
+	}
+	if strings.Join(webhook.LimitClassDigestTypes, ",") != "snooze" {
+		t.Fatalf("expected digest types to inherit, got %v", webhook.LimitClassDigestTypes)
+	}
+	if strings.Join(webhook.LimitClassDigestSummaryOnlyTypes, ",") != "snooze" {
+		t.Fatalf("expected explicit summary-only types to win, got %v", webhook.LimitClassDigestSummaryOnlyTypes)
+	}
+	if webhook.LimitClassDigestMinBucketClassPriority != 8 || webhook.LimitClassDigestTruncatedReasonBucketMode != "detailed" {
+		t.Fatalf("expected digest defaults to inherit, got %+v", webhook)
+	}
+	if strings.Join(webhook.LimitClassDigestTruncatedReasonBucketHiddenStrategyOrder, ",") != "max_reasons,exact_severity" {
+		t.Fatalf("expected nested strategy order to inherit, got %v", webhook.LimitClassDigestTruncatedReasonBucketHiddenStrategyOrder)
+	}
+	if strings.Join(webhook.LimitClassDigestTruncatedReasonBucketExactSeverityPolicyPresetChain, ",") != "base-hidden" {
+		t.Fatalf("expected digest preset chain to inherit, got %v", webhook.LimitClassDigestTruncatedReasonBucketExactSeverityPolicyPresetChain)
+	}
+	if webhook.LimitClassDigestTruncatedReasonBucketExactSeverityPolicyPreset != "shared-exact" {
+		t.Fatalf("expected digest preset name to inherit, got %q", webhook.LimitClassDigestTruncatedReasonBucketExactSeverityPolicyPreset)
+	}
+}
+
+func TestEffectiveNotificationWebhookLimitClassDigestProfileChainLayersDefaults(t *testing.T) {
+	profiles := map[string]config.LimitAlertRecipientProfile{
+		"base": {
+			LimitClassDigestTypes:                     []string{"alert"},
+			LimitClassDigestMinSeverity:               "warning",
+			LimitClassDigestMinBucketClassPriority:    4,
+			LimitClassDigestOverflowReasons:           []string{"low_count"},
+			LimitClassDigestTruncatedReasonBucketMode: "summary",
+		},
+		"overlay": {
+			LimitClassDigestMinSeverity:                                         "elevated",
+			LimitClassDigestOverflowReasons:                                     []string{"low_priority"},
+			LimitClassDigestTruncatedReasonBucketExactSeverityPolicyPreset:      "shared-exact",
+			LimitClassDigestTruncatedReasonBucketExactSeverityPolicyPresetChain: []string{"base-hidden"},
+		},
+		"strict": {
+			LimitClassDigestTypes:                  []string{"snooze"},
+			LimitClassDigestMinBucketClassPriority: 9,
+		},
+	}
+
+	webhook := effectiveNotificationWebhookLimitClassDigestProfile(config.NotificationWebhook{
+		LimitClassDigestProfileChain: []string{"base", "overlay"},
+		LimitClassDigestProfile:      "strict",
+		LimitClassDigestMinSeverity:  "critical",
+	}, profiles)
+
+	if strings.Join(webhook.LimitClassDigestTypes, ",") != "snooze" {
+		t.Fatalf("expected single digest profile to override chain types, got %v", webhook.LimitClassDigestTypes)
+	}
+	if webhook.LimitClassDigestMinSeverity != "critical" {
+		t.Fatalf("expected explicit digest min severity to win, got %q", webhook.LimitClassDigestMinSeverity)
+	}
+	if webhook.LimitClassDigestMinBucketClassPriority != 9 {
+		t.Fatalf("expected single digest profile to override chain priority, got %d", webhook.LimitClassDigestMinBucketClassPriority)
+	}
+	if strings.Join(webhook.LimitClassDigestOverflowReasons, ",") != "low_priority" {
+		t.Fatalf("expected later chain digest profile to override overflow reasons, got %v", webhook.LimitClassDigestOverflowReasons)
+	}
+	if webhook.LimitClassDigestTruncatedReasonBucketMode != "summary" {
+		t.Fatalf("expected base chain digest profile to fill missing truncated mode, got %q", webhook.LimitClassDigestTruncatedReasonBucketMode)
+	}
+	if webhook.LimitClassDigestTruncatedReasonBucketExactSeverityPolicyPreset != "shared-exact" {
+		t.Fatalf("expected overlay digest profile to supply preset, got %q", webhook.LimitClassDigestTruncatedReasonBucketExactSeverityPolicyPreset)
+	}
+	if strings.Join(webhook.LimitClassDigestTruncatedReasonBucketExactSeverityPolicyPresetChain, ",") != "base-hidden" {
+		t.Fatalf("expected overlay digest profile to supply preset chain, got %v", webhook.LimitClassDigestTruncatedReasonBucketExactSeverityPolicyPresetChain)
+	}
+}
+
+func TestResolveNotificationWebhookHiddenStrategyPolicyPresetsAppliesPresetWhenPolicyUnset(t *testing.T) {
+	webhook := resolveNotificationWebhookHiddenStrategyPolicyPresets(config.NotificationWebhook{
+		LimitClassDigestTruncatedReasonBucketExactSeverityPolicyPresetChain: []string{"base-exact"},
+		LimitClassDigestTruncatedReasonBucketExactSeverityPolicyPreset:      "shared-exact",
+		LimitClassDigestTruncatedReasonBucketMinSeverityPolicyPresetChain:   []string{"base-min"},
+		LimitClassDigestTruncatedReasonBucketMinSeverityPolicyPreset:        "shared-min",
+		LimitClassDigestTruncatedReasonBucketMaxReasonsPolicyPresetChain:    []string{"base-max"},
+		LimitClassDigestTruncatedReasonBucketMaxReasonsPolicyPreset:         "shared-max",
+	}, map[string]config.LimitClassDigestHiddenStrategyPolicy{
+		"base-exact":   {MinReasons: 2, PriorityCap: 3},
+		"shared-exact": {DominantMode: "weighted_score", PriorityWeight: 7},
+		"base-min":     {MinItems: 3, PriorityWeight: 2},
+		"shared-min":   {DominantMode: "most_hidden_items", ReasonCap: 5},
+		"base-max":     {ItemWeight: 11},
+		"shared-max":   {DominantMode: "order_first", ItemCap: 13},
+	})
+
+	if webhook.LimitClassDigestTruncatedReasonBucketExactSeverityPolicy == nil || webhook.LimitClassDigestTruncatedReasonBucketExactSeverityPolicy.PriorityWeight != 7 || webhook.LimitClassDigestTruncatedReasonBucketExactSeverityPolicy.PriorityCap != 3 || webhook.LimitClassDigestTruncatedReasonBucketExactSeverityPolicy.MinReasons != 2 {
+		t.Fatalf("expected exact severity preset to resolve, got %+v", webhook.LimitClassDigestTruncatedReasonBucketExactSeverityPolicy)
+	}
+	if webhook.LimitClassDigestTruncatedReasonBucketMinSeverityPolicy == nil || webhook.LimitClassDigestTruncatedReasonBucketMinSeverityPolicy.ReasonCap != 5 || webhook.LimitClassDigestTruncatedReasonBucketMinSeverityPolicy.MinItems != 3 || webhook.LimitClassDigestTruncatedReasonBucketMinSeverityPolicy.PriorityWeight != 2 {
+		t.Fatalf("expected min severity preset to resolve, got %+v", webhook.LimitClassDigestTruncatedReasonBucketMinSeverityPolicy)
+	}
+	if webhook.LimitClassDigestTruncatedReasonBucketMaxReasonsPolicy == nil || webhook.LimitClassDigestTruncatedReasonBucketMaxReasonsPolicy.ItemCap != 13 || webhook.LimitClassDigestTruncatedReasonBucketMaxReasonsPolicy.ItemWeight != 11 {
+		t.Fatalf("expected max reasons preset to resolve, got %+v", webhook.LimitClassDigestTruncatedReasonBucketMaxReasonsPolicy)
+	}
+}
+
+func TestResolveNotificationWebhookHiddenStrategyPolicyPresetsKeepsExplicitPolicy(t *testing.T) {
+	webhook := resolveNotificationWebhookHiddenStrategyPolicyPresets(config.NotificationWebhook{
+		LimitClassDigestTruncatedReasonBucketExactSeverityPolicyPresetChain: []string{"base-exact"},
+		LimitClassDigestTruncatedReasonBucketExactSeverityPolicyPreset:      "shared-exact",
+		LimitClassDigestTruncatedReasonBucketExactSeverityPolicy:            &config.LimitClassDigestHiddenStrategyPolicy{DominantMode: "order_first", PriorityWeight: 41},
+	}, map[string]config.LimitClassDigestHiddenStrategyPolicy{
+		"base-exact":   {PriorityCap: 3},
+		"shared-exact": {DominantMode: "weighted_score", PriorityWeight: 7},
+	})
+
+	if webhook.LimitClassDigestTruncatedReasonBucketExactSeverityPolicy == nil {
+		t.Fatal("expected exact severity policy to remain set")
+	}
+	if webhook.LimitClassDigestTruncatedReasonBucketExactSeverityPolicy.PriorityWeight != 41 || webhook.LimitClassDigestTruncatedReasonBucketExactSeverityPolicy.DominantMode != "order_first" || webhook.LimitClassDigestTruncatedReasonBucketExactSeverityPolicy.PriorityCap != 3 {
+		t.Fatalf("expected explicit exact severity policy to win over preset, got %+v", webhook.LimitClassDigestTruncatedReasonBucketExactSeverityPolicy)
+	}
+}
+
+func TestShapeLimitClassDigestPayloadForReceiverHonorsDigestTypes(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitAlertBucketClasses: map[string]config.LimitAlertBucketClassConfig{
+				"vip-jwt":  {KeyType: "jwt_sub", BucketRegex: "^vip-", Priority: 10},
+				"gold-jwt": {KeyType: "jwt_sub", BucketRegex: "^gold-", Priority: 7},
+			},
+		},
+	}
+	api := NewManagementAPI(mustTestGateway(t, cfg), logging.NewLogger(false), nil)
+
+	alertPayload := managementWebhookEvent{
+		Event: "gateway.limit_class_alert_digest",
+		Data: map[string]interface{}{
+			"alerts": []interface{}{
+				map[string]interface{}{"severity": "critical", "bucket_class": "vip-jwt"},
+				map[string]interface{}{"severity": "elevated", "bucket_class": "gold-jwt"},
+			},
+		},
+	}
+	snoozePayload := managementWebhookEvent{
+		Event: "gateway.limit_class_snooze_expiring_digest",
+		Data: map[string]interface{}{
+			"snoozes": []interface{}{
+				map[string]interface{}{"severity": "critical", "bucket_class": "vip-jwt"},
+				map[string]interface{}{"severity": "elevated", "bucket_class": "gold-jwt"},
+			},
+		},
+	}
+
+	webhook := config.NotificationWebhook{
+		LimitClassDigestTypes:       []string{"alert"},
+		LimitClassDigestMinSeverity: "critical",
+	}
+
+	shapedAlert := api.shapeLimitClassDigestPayloadForReceiver(webhook, alertPayload)
+	alerts, ok := shapedAlert.Data["alerts"].([]interface{})
+	if !ok {
+		t.Fatalf("expected shaped alerts slice, got %T", shapedAlert.Data["alerts"])
+	}
+	if len(alerts) != 1 {
+		t.Fatalf("expected alert digest shaping to keep only one alert, got %d", len(alerts))
+	}
+	if digestTypes, ok := shapedAlert.Data["receiver_detailed_digest_types"].([]string); !ok || len(digestTypes) != 1 || digestTypes[0] != "alert" {
+		t.Fatalf("expected receiver_detailed_digest_types to show alert-only shaping, got %v", shapedAlert.Data["receiver_detailed_digest_types"])
+	}
+
+	shapedSnooze := api.shapeLimitClassDigestPayloadForReceiver(webhook, snoozePayload)
+	if !reflect.DeepEqual(shapedSnooze, snoozePayload) {
+		t.Fatalf("expected snooze digest payload to remain unshaped when webhook only targets alert digests")
+	}
+}
+
+func TestShapeLimitClassDigestPayloadForReceiverHonorsSummaryOnlyDigestTypes(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitAlertBucketClasses: map[string]config.LimitAlertBucketClassConfig{
+				"vip-jwt":  {KeyType: "jwt_sub", BucketRegex: "^vip-", Priority: 10},
+				"gold-jwt": {KeyType: "jwt_sub", BucketRegex: "^gold-", Priority: 7},
+			},
+		},
+	}
+	api := NewManagementAPI(mustTestGateway(t, cfg), logging.NewLogger(false), nil)
+
+	alertPayload := managementWebhookEvent{
+		Event: "gateway.limit_class_alert_digest",
+		Data: map[string]interface{}{
+			"alerts": []interface{}{
+				map[string]interface{}{"severity": "critical", "bucket_class": "vip-jwt"},
+				map[string]interface{}{"severity": "elevated", "bucket_class": "gold-jwt"},
+			},
+		},
+	}
+	snoozePayload := managementWebhookEvent{
+		Event: "gateway.limit_class_snooze_expiring_digest",
+		Data: map[string]interface{}{
+			"snoozes": []interface{}{
+				map[string]interface{}{"severity": "critical", "bucket_class": "vip-jwt"},
+				map[string]interface{}{"severity": "elevated", "bucket_class": "gold-jwt"},
+			},
+		},
+	}
+
+	webhook := config.NotificationWebhook{
+		LimitClassDigestSummaryOnlyTypes: []string{"snooze"},
+	}
+
+	shapedAlert := api.shapeLimitClassDigestPayloadForReceiver(webhook, alertPayload)
+	if !reflect.DeepEqual(shapedAlert, alertPayload) {
+		t.Fatalf("expected alert digest payload to remain unchanged when only snooze digests are summary-only")
+	}
+
+	shapedSnooze := api.shapeLimitClassDigestPayloadForReceiver(webhook, snoozePayload)
+	snoozes, ok := shapedSnooze.Data["snoozes"].([]interface{})
+	if !ok {
+		t.Fatalf("expected shaped snoozes slice, got %T", shapedSnooze.Data["snoozes"])
+	}
+	if len(snoozes) != 0 {
+		t.Fatalf("expected summary-only snooze digest to keep no detailed snoozes, got %d", len(snoozes))
+	}
+	if intValue(shapedSnooze.Data["excluded_class_snooze_count"]) != 2 {
+		t.Fatalf("expected summary-only snooze digest to exclude both snoozes, got %v", shapedSnooze.Data["excluded_class_snooze_count"])
+	}
+	if summaryTypes, ok := shapedSnooze.Data["receiver_summary_only_digest_types"].([]string); !ok || len(summaryTypes) != 1 || summaryTypes[0] != "snooze" {
+		t.Fatalf("expected receiver_summary_only_digest_types to contain snooze, got %v", shapedSnooze.Data["receiver_summary_only_digest_types"])
+	}
+}
+
+func TestShapeLimitClassDigestPayloadForReceiverHonorsSummaryBudget(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitAlertBucketClasses: map[string]config.LimitAlertBucketClassConfig{
+				"vip-jwt":      {KeyType: "jwt_sub", BucketRegex: "^vip-", Priority: 10},
+				"gold-jwt":     {KeyType: "jwt_sub", BucketRegex: "^gold-", Priority: 7},
+				"standard-jwt": {KeyType: "jwt_sub", BucketRegex: "^standard-", Priority: 5},
+			},
+		},
+	}
+	api := NewManagementAPI(mustTestGateway(t, cfg), logging.NewLogger(false), nil)
+
+	payload := managementWebhookEvent{
+		Event: "gateway.limit_class_snooze_expiring_digest",
+		Data: map[string]interface{}{
+			"snoozes": []interface{}{
+				map[string]interface{}{"severity": "critical", "bucket_class": "vip-jwt"},
+				map[string]interface{}{"severity": "elevated", "bucket_class": "gold-jwt"},
+				map[string]interface{}{"severity": "warning", "bucket_class": "standard-jwt"},
+			},
+		},
+	}
+
+	shaped := api.shapeLimitClassDigestPayloadForReceiver(config.NotificationWebhook{
+		LimitClassDigestSummaryOnlyTypes:        []string{"snooze"},
+		LimitClassDigestMaxSummaryBucketClasses: 1,
+	}, payload)
+
+	snoozes, ok := shaped.Data["snoozes"].([]interface{})
+	if !ok {
+		t.Fatalf("expected shaped snoozes slice, got %T", shaped.Data["snoozes"])
+	}
+	if len(snoozes) != 0 {
+		t.Fatalf("expected summary-only snooze digest to keep no detailed snoozes, got %d", len(snoozes))
+	}
+	var firstRow map[string]interface{}
+	switch rows := shaped.Data["excluded_class_snoozes_by_class"].(type) {
+	case []interface{}:
+		if len(rows) != 1 {
+			t.Fatalf("expected summary budget to keep one summary class detailed, got %d", len(rows))
+		}
+		firstRow, _ = rows[0].(map[string]interface{})
+	case []map[string]interface{}:
+		if len(rows) != 1 {
+			t.Fatalf("expected summary budget to keep one summary class detailed, got %d", len(rows))
+		}
+		firstRow = rows[0]
+	default:
+		t.Fatalf("expected excluded_class_snoozes_by_class summary slice, got %T", shaped.Data["excluded_class_snoozes_by_class"])
+	}
+	if strings.TrimSpace(fmt.Sprint(firstRow["bucket_class"])) != "vip-jwt" {
+		t.Fatalf("expected top-priority class to stay in summary list, got %v", firstRow["bucket_class"])
+	}
+	if intValue(shaped.Data["excluded_other_bucket_class_count"]) != 2 {
+		t.Fatalf("expected two overflow summary classes, got %v", shaped.Data["excluded_other_bucket_class_count"])
+	}
+	if intValue(shaped.Data["excluded_other_snooze_count"]) != 2 {
+		t.Fatalf("expected two overflow snooze rows, got %v", shaped.Data["excluded_other_snooze_count"])
+	}
+	if intValue(shaped.Data["receiver_detailed_max_summary_bucket_classes"]) != 1 {
+		t.Fatalf("expected receiver summary budget metadata to be 1, got %v", shaped.Data["receiver_detailed_max_summary_bucket_classes"])
+	}
+}
+
+func TestShapeLimitClassDigestPayloadForReceiverHonorsSummaryPriorityFloor(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitAlertBucketClasses: map[string]config.LimitAlertBucketClassConfig{
+				"vip-jwt":      {KeyType: "jwt_sub", BucketRegex: "^vip-", Priority: 10},
+				"gold-jwt":     {KeyType: "jwt_sub", BucketRegex: "^gold-", Priority: 7},
+				"standard-jwt": {KeyType: "jwt_sub", BucketRegex: "^standard-", Priority: 5},
+			},
+		},
+	}
+	api := NewManagementAPI(mustTestGateway(t, cfg), logging.NewLogger(false), nil)
+
+	payload := managementWebhookEvent{
+		Event: "gateway.limit_class_snooze_expiring_digest",
+		Data: map[string]interface{}{
+			"snoozes": []interface{}{
+				map[string]interface{}{"severity": "critical", "bucket_class": "vip-jwt"},
+				map[string]interface{}{"severity": "elevated", "bucket_class": "gold-jwt"},
+				map[string]interface{}{"severity": "warning", "bucket_class": "standard-jwt"},
+			},
+		},
+	}
+
+	shaped := api.shapeLimitClassDigestPayloadForReceiver(config.NotificationWebhook{
+		LimitClassDigestSummaryOnlyTypes:              []string{"snooze"},
+		LimitClassDigestMinSummaryBucketClassPriority: 8,
+	}, payload)
+
+	var excludedRows []map[string]interface{}
+	switch rows := shaped.Data["excluded_class_snoozes_by_class"].(type) {
+	case []interface{}:
+		excludedRows = make([]map[string]interface{}, 0, len(rows))
+		for _, row := range rows {
+			entry, _ := row.(map[string]interface{})
+			excludedRows = append(excludedRows, entry)
+		}
+	case []map[string]interface{}:
+		excludedRows = rows
+	default:
+		t.Fatalf("expected excluded_class_snoozes_by_class summary slice, got %T", shaped.Data["excluded_class_snoozes_by_class"])
+	}
+	if len(excludedRows) != 1 {
+		t.Fatalf("expected summary priority floor to keep one summary class, got %d", len(excludedRows))
+	}
+	if strings.TrimSpace(fmt.Sprint(excludedRows[0]["bucket_class"])) != "vip-jwt" {
+		t.Fatalf("expected top-priority class to remain above summary priority floor, got %v", excludedRows[0]["bucket_class"])
+	}
+	if intValue(shaped.Data["excluded_other_bucket_class_count"]) != 2 {
+		t.Fatalf("expected two lower-priority summary classes to roll into overflow, got %v", shaped.Data["excluded_other_bucket_class_count"])
+	}
+	if intValue(shaped.Data["excluded_other_snooze_count"]) != 2 {
+		t.Fatalf("expected two lower-priority snoozes to roll into overflow, got %v", shaped.Data["excluded_other_snooze_count"])
+	}
+	if intValue(shaped.Data["receiver_detailed_min_summary_bucket_class_priority"]) != 8 {
+		t.Fatalf("expected receiver summary priority floor metadata to be 8, got %v", shaped.Data["receiver_detailed_min_summary_bucket_class_priority"])
+	}
+}
+
+func TestShapeLimitClassDigestPayloadForReceiverHonorsSummarySeverityFloor(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitAlertBucketClasses: map[string]config.LimitAlertBucketClassConfig{
+				"vip-jwt":      {KeyType: "jwt_sub", BucketRegex: "^vip-", Priority: 10},
+				"gold-jwt":     {KeyType: "jwt_sub", BucketRegex: "^gold-", Priority: 7},
+				"standard-jwt": {KeyType: "jwt_sub", BucketRegex: "^standard-", Priority: 5},
+			},
+		},
+	}
+	api := NewManagementAPI(mustTestGateway(t, cfg), logging.NewLogger(false), nil)
+
+	payload := managementWebhookEvent{
+		Event: "gateway.limit_class_snooze_expiring_digest",
+		Data: map[string]interface{}{
+			"snoozes": []interface{}{
+				map[string]interface{}{"severity": "critical", "bucket_class": "vip-jwt"},
+				map[string]interface{}{"severity": "elevated", "bucket_class": "gold-jwt"},
+				map[string]interface{}{"severity": "warning", "bucket_class": "standard-jwt"},
+			},
+		},
+	}
+
+	shaped := api.shapeLimitClassDigestPayloadForReceiver(config.NotificationWebhook{
+		LimitClassDigestSummaryOnlyTypes:   []string{"snooze"},
+		LimitClassDigestMinSummarySeverity: "critical",
+	}, payload)
+
+	var excludedRows []map[string]interface{}
+	switch rows := shaped.Data["excluded_class_snoozes_by_class"].(type) {
+	case []interface{}:
+		excludedRows = make([]map[string]interface{}, 0, len(rows))
+		for _, row := range rows {
+			entry, _ := row.(map[string]interface{})
+			excludedRows = append(excludedRows, entry)
+		}
+	case []map[string]interface{}:
+		excludedRows = rows
+	default:
+		t.Fatalf("expected excluded_class_snoozes_by_class summary slice, got %T", shaped.Data["excluded_class_snoozes_by_class"])
+	}
+	if len(excludedRows) != 1 {
+		t.Fatalf("expected summary severity floor to keep one summary class, got %d", len(excludedRows))
+	}
+	if strings.TrimSpace(fmt.Sprint(excludedRows[0]["bucket_class"])) != "vip-jwt" {
+		t.Fatalf("expected critical class to remain above summary severity floor, got %v", excludedRows[0]["bucket_class"])
+	}
+	if strings.TrimSpace(fmt.Sprint(excludedRows[0]["severity"])) != "critical" {
+		t.Fatalf("expected retained summary row severity to be critical, got %v", excludedRows[0]["severity"])
+	}
+	if intValue(shaped.Data["excluded_other_bucket_class_count"]) != 2 {
+		t.Fatalf("expected two lower-severity summary classes to roll into overflow, got %v", shaped.Data["excluded_other_bucket_class_count"])
+	}
+	if intValue(shaped.Data["excluded_other_snooze_count"]) != 2 {
+		t.Fatalf("expected two lower-severity snoozes to roll into overflow, got %v", shaped.Data["excluded_other_snooze_count"])
+	}
+	if strings.TrimSpace(fmt.Sprint(shaped.Data["receiver_detailed_min_summary_severity"])) != "critical" {
+		t.Fatalf("expected receiver summary severity floor metadata to be critical, got %v", shaped.Data["receiver_detailed_min_summary_severity"])
+	}
+}
+
+func TestShapeLimitClassDigestPayloadForReceiverHonorsSummarySortMode(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitAlertBucketClasses: map[string]config.LimitAlertBucketClassConfig{
+				"vip-jwt":      {KeyType: "jwt_sub", BucketRegex: "^vip-", Priority: 10},
+				"gold-jwt":     {KeyType: "jwt_sub", BucketRegex: "^gold-", Priority: 7},
+				"standard-jwt": {KeyType: "jwt_sub", BucketRegex: "^standard-", Priority: 5},
+			},
+		},
+	}
+	api := NewManagementAPI(mustTestGateway(t, cfg), logging.NewLogger(false), nil)
+
+	payload := managementWebhookEvent{
+		Event: "gateway.limit_class_snooze_expiring_digest",
+		Data: map[string]interface{}{
+			"snoozes": []interface{}{
+				map[string]interface{}{"severity": "elevated", "bucket_class": "vip-jwt"},
+				map[string]interface{}{"severity": "critical", "bucket_class": "gold-jwt"},
+				map[string]interface{}{"severity": "warning", "bucket_class": "standard-jwt"},
+			},
+		},
+	}
+
+	shaped := api.shapeLimitClassDigestPayloadForReceiver(config.NotificationWebhook{
+		LimitClassDigestSummaryOnlyTypes: []string{"snooze"},
+		LimitClassDigestSummarySortMode:  "severity_first",
+	}, payload)
+
+	var excludedRows []map[string]interface{}
+	switch rows := shaped.Data["excluded_class_snoozes_by_class"].(type) {
+	case []interface{}:
+		excludedRows = make([]map[string]interface{}, 0, len(rows))
+		for _, row := range rows {
+			entry, _ := row.(map[string]interface{})
+			excludedRows = append(excludedRows, entry)
+		}
+	case []map[string]interface{}:
+		excludedRows = rows
+	default:
+		t.Fatalf("expected excluded_class_snoozes_by_class summary slice, got %T", shaped.Data["excluded_class_snoozes_by_class"])
+	}
+	if len(excludedRows) != 3 {
+		t.Fatalf("expected three summary rows, got %d", len(excludedRows))
+	}
+	if strings.TrimSpace(fmt.Sprint(excludedRows[0]["bucket_class"])) != "gold-jwt" {
+		t.Fatalf("expected severity_first summary ordering to rank critical class first, got %v", excludedRows[0]["bucket_class"])
+	}
+	if strings.TrimSpace(fmt.Sprint(shaped.Data["receiver_detailed_summary_sort_mode"])) != "severity_first" {
+		t.Fatalf("expected receiver summary sort mode metadata to be severity_first, got %v", shaped.Data["receiver_detailed_summary_sort_mode"])
+	}
+}
+
+func TestShapeLimitClassDigestPayloadForReceiverHonorsCountFirstSummarySortFallbacks(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitAlertBucketClasses: map[string]config.LimitAlertBucketClassConfig{
+				"vip-jwt":  {KeyType: "jwt_sub", BucketRegex: "^vip-", Priority: 10},
+				"gold-jwt": {KeyType: "jwt_sub", BucketRegex: "^gold-", Priority: 7},
+			},
+		},
+	}
+	api := NewManagementAPI(mustTestGateway(t, cfg), logging.NewLogger(false), nil)
+
+	payload := managementWebhookEvent{
+		Event: "gateway.limit_class_snooze_expiring_digest",
+		Data: map[string]interface{}{
+			"snoozes": []interface{}{
+				map[string]interface{}{"severity": "warning", "bucket_class": "vip-jwt"},
+				map[string]interface{}{"severity": "critical", "bucket_class": "gold-jwt"},
+			},
+		},
+	}
+
+	shaped := api.shapeLimitClassDigestPayloadForReceiver(config.NotificationWebhook{
+		LimitClassDigestSummaryOnlyTypes: []string{"snooze"},
+		LimitClassDigestSummarySortMode:  "count_first",
+	}, payload)
+
+	excludedRows, ok := shaped.Data["excluded_class_snoozes_by_class"].([]interface{})
+	if !ok {
+		t.Fatalf("expected excluded_class_snoozes_by_class summary slice, got %T", shaped.Data["excluded_class_snoozes_by_class"])
+	}
+	if len(excludedRows) != 2 {
+		t.Fatalf("expected two summary rows, got %d", len(excludedRows))
+	}
+	firstRow, _ := excludedRows[0].(map[string]interface{})
+	if strings.TrimSpace(fmt.Sprint(firstRow["bucket_class"])) != "vip-jwt" {
+		t.Fatalf("expected count_first tie to fall back to priority before severity, got %v", firstRow["bucket_class"])
+	}
+}
+
+func TestShapeLimitClassDigestPayloadForReceiverHonorsMinSummaryCount(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitAlertBucketClasses: map[string]config.LimitAlertBucketClassConfig{
+				"vip-jwt":      {KeyType: "jwt_sub", BucketRegex: "^vip-", Priority: 10},
+				"gold-jwt":     {KeyType: "jwt_sub", BucketRegex: "^gold-", Priority: 9},
+				"standard-jwt": {KeyType: "jwt_sub", BucketRegex: "^standard-", Priority: 5},
+			},
+		},
+	}
+	api := NewManagementAPI(mustTestGateway(t, cfg), logging.NewLogger(false), nil)
+
+	payload := managementWebhookEvent{
+		Event: "gateway.limit_class_snooze_expiring_digest",
+		Data: map[string]interface{}{
+			"snoozes": []interface{}{
+				map[string]interface{}{"severity": "critical", "bucket_class": "vip-jwt"},
+				map[string]interface{}{"severity": "critical", "bucket_class": "vip-jwt"},
+				map[string]interface{}{"severity": "critical", "bucket_class": "gold-jwt"},
+				map[string]interface{}{"severity": "warning", "bucket_class": "standard-jwt"},
+				map[string]interface{}{"severity": "warning", "bucket_class": "standard-jwt"},
+			},
+		},
+	}
+
+	shaped := api.shapeLimitClassDigestPayloadForReceiver(config.NotificationWebhook{
+		LimitClassDigestSummaryOnlyTypes:              []string{"snooze"},
+		LimitClassDigestMinSummaryBucketClassPriority: 8,
+		LimitClassDigestMinSummaryCount:               2,
+		LimitClassDigestOtherBucketLabel:              "other_low_count",
+		LimitClassDigestOverflowReasons:               []string{"low_priority", "low_count"},
+		LimitClassDigestOverflowReasonLabels: map[string]string{
+			"low_priority":       "priority_floor",
+			"low_count":          "count_floor",
+			"max_summary_budget": "digest_quota",
+		},
+		LimitClassDigestOverflowReasonGroups: map[string][]string{
+			"policy_filtered": []string{"low_priority"},
+		},
+		LimitClassDigestOverflowReasonOrder:        []string{"count_floor", "policy_filtered"},
+		LimitClassDigestMaxOverflowReasons:         1,
+		LimitClassDigestTruncatedReasonBucketLabel: "suppressed_categories",
+		LimitClassDigestTruncatedReasonBucketMode:  "detailed",
+	}, payload)
+
+	excludedRows, ok := shaped.Data["excluded_class_snoozes_by_class"].([]interface{})
+	if !ok {
+		t.Fatalf("expected excluded_class_snoozes_by_class summary slice, got %T", shaped.Data["excluded_class_snoozes_by_class"])
+	}
+	if len(excludedRows) != 1 {
+		t.Fatalf("expected min summary count to keep one grouped class, got %d", len(excludedRows))
+	}
+	firstRow, _ := excludedRows[0].(map[string]interface{})
+	if strings.TrimSpace(fmt.Sprint(firstRow["bucket_class"])) != "vip-jwt" {
+		t.Fatalf("expected only class meeting min summary count to remain visible, got %v", firstRow["bucket_class"])
+	}
+	if intValue(shaped.Data["excluded_other_bucket_class_count"]) != 2 {
+		t.Fatalf("expected two low-count classes to roll into overflow, got %v", shaped.Data["excluded_other_bucket_class_count"])
+	}
+	if intValue(shaped.Data["excluded_other_snooze_count"]) != 3 {
+		t.Fatalf("expected three overflow snoozes to roll into overflow, got %v", shaped.Data["excluded_other_snooze_count"])
+	}
+	if intValue(shaped.Data["receiver_detailed_min_summary_count"]) != 2 {
+		t.Fatalf("expected receiver min summary count metadata to be 2, got %v", shaped.Data["receiver_detailed_min_summary_count"])
+	}
+	if strings.TrimSpace(fmt.Sprint(shaped.Data["receiver_detailed_other_bucket_label"])) != "other_low_count" {
+		t.Fatalf("expected receiver other bucket label metadata to be preserved, got %v", shaped.Data["receiver_detailed_other_bucket_label"])
+	}
+	otherBucket, ok := shaped.Data["excluded_other_bucket"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected excluded_other_bucket metadata map, got %T", shaped.Data["excluded_other_bucket"])
+	}
+	if strings.TrimSpace(fmt.Sprint(otherBucket["label"])) != "other_low_count" {
+		t.Fatalf("expected custom other bucket label, got %v", otherBucket["label"])
+	}
+	if intValue(otherBucket["bucket_class_count"]) != 2 {
+		t.Fatalf("expected two other bucket classes, got %v", otherBucket["bucket_class_count"])
+	}
+	if intValue(otherBucket["snooze_count"]) != 3 {
+		t.Fatalf("expected three other bucket snoozes, got %v", otherBucket["snooze_count"])
+	}
+	if strings.TrimSpace(fmt.Sprint(otherBucket["dominant_reason"])) != "policy_filtered" {
+		t.Fatalf("expected grouped dominant overflow reason, got %v", otherBucket["dominant_reason"])
+	}
+	if strings.TrimSpace(fmt.Sprint(otherBucket["dominant_raw_reason"])) != "low_priority" {
+		t.Fatalf("expected raw dominant overflow reason to remain low_priority, got %v", otherBucket["dominant_raw_reason"])
+	}
+	if intValue(otherBucket["hidden_reason_count"]) != 0 {
+		t.Fatalf("expected grouped visible overflow reasons to leave no hidden reasons, got %v", otherBucket["hidden_reason_count"])
+	}
+	if intValue(otherBucket["hidden_bucket_class_count"]) != 0 {
+		t.Fatalf("expected grouped visible overflow reasons to leave no hidden overflow classes, got %v", otherBucket["hidden_bucket_class_count"])
+	}
+	if intValue(otherBucket["hidden_snooze_count"]) != 0 {
+		t.Fatalf("expected grouped visible overflow reasons to leave no hidden overflow snoozes, got %v", otherBucket["hidden_snooze_count"])
+	}
+	reasonRows, ok := otherBucket["reasons"].([]interface{})
+	if !ok {
+		t.Fatalf("expected structured overflow reasons, got %T", otherBucket["reasons"])
+	}
+	if len(reasonRows) != 1 {
+		t.Fatalf("expected overflow reason cap to keep one grouped row visible, got %d", len(reasonRows))
+	}
+	reasonRow, _ := reasonRows[0].(map[string]interface{})
+	if strings.TrimSpace(fmt.Sprint(reasonRow["reason"])) != "count_floor" {
+		t.Fatalf("expected custom overflow order to surface count_floor first, got %v", reasonRow["reason"])
+	}
+	if strings.TrimSpace(fmt.Sprint(reasonRow["raw_reason"])) != "low_count" {
+		t.Fatalf("expected first ordered raw overflow reason to be low_count, got %v", reasonRow["raw_reason"])
+	}
+	rawReasons, ok := reasonRow["raw_reasons"].([]string)
+	if !ok {
+		t.Fatalf("expected grouped raw_reasons slice, got %T", reasonRow["raw_reasons"])
+	}
+	if len(rawReasons) != 1 || strings.TrimSpace(rawReasons[0]) != "low_count" {
+		t.Fatalf("expected first ordered raw_reasons to include only low_count, got %v", rawReasons)
+	}
+	if intValue(reasonRow["bucket_class_count"]) != 1 {
+		t.Fatalf("expected count_floor reason to include one class, got %v", reasonRow["bucket_class_count"])
+	}
+	if intValue(reasonRow["snooze_count"]) != 1 {
+		t.Fatalf("expected count_floor reason to include one snooze, got %v", reasonRow["snooze_count"])
+	}
+	if intValue(otherBucket["truncated_reason_count"]) != 1 {
+		t.Fatalf("expected one truncated overflow reason row, got %v", otherBucket["truncated_reason_count"])
+	}
+	if intValue(otherBucket["truncated_bucket_class_count"]) != 1 {
+		t.Fatalf("expected one truncated overflow class, got %v", otherBucket["truncated_bucket_class_count"])
+	}
+	if intValue(otherBucket["truncated_snooze_count"]) != 2 {
+		t.Fatalf("expected two truncated overflow snoozes, got %v", otherBucket["truncated_snooze_count"])
+	}
+	truncatedBucket, ok := otherBucket["truncated_reason_bucket"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected structured truncated reason bucket, got %T", otherBucket["truncated_reason_bucket"])
+	}
+	if strings.TrimSpace(fmt.Sprint(truncatedBucket["label"])) != "suppressed_categories" {
+		t.Fatalf("expected truncated reason bucket label, got %v", truncatedBucket["label"])
+	}
+	if intValue(truncatedBucket["reason_count"]) != 1 {
+		t.Fatalf("expected truncated reason bucket to summarize one hidden reason row, got %v", truncatedBucket["reason_count"])
+	}
+	if intValue(truncatedBucket["bucket_class_count"]) != 1 {
+		t.Fatalf("expected truncated reason bucket to summarize one class, got %v", truncatedBucket["bucket_class_count"])
+	}
+	if intValue(truncatedBucket["snooze_count"]) != 2 {
+		t.Fatalf("expected truncated reason bucket to summarize two snoozes, got %v", truncatedBucket["snooze_count"])
+	}
+	truncatedReasonRows, ok := truncatedBucket["reasons"].([]interface{})
+	if !ok {
+		t.Fatalf("expected detailed truncated reason rows, got %T", truncatedBucket["reasons"])
+	}
+	if len(truncatedReasonRows) != 1 {
+		t.Fatalf("expected one truncated reason detail row, got %d", len(truncatedReasonRows))
+	}
+	truncatedReasonRow, _ := truncatedReasonRows[0].(map[string]interface{})
+	if strings.TrimSpace(fmt.Sprint(truncatedReasonRow["reason"])) != "policy_filtered" {
+		t.Fatalf("expected truncated detailed reason to retain grouped label, got %v", truncatedReasonRow["reason"])
+	}
+	if strings.TrimSpace(fmt.Sprint(truncatedBucket["dominant_reason"])) != "policy_filtered" {
+		t.Fatalf("expected truncated bucket dominant grouped reason, got %v", truncatedBucket["dominant_reason"])
+	}
+	if strings.TrimSpace(fmt.Sprint(truncatedBucket["dominant_raw_reason"])) != "low_priority" {
+		t.Fatalf("expected truncated bucket dominant raw reason, got %v", truncatedBucket["dominant_raw_reason"])
+	}
+	if intValue(shaped.Data["receiver_detailed_min_summary_bucket_class_priority"]) != 8 {
+		t.Fatalf("expected receiver min summary priority metadata to be 8, got %v", shaped.Data["receiver_detailed_min_summary_bucket_class_priority"])
+	}
+	receiverReasons, ok := shaped.Data["receiver_detailed_overflow_reasons"].([]string)
+	if !ok {
+		t.Fatalf("expected receiver overflow reasons metadata slice, got %T", shaped.Data["receiver_detailed_overflow_reasons"])
+	}
+	if len(receiverReasons) != 2 || strings.TrimSpace(receiverReasons[0]) != "low_priority" || strings.TrimSpace(receiverReasons[1]) != "low_count" {
+		t.Fatalf("expected receiver overflow reasons metadata to keep low_priority and low_count, got %v", receiverReasons)
+	}
+	receiverReasonLabels, ok := shaped.Data["receiver_detailed_overflow_reason_labels"].(map[string]string)
+	if !ok {
+		t.Fatalf("expected receiver overflow reason label metadata map, got %T", shaped.Data["receiver_detailed_overflow_reason_labels"])
+	}
+	if strings.TrimSpace(receiverReasonLabels["low_priority"]) != "priority_floor" {
+		t.Fatalf("expected receiver low_priority overflow reason label metadata, got %v", receiverReasonLabels["low_priority"])
+	}
+	receiverReasonGroups, ok := shaped.Data["receiver_detailed_overflow_reason_groups"].(map[string][]string)
+	if !ok {
+		t.Fatalf("expected receiver overflow reason groups metadata map, got %T", shaped.Data["receiver_detailed_overflow_reason_groups"])
+	}
+	groupedReasons, ok := receiverReasonGroups["policy_filtered"]
+	if !ok || len(groupedReasons) != 1 || strings.TrimSpace(groupedReasons[0]) != "low_priority" {
+		t.Fatalf("expected receiver overflow reason group metadata for policy_filtered, got %v", receiverReasonGroups)
+	}
+	receiverReasonOrder, ok := shaped.Data["receiver_detailed_overflow_reason_order"].([]string)
+	if !ok {
+		t.Fatalf("expected receiver overflow reason order metadata slice, got %T", shaped.Data["receiver_detailed_overflow_reason_order"])
+	}
+	if len(receiverReasonOrder) != 2 || strings.TrimSpace(receiverReasonOrder[0]) != "count_floor" || strings.TrimSpace(receiverReasonOrder[1]) != "policy_filtered" {
+		t.Fatalf("expected receiver overflow reason order metadata to preserve explicit order, got %v", receiverReasonOrder)
+	}
+	if intValue(shaped.Data["receiver_detailed_max_overflow_reasons"]) != 1 {
+		t.Fatalf("expected receiver overflow reason cap metadata to be 1, got %v", shaped.Data["receiver_detailed_max_overflow_reasons"])
+	}
+	if strings.TrimSpace(fmt.Sprint(shaped.Data["receiver_detailed_truncated_reason_bucket_label"])) != "suppressed_categories" {
+		t.Fatalf("expected receiver truncated reason bucket label metadata, got %v", shaped.Data["receiver_detailed_truncated_reason_bucket_label"])
+	}
+	if strings.TrimSpace(fmt.Sprint(shaped.Data["receiver_detailed_truncated_reason_bucket_mode"])) != "detailed" {
+		t.Fatalf("expected receiver truncated reason bucket mode metadata, got %v", shaped.Data["receiver_detailed_truncated_reason_bucket_mode"])
+	}
+}
+
+func TestShapeLimitClassDigestPayloadForReceiverHonorsTruncatedReasonBucketMaxReasons(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitAlertBucketClasses: map[string]config.LimitAlertBucketClassConfig{
+				"vip-jwt":      {KeyType: "jwt_sub", BucketRegex: "^vip-", Priority: 10},
+				"gold-jwt":     {KeyType: "jwt_sub", BucketRegex: "^gold-", Priority: 9},
+				"silver-jwt":   {KeyType: "jwt_sub", BucketRegex: "^silver-", Priority: 9},
+				"standard-jwt": {KeyType: "jwt_sub", BucketRegex: "^standard-", Priority: 5},
+			},
+		},
+	}
+	api := NewManagementAPI(mustTestGateway(t, cfg), logging.NewLogger(false), nil)
+
+	payload := managementWebhookEvent{
+		Event: "gateway.limit_class_snooze_expiring_digest",
+		Data: map[string]interface{}{
+			"snoozes": []interface{}{
+				map[string]interface{}{"severity": "critical", "bucket_class": "vip-jwt"},
+				map[string]interface{}{"severity": "critical", "bucket_class": "vip-jwt"},
+				map[string]interface{}{"severity": "critical", "bucket_class": "gold-jwt"},
+				map[string]interface{}{"severity": "warning", "bucket_class": "silver-jwt"},
+				map[string]interface{}{"severity": "warning", "bucket_class": "silver-jwt"},
+				map[string]interface{}{"severity": "critical", "bucket_class": "standard-jwt"},
+				map[string]interface{}{"severity": "critical", "bucket_class": "standard-jwt"},
+			},
+		},
+	}
+
+	shaped := api.shapeLimitClassDigestPayloadForReceiver(config.NotificationWebhook{
+		LimitClassDigestSummaryOnlyTypes:              []string{"snooze"},
+		LimitClassDigestMinSummaryBucketClassPriority: 8,
+		LimitClassDigestMinSummarySeverity:            "critical",
+		LimitClassDigestMinSummaryCount:               2,
+		LimitClassDigestOtherBucketLabel:              "other_low_count",
+		LimitClassDigestOverflowReasons:               []string{"low_priority", "low_count", "low_severity"},
+		LimitClassDigestOverflowReasonLabels: map[string]string{
+			"low_priority": "priority_floor",
+			"low_count":    "count_floor",
+			"low_severity": "severity_floor",
+		},
+		LimitClassDigestOverflowReasonGroups: map[string][]string{
+			"policy_filtered": []string{"low_priority"},
+		},
+		LimitClassDigestOverflowReasonOrder:                              []string{"count_floor", "severity_floor", "policy_filtered"},
+		LimitClassDigestMaxOverflowReasons:                               1,
+		LimitClassDigestTruncatedReasonBucketLabel:                       "suppressed_categories",
+		LimitClassDigestTruncatedReasonBucketMode:                        "detailed",
+		LimitClassDigestTruncatedReasonBucketMinSeverity:                 "critical",
+		LimitClassDigestTruncatedReasonBucketSeverities:                  []string{"critical"},
+		LimitClassDigestTruncatedReasonBucketMaxReasons:                  1,
+		LimitClassDigestTruncatedReasonBucketReasonOrder:                 []string{"policy_filtered", "severity_floor"},
+		LimitClassDigestTruncatedReasonBucketHiddenStrategyOrder:         []string{"max_reasons", "exact_severity", "min_severity"},
+		LimitClassDigestTruncatedReasonBucketHiddenStrategyDominantMode:  "order_first",
+		LimitClassDigestTruncatedReasonBucketExactSeverityPolicy:         &config.LimitClassDigestHiddenStrategyPolicy{DominantMode: "weighted_score", MinReasons: 1, MinItems: 2, PriorityCap: 2, ReasonCap: 3, ItemCap: 5, PriorityWeight: 41, ReasonWeight: 43, ItemWeight: 47},
+		LimitClassDigestTruncatedReasonBucketExactSeverityPriorityCap:    2,
+		LimitClassDigestTruncatedReasonBucketExactSeverityReasonCap:      3,
+		LimitClassDigestTruncatedReasonBucketExactSeverityItemCap:        5,
+		LimitClassDigestTruncatedReasonBucketExactSeverityPriorityWeight: 7,
+		LimitClassDigestTruncatedReasonBucketExactSeverityReasonWeight:   11,
+		LimitClassDigestTruncatedReasonBucketExactSeverityItemWeight:     13,
+		LimitClassDigestTruncatedReasonBucketExactSeverityDominantMode:   "most_hidden_reasons",
+		LimitClassDigestTruncatedReasonBucketMinSeverityPriorityCap:      7,
+		LimitClassDigestTruncatedReasonBucketMinSeverityReasonCap:        11,
+		LimitClassDigestTruncatedReasonBucketMinSeverityItemCap:          13,
+		LimitClassDigestTruncatedReasonBucketMinSeverityPriorityWeight:   17,
+		LimitClassDigestTruncatedReasonBucketMinSeverityReasonWeight:     19,
+		LimitClassDigestTruncatedReasonBucketMinSeverityItemWeight:       23,
+		LimitClassDigestTruncatedReasonBucketMinSeverityDominantMode:     "most_hidden_items",
+		LimitClassDigestTruncatedReasonBucketMaxReasonsPriorityCap:       17,
+		LimitClassDigestTruncatedReasonBucketMaxReasonsReasonCap:         19,
+		LimitClassDigestTruncatedReasonBucketMaxReasonsItemCap:           23,
+		LimitClassDigestTruncatedReasonBucketMaxReasonsPriorityWeight:    29,
+		LimitClassDigestTruncatedReasonBucketMaxReasonsReasonWeight:      31,
+		LimitClassDigestTruncatedReasonBucketMaxReasonsItemWeight:        37,
+		LimitClassDigestTruncatedReasonBucketMaxReasonsDominantMode:      "weighted_score",
+		LimitClassDigestTruncatedReasonBucketHiddenStrategyMinReasons:    1,
+		LimitClassDigestTruncatedReasonBucketHiddenStrategyMinItems:      1,
+		LimitClassDigestTruncatedReasonBucketExactSeverityMinReasons:     1,
+		LimitClassDigestTruncatedReasonBucketExactSeverityMinItems:       1,
+	}, payload)
+
+	otherBucket, ok := shaped.Data["excluded_other_bucket"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected excluded_other_bucket metadata map, got %T", shaped.Data["excluded_other_bucket"])
+	}
+	if intValue(otherBucket["truncated_reason_count"]) != 2 {
+		t.Fatalf("expected two truncated overflow reason rows before nested cap, got %v", otherBucket["truncated_reason_count"])
+	}
+	truncatedBucket, ok := otherBucket["truncated_reason_bucket"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected structured truncated reason bucket, got %T", otherBucket["truncated_reason_bucket"])
+	}
+	truncatedReasonRows, ok := truncatedBucket["reasons"].([]interface{})
+	if !ok {
+		t.Fatalf("expected detailed truncated reason rows, got %T", truncatedBucket["reasons"])
+	}
+	if len(truncatedReasonRows) != 1 {
+		t.Fatalf("expected nested truncation cap to keep one detailed row, got %d", len(truncatedReasonRows))
+	}
+	truncatedReasonRow, _ := truncatedReasonRows[0].(map[string]interface{})
+	if strings.TrimSpace(fmt.Sprint(truncatedReasonRow["reason"])) != "policy_filtered" {
+		t.Fatalf("expected nested truncation cap to honor nested reason order and keep policy_filtered first, got %v", truncatedReasonRow["reason"])
+	}
+	if intValue(truncatedBucket["hidden_reason_count"]) != 1 {
+		t.Fatalf("expected one nested hidden reason after truncated bucket cap, got %v", truncatedBucket["hidden_reason_count"])
+	}
+	if intValue(truncatedBucket["hidden_bucket_class_count"]) != 1 {
+		t.Fatalf("expected one nested hidden class after truncated bucket cap, got %v", truncatedBucket["hidden_bucket_class_count"])
+	}
+	if intValue(truncatedBucket["hidden_snooze_count"]) != 2 {
+		t.Fatalf("expected two nested hidden snoozes after truncated bucket cap, got %v", truncatedBucket["hidden_snooze_count"])
+	}
+	if intValue(truncatedBucket["hidden_by_exact_severity_reason_count"]) != 1 {
+		t.Fatalf("expected one nested hidden reason from exact severity selection, got %v", truncatedBucket["hidden_by_exact_severity_reason_count"])
+	}
+	if intValue(truncatedBucket["hidden_by_exact_severity_bucket_class_count"]) != 1 {
+		t.Fatalf("expected one nested hidden class from exact severity selection, got %v", truncatedBucket["hidden_by_exact_severity_bucket_class_count"])
+	}
+	if intValue(truncatedBucket["hidden_by_exact_severity_snooze_count"]) != 2 {
+		t.Fatalf("expected two nested hidden snoozes from exact severity selection, got %v", truncatedBucket["hidden_by_exact_severity_snooze_count"])
+	}
+	if intValue(truncatedBucket["hidden_by_min_severity_reason_count"]) != 0 {
+		t.Fatalf("expected no nested hidden reasons from min severity after exact severity filtering, got %v", truncatedBucket["hidden_by_min_severity_reason_count"])
+	}
+	if intValue(truncatedBucket["hidden_by_max_reasons_reason_count"]) != 0 {
+		t.Fatalf("expected no nested hidden reasons from max reason cap after exact severity filtering, got %v", truncatedBucket["hidden_by_max_reasons_reason_count"])
+	}
+	hiddenStrategies, ok := truncatedBucket["active_hidden_reason_strategies"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected nested hidden reason strategy metadata map, got %T", truncatedBucket["active_hidden_reason_strategies"])
+	}
+	exactSeverityStrategy, ok := hiddenStrategies["exact_severity"].(map[string]interface{})
+	if !ok || exactSeverityStrategy["active"] != true {
+		t.Fatalf("expected exact severity hidden strategy metadata to be active, got %v", hiddenStrategies["exact_severity"])
+	}
+	if strings.TrimSpace(fmt.Sprint(exactSeverityStrategy["dominant_mode"])) != "weighted_score" {
+		t.Fatalf("expected exact severity hidden strategy dominant mode metadata, got %v", exactSeverityStrategy["dominant_mode"])
+	}
+	exactContributions, ok := exactSeverityStrategy["score_contributions"].(map[string]interface{})
+	if !ok || intValue(exactContributions["priority_weight"]) != 41 || intValue(exactContributions["reason_weight"]) != 43 || intValue(exactContributions["item_weight"]) != 47 || intValue(exactContributions["priority_cap"]) != 2 || intValue(exactContributions["reason_cap"]) != 3 || intValue(exactContributions["item_cap"]) != 5 {
+		t.Fatalf("expected exact severity strategy to preserve per-strategy weights and caps, got %v", exactSeverityStrategy["score_contributions"])
+	}
+	minSeverityStrategy, ok := hiddenStrategies["min_severity"].(map[string]interface{})
+	if !ok || strings.TrimSpace(fmt.Sprint(minSeverityStrategy["min_severity"])) != "critical" {
+		t.Fatalf("expected min severity hidden strategy metadata to preserve critical floor, got %v", hiddenStrategies["min_severity"])
+	}
+	if strings.TrimSpace(fmt.Sprint(minSeverityStrategy["dominant_mode"])) != "most_hidden_items" {
+		t.Fatalf("expected min severity hidden strategy dominant mode metadata, got %v", minSeverityStrategy["dominant_mode"])
+	}
+	minContributions, ok := minSeverityStrategy["score_contributions"].(map[string]interface{})
+	if !ok || intValue(minContributions["priority_weight"]) != 17 || intValue(minContributions["reason_weight"]) != 19 || intValue(minContributions["item_weight"]) != 23 || intValue(minContributions["priority_cap"]) != 7 || intValue(minContributions["reason_cap"]) != 11 || intValue(minContributions["item_cap"]) != 13 {
+		t.Fatalf("expected min severity strategy to preserve per-strategy weights and caps, got %v", minSeverityStrategy["score_contributions"])
+	}
+	maxReasonsStrategy, ok := hiddenStrategies["max_reasons"].(map[string]interface{})
+	if !ok || intValue(maxReasonsStrategy["max_reasons"]) != 1 {
+		t.Fatalf("expected max reasons hidden strategy metadata to preserve nested cap, got %v", hiddenStrategies["max_reasons"])
+	}
+	if strings.TrimSpace(fmt.Sprint(maxReasonsStrategy["dominant_mode"])) != "weighted_score" {
+		t.Fatalf("expected max reasons hidden strategy dominant mode metadata, got %v", maxReasonsStrategy["dominant_mode"])
+	}
+	maxContributions, ok := maxReasonsStrategy["score_contributions"].(map[string]interface{})
+	if !ok || intValue(maxContributions["priority_weight"]) != 29 || intValue(maxContributions["reason_weight"]) != 31 || intValue(maxContributions["item_weight"]) != 37 || intValue(maxContributions["priority_cap"]) != 17 || intValue(maxContributions["reason_cap"]) != 19 || intValue(maxContributions["item_cap"]) != 23 {
+		t.Fatalf("expected max reasons strategy to preserve per-strategy weights and caps, got %v", maxReasonsStrategy["score_contributions"])
+	}
+	if intValue(maxReasonsStrategy["priority"]) != 1 || maxReasonsStrategy["affected"] != false {
+		t.Fatalf("expected max reasons hidden strategy metadata to preserve explicit priority and unaffected status, got %v", hiddenStrategies["max_reasons"])
+	}
+	if maxReasonsStrategy["eligible_for_dominance"] != false {
+		t.Fatalf("expected max reasons strategy to be ineligible when it hid nothing, got %v", maxReasonsStrategy["eligible_for_dominance"])
+	}
+	if intValue(exactSeverityStrategy["priority"]) != 2 || exactSeverityStrategy["affected"] != true || intValue(exactSeverityStrategy["hidden_reason_count"]) != 1 {
+		t.Fatalf("expected exact severity hidden strategy metadata to preserve priority and hidden counts, got %v", hiddenStrategies["exact_severity"])
+	}
+	if exactSeverityStrategy["eligible_for_dominance"] != true {
+		t.Fatalf("expected exact severity strategy to be eligible once it meets thresholds, got %v", exactSeverityStrategy["eligible_for_dominance"])
+	}
+	exactEligibility, ok := exactSeverityStrategy["eligibility_thresholds"].(map[string]interface{})
+	if !ok || intValue(exactEligibility["min_reasons"]) != 1 || intValue(exactEligibility["min_items"]) != 2 {
+		t.Fatalf("expected exact severity strategy to expose eligibility thresholds, got %v", exactSeverityStrategy["eligibility_thresholds"])
+	}
+	if strings.TrimSpace(fmt.Sprint(truncatedBucket["dominant_hidden_reason_strategy"])) != "exact_severity" {
+		t.Fatalf("expected dominant hidden strategy to prefer the first strategy that actually hid rows, got %v", truncatedBucket["dominant_hidden_reason_strategy"])
+	}
+	hiddenStrategyOrder, ok := truncatedBucket["hidden_reason_strategy_order"].([]string)
+	if !ok {
+		t.Fatalf("expected hidden reason strategy order slice, got %T", truncatedBucket["hidden_reason_strategy_order"])
+	}
+	if len(hiddenStrategyOrder) != 3 || strings.TrimSpace(hiddenStrategyOrder[0]) != "max_reasons" || strings.TrimSpace(hiddenStrategyOrder[1]) != "exact_severity" || strings.TrimSpace(hiddenStrategyOrder[2]) != "min_severity" {
+		t.Fatalf("expected hidden reason strategy order to preserve explicit receiver order, got %v", hiddenStrategyOrder)
+	}
+	if strings.TrimSpace(fmt.Sprint(shaped.Data["receiver_detailed_truncated_reason_bucket_mode"])) != "detailed" {
+		t.Fatalf("expected receiver truncated reason bucket mode metadata, got %v", shaped.Data["receiver_detailed_truncated_reason_bucket_mode"])
+	}
+	if intValue(shaped.Data["receiver_detailed_truncated_reason_bucket_max_reasons"]) != 1 {
+		t.Fatalf("expected receiver truncated reason bucket max reasons metadata, got %v", shaped.Data["receiver_detailed_truncated_reason_bucket_max_reasons"])
+	}
+	nestedReasonOrder, ok := shaped.Data["receiver_detailed_truncated_reason_bucket_reason_order"].([]string)
+	if !ok {
+		t.Fatalf("expected receiver truncated reason bucket reason order metadata slice, got %T", shaped.Data["receiver_detailed_truncated_reason_bucket_reason_order"])
+	}
+	if len(nestedReasonOrder) != 2 || strings.TrimSpace(nestedReasonOrder[0]) != "policy_filtered" || strings.TrimSpace(nestedReasonOrder[1]) != "severity_floor" {
+		t.Fatalf("expected receiver truncated reason bucket reason order metadata to preserve explicit nested order, got %v", nestedReasonOrder)
+	}
+	if strings.TrimSpace(fmt.Sprint(shaped.Data["receiver_detailed_truncated_reason_bucket_min_severity"])) != "critical" {
+		t.Fatalf("expected receiver truncated reason bucket min severity metadata, got %v", shaped.Data["receiver_detailed_truncated_reason_bucket_min_severity"])
+	}
+	nestedSeverities, ok := shaped.Data["receiver_detailed_truncated_reason_bucket_severities"].([]string)
+	if !ok {
+		t.Fatalf("expected receiver truncated reason bucket severities metadata slice, got %T", shaped.Data["receiver_detailed_truncated_reason_bucket_severities"])
+	}
+	if len(nestedSeverities) != 1 || strings.TrimSpace(nestedSeverities[0]) != "critical" {
+		t.Fatalf("expected receiver truncated reason bucket severities metadata to preserve explicit selection, got %v", nestedSeverities)
+	}
+	receiverHiddenStrategyOrder, ok := shaped.Data["receiver_detailed_truncated_reason_bucket_hidden_strategy_order"].([]string)
+	if !ok {
+		t.Fatalf("expected receiver hidden strategy order metadata slice, got %T", shaped.Data["receiver_detailed_truncated_reason_bucket_hidden_strategy_order"])
+	}
+	if len(receiverHiddenStrategyOrder) != 3 || strings.TrimSpace(receiverHiddenStrategyOrder[0]) != "max_reasons" || strings.TrimSpace(receiverHiddenStrategyOrder[1]) != "exact_severity" || strings.TrimSpace(receiverHiddenStrategyOrder[2]) != "min_severity" {
+		t.Fatalf("expected receiver hidden strategy order metadata to preserve explicit selection, got %v", receiverHiddenStrategyOrder)
+	}
+	if strings.TrimSpace(fmt.Sprint(shaped.Data["receiver_detailed_truncated_reason_bucket_hidden_strategy_dominant_mode"])) != "order_first" {
+		t.Fatalf("expected receiver hidden strategy dominant mode metadata, got %v", shaped.Data["receiver_detailed_truncated_reason_bucket_hidden_strategy_dominant_mode"])
+	}
+	if intValue(shaped.Data["receiver_detailed_truncated_reason_bucket_exact_severity_priority_cap"]) != 2 ||
+		intValue(shaped.Data["receiver_detailed_truncated_reason_bucket_exact_severity_reason_cap"]) != 3 ||
+		intValue(shaped.Data["receiver_detailed_truncated_reason_bucket_exact_severity_item_cap"]) != 5 {
+		t.Fatalf("expected receiver exact severity cap metadata, got %v/%v/%v",
+			shaped.Data["receiver_detailed_truncated_reason_bucket_exact_severity_priority_cap"],
+			shaped.Data["receiver_detailed_truncated_reason_bucket_exact_severity_reason_cap"],
+			shaped.Data["receiver_detailed_truncated_reason_bucket_exact_severity_item_cap"])
+	}
+	if intValue(shaped.Data["receiver_detailed_truncated_reason_bucket_exact_severity_priority_weight"]) != 41 ||
+		intValue(shaped.Data["receiver_detailed_truncated_reason_bucket_exact_severity_reason_weight"]) != 43 ||
+		intValue(shaped.Data["receiver_detailed_truncated_reason_bucket_exact_severity_item_weight"]) != 47 {
+		t.Fatalf("expected receiver exact severity weight metadata, got %v/%v/%v",
+			shaped.Data["receiver_detailed_truncated_reason_bucket_exact_severity_priority_weight"],
+			shaped.Data["receiver_detailed_truncated_reason_bucket_exact_severity_reason_weight"],
+			shaped.Data["receiver_detailed_truncated_reason_bucket_exact_severity_item_weight"])
+	}
+	if strings.TrimSpace(fmt.Sprint(shaped.Data["receiver_detailed_truncated_reason_bucket_exact_severity_dominant_mode"])) != "weighted_score" {
+		t.Fatalf("expected receiver exact severity dominant mode metadata, got %v", shaped.Data["receiver_detailed_truncated_reason_bucket_exact_severity_dominant_mode"])
+	}
+	if intValue(shaped.Data["receiver_detailed_truncated_reason_bucket_min_severity_priority_cap"]) != 7 ||
+		intValue(shaped.Data["receiver_detailed_truncated_reason_bucket_min_severity_reason_cap"]) != 11 ||
+		intValue(shaped.Data["receiver_detailed_truncated_reason_bucket_min_severity_item_cap"]) != 13 {
+		t.Fatalf("expected receiver min severity cap metadata, got %v/%v/%v",
+			shaped.Data["receiver_detailed_truncated_reason_bucket_min_severity_priority_cap"],
+			shaped.Data["receiver_detailed_truncated_reason_bucket_min_severity_reason_cap"],
+			shaped.Data["receiver_detailed_truncated_reason_bucket_min_severity_item_cap"])
+	}
+	if intValue(shaped.Data["receiver_detailed_truncated_reason_bucket_min_severity_priority_weight"]) != 17 ||
+		intValue(shaped.Data["receiver_detailed_truncated_reason_bucket_min_severity_reason_weight"]) != 19 ||
+		intValue(shaped.Data["receiver_detailed_truncated_reason_bucket_min_severity_item_weight"]) != 23 {
+		t.Fatalf("expected receiver min severity weight metadata, got %v/%v/%v",
+			shaped.Data["receiver_detailed_truncated_reason_bucket_min_severity_priority_weight"],
+			shaped.Data["receiver_detailed_truncated_reason_bucket_min_severity_reason_weight"],
+			shaped.Data["receiver_detailed_truncated_reason_bucket_min_severity_item_weight"])
+	}
+	if strings.TrimSpace(fmt.Sprint(shaped.Data["receiver_detailed_truncated_reason_bucket_min_severity_dominant_mode"])) != "most_hidden_items" {
+		t.Fatalf("expected receiver min severity dominant mode metadata, got %v", shaped.Data["receiver_detailed_truncated_reason_bucket_min_severity_dominant_mode"])
+	}
+	if intValue(shaped.Data["receiver_detailed_truncated_reason_bucket_max_reasons_priority_cap"]) != 17 ||
+		intValue(shaped.Data["receiver_detailed_truncated_reason_bucket_max_reasons_reason_cap"]) != 19 ||
+		intValue(shaped.Data["receiver_detailed_truncated_reason_bucket_max_reasons_item_cap"]) != 23 {
+		t.Fatalf("expected receiver max reasons cap metadata, got %v/%v/%v",
+			shaped.Data["receiver_detailed_truncated_reason_bucket_max_reasons_priority_cap"],
+			shaped.Data["receiver_detailed_truncated_reason_bucket_max_reasons_reason_cap"],
+			shaped.Data["receiver_detailed_truncated_reason_bucket_max_reasons_item_cap"])
+	}
+	if intValue(shaped.Data["receiver_detailed_truncated_reason_bucket_max_reasons_priority_weight"]) != 29 ||
+		intValue(shaped.Data["receiver_detailed_truncated_reason_bucket_max_reasons_reason_weight"]) != 31 ||
+		intValue(shaped.Data["receiver_detailed_truncated_reason_bucket_max_reasons_item_weight"]) != 37 {
+		t.Fatalf("expected receiver max reasons weight metadata, got %v/%v/%v",
+			shaped.Data["receiver_detailed_truncated_reason_bucket_max_reasons_priority_weight"],
+			shaped.Data["receiver_detailed_truncated_reason_bucket_max_reasons_reason_weight"],
+			shaped.Data["receiver_detailed_truncated_reason_bucket_max_reasons_item_weight"])
+	}
+	if strings.TrimSpace(fmt.Sprint(shaped.Data["receiver_detailed_truncated_reason_bucket_max_reasons_dominant_mode"])) != "weighted_score" {
+		t.Fatalf("expected receiver max reasons dominant mode metadata, got %v", shaped.Data["receiver_detailed_truncated_reason_bucket_max_reasons_dominant_mode"])
+	}
+	if intValue(shaped.Data["receiver_detailed_truncated_reason_bucket_hidden_strategy_min_reasons"]) != 1 {
+		t.Fatalf("expected receiver hidden strategy min reasons metadata, got %v", shaped.Data["receiver_detailed_truncated_reason_bucket_hidden_strategy_min_reasons"])
+	}
+	if intValue(shaped.Data["receiver_detailed_truncated_reason_bucket_hidden_strategy_min_items"]) != 1 {
+		t.Fatalf("expected receiver hidden strategy min items metadata, got %v", shaped.Data["receiver_detailed_truncated_reason_bucket_hidden_strategy_min_items"])
+	}
+}
+
+func TestLimitClassDigestDominantHiddenStrategyNameSupportsImpactModes(t *testing.T) {
+	strategies := []limitClassDigestHiddenStrategySummary{
+		{name: "exact_severity", mode: "order_first", priority: 1, hiddenCount: 1, hiddenItems: 1, eligible: true},
+		{name: "max_reasons", mode: "most_hidden_reasons", priority: 2, hiddenCount: 2, hiddenItems: 5, eligible: true},
+		{name: "min_severity", mode: "most_hidden_items", priority: 3, hiddenCount: 1, hiddenItems: 3, eligible: true},
+	}
+
+	if dominant := limitClassDigestDominantHiddenStrategyName(strategies); dominant != "exact_severity" {
+		t.Fatalf("expected per-strategy dominant mode selection to preserve order_first precedence for the first strategy, got %q", dominant)
+	}
+}
+
+func TestLimitClassDigestDominantHiddenStrategyNameSupportsWeightedScore(t *testing.T) {
+	strategies := []limitClassDigestHiddenStrategySummary{
+		{name: "exact_severity", mode: "weighted_score", priority: 1, hiddenCount: 1, hiddenItems: 1, score: 3, eligible: true},
+		{name: "max_reasons", mode: "weighted_score", priority: 2, hiddenCount: 2, hiddenItems: 5, score: 9, eligible: true},
+		{name: "min_severity", mode: "weighted_score", priority: 3, hiddenCount: 1, hiddenItems: 3, score: 5, eligible: true},
+	}
+
+	if dominant := limitClassDigestDominantHiddenStrategyName(strategies); dominant != "max_reasons" {
+		t.Fatalf("expected weighted_score dominant strategy to prefer highest computed score, got %q", dominant)
+	}
+}
+
+func TestLimitClassDigestDominantHiddenStrategyNameIgnoresIneligibleStrategies(t *testing.T) {
+	strategies := []limitClassDigestHiddenStrategySummary{
+		{name: "exact_severity", mode: "weighted_score", priority: 1, hiddenCount: 10, hiddenItems: 10, score: 100, eligible: false},
+		{name: "max_reasons", mode: "weighted_score", priority: 2, hiddenCount: 2, hiddenItems: 5, score: 9, eligible: true},
+	}
+
+	if dominant := limitClassDigestDominantHiddenStrategyName(strategies); dominant != "max_reasons" {
+		t.Fatalf("expected dominant strategy to ignore ineligible higher-score candidates, got %q", dominant)
+	}
+}
+
+func TestLimitClassDigestDominantHiddenStrategyNameReturnsEmptyWhenNoStrategyEligible(t *testing.T) {
+	strategies := []limitClassDigestHiddenStrategySummary{
+		{name: "exact_severity", mode: "order_first", priority: 1, hiddenCount: 1, hiddenItems: 1, score: 3, eligible: false},
+		{name: "max_reasons", mode: "weighted_score", priority: 2, hiddenCount: 2, hiddenItems: 5, score: 9, eligible: false},
+	}
+
+	if dominant := limitClassDigestDominantHiddenStrategyName(strategies); dominant != "" {
+		t.Fatalf("expected no dominant strategy when none are eligible, got %q", dominant)
+	}
+}
+
+func TestLimitClassDigestHiddenStrategyScoreHonorsCaps(t *testing.T) {
+	shape := limitClassDigestReceiverShape{
+		truncatedReasonBucketHiddenStrategyPriorityWeight: 2,
+		truncatedReasonBucketHiddenStrategyReasonWeight:   3,
+		truncatedReasonBucketHiddenStrategyItemWeight:     5,
+		truncatedReasonBucketHiddenStrategyPriorityCap:    2,
+		truncatedReasonBucketHiddenStrategyReasonCap:      1,
+		truncatedReasonBucketHiddenStrategyItemCap:        4,
+		truncatedReasonBucketHiddenStrategyOrder:          []string{"exact_severity", "min_severity", "max_reasons"},
+	}
+
+	score, contributions := limitClassDigestHiddenStrategyScore(shape, "max_reasons", 1, 3, 10)
+	if score != 27 {
+		t.Fatalf("expected capped weighted score to be 27, got %d", score)
+	}
+	if stringValue(contributions["strategy"]) != "max_reasons" {
+		t.Fatalf("expected strategy contribution to be recorded, got %v", contributions["strategy"])
+	}
+	if intValue(contributions["priority_capped_value"]) != 2 {
+		t.Fatalf("expected capped priority contribution to be 2, got %v", contributions["priority_capped_value"])
+	}
+	if intValue(contributions["reason_capped_value"]) != 1 {
+		t.Fatalf("expected capped reason contribution to be 1, got %v", contributions["reason_capped_value"])
+	}
+	if intValue(contributions["item_capped_value"]) != 4 {
+		t.Fatalf("expected capped item contribution to be 4, got %v", contributions["item_capped_value"])
+	}
+}
+
+func TestLimitClassDigestHiddenStrategyScoreHonorsPerStrategyWeights(t *testing.T) {
+	shape := limitClassDigestReceiverShape{
+		truncatedReasonBucketHiddenStrategyPriorityWeight: 2,
+		truncatedReasonBucketHiddenStrategyReasonWeight:   3,
+		truncatedReasonBucketHiddenStrategyItemWeight:     5,
+		truncatedReasonBucketExactSeverityPriorityWeight:  7,
+		truncatedReasonBucketExactSeverityReasonWeight:    11,
+		truncatedReasonBucketExactSeverityItemWeight:      13,
+		truncatedReasonBucketHiddenStrategyOrder:          []string{"exact_severity", "min_severity", "max_reasons"},
+	}
+
+	score, contributions := limitClassDigestHiddenStrategyScore(shape, "exact_severity", 1, 2, 3)
+	if score != 82 {
+		t.Fatalf("expected per-strategy weighted score to be 82, got %d", score)
+	}
+	if intValue(contributions["priority_weight"]) != 7 || intValue(contributions["reason_weight"]) != 11 || intValue(contributions["item_weight"]) != 13 {
+		t.Fatalf("expected per-strategy weights in contributions, got %v", contributions)
+	}
+}
+
+func TestLimitClassDigestHiddenStrategyScoreHonorsPerStrategyCaps(t *testing.T) {
+	shape := limitClassDigestReceiverShape{
+		truncatedReasonBucketHiddenStrategyPriorityWeight: 2,
+		truncatedReasonBucketHiddenStrategyReasonWeight:   3,
+		truncatedReasonBucketHiddenStrategyItemWeight:     5,
+		truncatedReasonBucketHiddenStrategyPriorityCap:    10,
+		truncatedReasonBucketHiddenStrategyReasonCap:      10,
+		truncatedReasonBucketHiddenStrategyItemCap:        10,
+		truncatedReasonBucketExactSeverityPriorityCap:     1,
+		truncatedReasonBucketExactSeverityReasonCap:       2,
+		truncatedReasonBucketExactSeverityItemCap:         3,
+		truncatedReasonBucketHiddenStrategyOrder:          []string{"exact_severity", "min_severity", "max_reasons"},
+	}
+
+	score, contributions := limitClassDigestHiddenStrategyScore(shape, "exact_severity", 1, 5, 7)
+	if score != 23 {
+		t.Fatalf("expected per-strategy capped score to be 23, got %d", score)
+	}
+	if intValue(contributions["priority_cap"]) != 1 || intValue(contributions["reason_cap"]) != 2 || intValue(contributions["item_cap"]) != 3 {
+		t.Fatalf("expected per-strategy caps in contributions, got %v", contributions)
+	}
+	if intValue(contributions["priority_capped_value"]) != 1 || intValue(contributions["reason_capped_value"]) != 2 || intValue(contributions["item_capped_value"]) != 3 {
+		t.Fatalf("expected capped values to honor per-strategy caps, got %v", contributions)
+	}
+}
+
+func TestLimitClassDigestHiddenStrategyEligibilityHonorsThresholds(t *testing.T) {
+	shape := limitClassDigestReceiverShape{
+		truncatedReasonBucketHiddenStrategyMinReasons: 2,
+		truncatedReasonBucketHiddenStrategyMinItems:   3,
+	}
+
+	if limitClassDigestHiddenStrategyEligible(shape, "exact_severity", 1, 5) {
+		t.Fatalf("expected strategy with too few hidden reasons to be ineligible")
+	}
+	if limitClassDigestHiddenStrategyEligible(shape, "exact_severity", 3, 2) {
+		t.Fatalf("expected strategy with too few hidden items to be ineligible")
+	}
+	if !limitClassDigestHiddenStrategyEligible(shape, "exact_severity", 2, 3) {
+		t.Fatalf("expected strategy meeting both thresholds to be eligible")
+	}
+}
+
+func TestLimitClassDigestHiddenStrategyEligibilitySupportsPerStrategyOverrides(t *testing.T) {
+	shape := limitClassDigestReceiverShape{
+		truncatedReasonBucketHiddenStrategyMinReasons: 3,
+		truncatedReasonBucketHiddenStrategyMinItems:   4,
+		truncatedReasonBucketExactSeverityMinReasons:  1,
+		truncatedReasonBucketExactSeverityMinItems:    2,
+	}
+
+	thresholds := limitClassDigestHiddenStrategyEligibilityThresholds(shape, "exact_severity")
+	if intValue(thresholds["min_reasons"]) != 1 || intValue(thresholds["min_items"]) != 2 {
+		t.Fatalf("expected exact severity thresholds to override shared defaults, got %v", thresholds)
+	}
+	if !limitClassDigestHiddenStrategyEligible(shape, "exact_severity", 1, 2) {
+		t.Fatalf("expected exact severity override thresholds to make the strategy eligible")
+	}
+	if limitClassDigestHiddenStrategyEligible(shape, "min_severity", 1, 2) {
+		t.Fatalf("expected min severity to continue using shared thresholds when it has no override")
+	}
+}
+
+func TestShapeLimitClassDigestPayloadForReceiverHonorsTruncatedReasonBucketSortMode(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitAlertBucketClasses: map[string]config.LimitAlertBucketClassConfig{
+				"vip-jwt":      {KeyType: "jwt_sub", BucketRegex: "^vip-", Priority: 10},
+				"gold-jwt":     {KeyType: "jwt_sub", BucketRegex: "^gold-", Priority: 9},
+				"silver-jwt":   {KeyType: "jwt_sub", BucketRegex: "^silver-", Priority: 9},
+				"standard-jwt": {KeyType: "jwt_sub", BucketRegex: "^standard-", Priority: 5},
+			},
+		},
+	}
+	api := NewManagementAPI(mustTestGateway(t, cfg), logging.NewLogger(false), nil)
+
+	payload := managementWebhookEvent{
+		Event: "gateway.limit_class_snooze_expiring_digest",
+		Data: map[string]interface{}{
+			"snoozes": []interface{}{
+				map[string]interface{}{"severity": "critical", "bucket_class": "vip-jwt"},
+				map[string]interface{}{"severity": "critical", "bucket_class": "vip-jwt"},
+				map[string]interface{}{"severity": "critical", "bucket_class": "gold-jwt"},
+				map[string]interface{}{"severity": "warning", "bucket_class": "silver-jwt"},
+				map[string]interface{}{"severity": "warning", "bucket_class": "silver-jwt"},
+				map[string]interface{}{"severity": "critical", "bucket_class": "standard-jwt"},
+				map[string]interface{}{"severity": "critical", "bucket_class": "standard-jwt"},
+			},
+		},
+	}
+
+	shaped := api.shapeLimitClassDigestPayloadForReceiver(config.NotificationWebhook{
+		LimitClassDigestSummaryOnlyTypes:              []string{"snooze"},
+		LimitClassDigestMinSummaryBucketClassPriority: 8,
+		LimitClassDigestMinSummarySeverity:            "critical",
+		LimitClassDigestMinSummaryCount:               2,
+		LimitClassDigestOtherBucketLabel:              "other_low_count",
+		LimitClassDigestOverflowReasons:               []string{"low_priority", "low_count", "low_severity"},
+		LimitClassDigestOverflowReasonLabels: map[string]string{
+			"low_priority": "priority_floor",
+			"low_count":    "count_floor",
+			"low_severity": "severity_floor",
+		},
+		LimitClassDigestOverflowReasonGroups: map[string][]string{
+			"policy_filtered": {"low_priority"},
+		},
+		LimitClassDigestOverflowReasonOrder:             []string{"count_floor", "severity_floor", "policy_filtered"},
+		LimitClassDigestMaxOverflowReasons:              1,
+		LimitClassDigestTruncatedReasonBucketLabel:      "suppressed_categories",
+		LimitClassDigestTruncatedReasonBucketMode:       "detailed",
+		LimitClassDigestTruncatedReasonBucketSortMode:   "severity_first",
+		LimitClassDigestTruncatedReasonBucketMaxReasons: 1,
+	}, payload)
+
+	otherBucket, ok := shaped.Data["excluded_other_bucket"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected excluded_other_bucket metadata map, got %T", shaped.Data["excluded_other_bucket"])
+	}
+	truncatedBucket, ok := otherBucket["truncated_reason_bucket"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected structured truncated reason bucket, got %T", otherBucket["truncated_reason_bucket"])
+	}
+	truncatedReasonRows, ok := truncatedBucket["reasons"].([]interface{})
+	if !ok {
+		t.Fatalf("expected detailed truncated reason rows, got %T", truncatedBucket["reasons"])
+	}
+	if len(truncatedReasonRows) != 1 {
+		t.Fatalf("expected severity-first nested cap to keep one detailed row, got %d", len(truncatedReasonRows))
+	}
+	truncatedReasonRow, _ := truncatedReasonRows[0].(map[string]interface{})
+	if strings.TrimSpace(fmt.Sprint(truncatedReasonRow["reason"])) != "policy_filtered" {
+		t.Fatalf("expected severity-first nested sort to keep critical policy_filtered first, got %v", truncatedReasonRow["reason"])
+	}
+	if strings.TrimSpace(fmt.Sprint(shaped.Data["receiver_detailed_truncated_reason_bucket_sort_mode"])) != "severity_first" {
+		t.Fatalf("expected receiver truncated reason bucket sort mode metadata, got %v", shaped.Data["receiver_detailed_truncated_reason_bucket_sort_mode"])
+	}
+}
+
+func TestShapeLimitClassDigestPayloadForReceiverHonorsTruncatedReasonBucketDominantReasonStrategy(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{Port: 8080},
+		Security: config.SecurityConfig{
+			LimitAlertBucketClasses: map[string]config.LimitAlertBucketClassConfig{
+				"vip-jwt":      {KeyType: "jwt_sub", BucketRegex: "^vip-", Priority: 10},
+				"gold-jwt":     {KeyType: "jwt_sub", BucketRegex: "^gold-", Priority: 9},
+				"silver-jwt":   {KeyType: "jwt_sub", BucketRegex: "^silver-", Priority: 9},
+				"standard-jwt": {KeyType: "jwt_sub", BucketRegex: "^standard-", Priority: 5},
+			},
+		},
+	}
+	api := NewManagementAPI(mustTestGateway(t, cfg), logging.NewLogger(false), nil)
+
+	payload := managementWebhookEvent{
+		Event: "gateway.limit_class_snooze_expiring_digest",
+		Data: map[string]interface{}{
+			"snoozes": []interface{}{
+				map[string]interface{}{"severity": "critical", "bucket_class": "vip-jwt"},
+				map[string]interface{}{"severity": "critical", "bucket_class": "vip-jwt"},
+				map[string]interface{}{"severity": "critical", "bucket_class": "gold-jwt"},
+				map[string]interface{}{"severity": "warning", "bucket_class": "silver-jwt"},
+				map[string]interface{}{"severity": "warning", "bucket_class": "silver-jwt"},
+				map[string]interface{}{"severity": "critical", "bucket_class": "standard-jwt"},
+				map[string]interface{}{"severity": "critical", "bucket_class": "standard-jwt"},
+			},
+		},
+	}
+
+	shaped := api.shapeLimitClassDigestPayloadForReceiver(config.NotificationWebhook{
+		LimitClassDigestSummaryOnlyTypes:              []string{"snooze"},
+		LimitClassDigestMinSummaryBucketClassPriority: 8,
+		LimitClassDigestMinSummarySeverity:            "critical",
+		LimitClassDigestMinSummaryCount:               2,
+		LimitClassDigestOtherBucketLabel:              "other_low_count",
+		LimitClassDigestOverflowReasons:               []string{"low_priority", "low_count", "low_severity"},
+		LimitClassDigestOverflowReasonLabels: map[string]string{
+			"low_priority": "priority_floor",
+			"low_count":    "count_floor",
+			"low_severity": "severity_floor",
+		},
+		LimitClassDigestOverflowReasonGroups: map[string][]string{
+			"policy_filtered": {"low_priority"},
+		},
+		LimitClassDigestOverflowReasonOrder:                         []string{"count_floor", "severity_floor", "policy_filtered"},
+		LimitClassDigestMaxOverflowReasons:                          1,
+		LimitClassDigestTruncatedReasonBucketLabel:                  "suppressed_categories",
+		LimitClassDigestTruncatedReasonBucketMode:                   "detailed",
+		LimitClassDigestTruncatedReasonBucketMaxReasons:             2,
+		LimitClassDigestTruncatedReasonBucketDominantReasonStrategy: "severity_first",
+	}, payload)
+
+	otherBucket, ok := shaped.Data["excluded_other_bucket"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected excluded_other_bucket metadata map, got %T", shaped.Data["excluded_other_bucket"])
+	}
+	truncatedBucket, ok := otherBucket["truncated_reason_bucket"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected structured truncated reason bucket, got %T", otherBucket["truncated_reason_bucket"])
+	}
+	if strings.TrimSpace(fmt.Sprint(truncatedBucket["dominant_reason"])) != "policy_filtered" {
+		t.Fatalf("expected severity-first dominant reason strategy to choose policy_filtered, got %v", truncatedBucket["dominant_reason"])
+	}
+	if strings.TrimSpace(fmt.Sprint(truncatedBucket["dominant_raw_reason"])) != "low_priority" {
+		t.Fatalf("expected severity-first dominant raw reason strategy to choose low_priority, got %v", truncatedBucket["dominant_raw_reason"])
+	}
+	if strings.TrimSpace(fmt.Sprint(shaped.Data["receiver_detailed_truncated_reason_bucket_dominant_reason_strategy"])) != "severity_first" {
+		t.Fatalf("expected receiver truncated reason bucket dominant reason strategy metadata, got %v", shaped.Data["receiver_detailed_truncated_reason_bucket_dominant_reason_strategy"])
 	}
 }
 

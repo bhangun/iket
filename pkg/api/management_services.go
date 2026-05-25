@@ -3,10 +3,11 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
+
 	"github.com/bhangun/iket/pkg/config"
 	coreerrors "github.com/bhangun/iket/pkg/core/errors"
 	"github.com/gorilla/mux"
-	"net/http"
 )
 
 func (api *ManagementAPI) getServices(w http.ResponseWriter, r *http.Request) {
@@ -84,19 +85,18 @@ func (api *ManagementAPI) createService(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Create a working copy for simulation
-	simCfg := *cfg
-	// Deep copy services slice to avoid mutating live state during merge simulation
-	simServices := make([]config.ServiceConfig, len(cfg.Services))
-	copy(simServices, cfg.Services)
-	simCfg.Services = simServices
+	simCfg, err := cloneConfig(cfg)
+	if err != nil {
+		api.writeManagedError(w, managedConfigError("Failed to prepare configuration update", err), http.StatusInternalServerError)
+		return
+	}
 
 	if strategy == "replace" {
 		simCfg.Services = []config.ServiceConfig{{
 			Version:  1,
 			Services: cloneServices(req.Services),
 		}}
-		summary := serviceChangeSummary(cfg, &simCfg)
+		summary := serviceChangeSummary(cfg, simCfg)
 
 		if dryRun {
 			msg := fmt.Sprintf("[DRY RUN] %d service(s) would replace the remote services set", len(req.Services))
@@ -158,7 +158,7 @@ func (api *ManagementAPI) createService(w http.ResponseWriter, r *http.Request) 
 				return
 			}
 			canaryAutoReviewer := proposalCanaryAutoReviewerFromRequest(r, nil)
-			proposalID, err := saveConfigProposal("services_replace", strategy, proposalProposerFromRequest(r), proposalEnvironmentFromRequest(r), "", "", proposalCanaryServicesFromRequest(r, nil), proposalCanaryRoutesFromRequest(r, nil), proposalCanaryHeadersFromRequest(r, nil), canaryPercent, canarySteps, canaryMinRequests, canaryMaxErrorRate, canaryMaxP95Latency, canaryAutoReconcile, canaryAutoInterval, canaryAutoReviewer, label, note, changeRef, notBefore, requiredProposalApprovers(api.gateway.GetConfig(), &configProposalRecord{Action: "services_replace"}), summary, &simCfg)
+			proposalID, err := saveConfigProposal("services_replace", strategy, proposalProposerFromRequest(r), proposalEnvironmentFromRequest(r), "", "", proposalCanaryServicesFromRequest(r, nil), proposalCanaryRoutesFromRequest(r, nil), proposalCanaryHeadersFromRequest(r, nil), canaryPercent, canarySteps, canaryMinRequests, canaryMaxErrorRate, canaryMaxP95Latency, canaryAutoReconcile, canaryAutoInterval, canaryAutoReviewer, label, note, changeRef, notBefore, requiredProposalApprovers(api.gateway.GetConfig(), &configProposalRecord{Action: "services_replace"}), summary, simCfg)
 			if err != nil {
 				api.writeManagedError(w, managedProposalConflict("Failed to create proposal", err), http.StatusInternalServerError)
 				return
@@ -187,7 +187,7 @@ func (api *ManagementAPI) createService(w http.ResponseWriter, r *http.Request) 
 			})
 			return
 		}
-		if err := api.applyManagedConfigChange(&simCfg, "services_replace", label, note, changeRef, summary); err != nil {
+		if err := api.applyManagedConfigChange(simCfg, "services_replace", label, note, changeRef, summary); err != nil {
 			api.writeManagedError(w, managedConfigError("Failed to replace services", err), http.StatusInternalServerError)
 			return
 		}
@@ -244,7 +244,7 @@ func (api *ManagementAPI) createService(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	summary := serviceChangeSummary(cfg, &simCfg)
+	summary := serviceChangeSummary(cfg, simCfg)
 
 	if dryRun {
 		msg := fmt.Sprintf("[DRY RUN] %d service(s) would be added, %d route(s) would be added, %d route(s) would be updated", addedServices, len(addedRoutes), len(updatedRoutes))
@@ -307,7 +307,7 @@ func (api *ManagementAPI) createService(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		canaryAutoReviewer := proposalCanaryAutoReviewerFromRequest(r, nil)
-		proposalID, err := saveConfigProposal("services_merge", strategy, proposalProposerFromRequest(r), proposalEnvironmentFromRequest(r), "", "", proposalCanaryServicesFromRequest(r, nil), proposalCanaryRoutesFromRequest(r, nil), proposalCanaryHeadersFromRequest(r, nil), canaryPercent, canarySteps, canaryMinRequests, canaryMaxErrorRate, canaryMaxP95Latency, canaryAutoReconcile, canaryAutoInterval, canaryAutoReviewer, label, note, changeRef, notBefore, requiredProposalApprovers(api.gateway.GetConfig(), &configProposalRecord{Action: "services_merge"}), summary, &simCfg)
+		proposalID, err := saveConfigProposal("services_merge", strategy, proposalProposerFromRequest(r), proposalEnvironmentFromRequest(r), "", "", proposalCanaryServicesFromRequest(r, nil), proposalCanaryRoutesFromRequest(r, nil), proposalCanaryHeadersFromRequest(r, nil), canaryPercent, canarySteps, canaryMinRequests, canaryMaxErrorRate, canaryMaxP95Latency, canaryAutoReconcile, canaryAutoInterval, canaryAutoReviewer, label, note, changeRef, notBefore, requiredProposalApprovers(api.gateway.GetConfig(), &configProposalRecord{Action: "services_merge"}), summary, simCfg)
 		if err != nil {
 			api.writeManagedError(w, managedProposalConflict("Failed to create proposal", err), http.StatusInternalServerError)
 			return
@@ -337,7 +337,7 @@ func (api *ManagementAPI) createService(w http.ResponseWriter, r *http.Request) 
 		})
 		return
 	}
-	if err := api.applyManagedConfigChange(&simCfg, "services_merge", label, note, changeRef, summary); err != nil {
+	if err := api.applyManagedConfigChange(simCfg, "services_merge", label, note, changeRef, summary); err != nil {
 		api.writeManagedError(w, managedConfigError("Failed to update services", err), http.StatusInternalServerError)
 		return
 	}
@@ -367,17 +367,11 @@ func (api *ManagementAPI) updateService(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Create a working copy for simulation
-	simCfg := *cfg
-	// Deep copy services slice to avoid mutating live state
-	simServices := make([]config.ServiceConfig, len(cfg.Services))
-	for i := range cfg.Services {
-		simServices[i] = cfg.Services[i]
-		// Deep copy the services within each ServiceConfig
-		simServices[i].Services = make([]config.Service, len(cfg.Services[i].Services))
-		copy(simServices[i].Services, cfg.Services[i].Services)
+	simCfg, err := cloneConfig(cfg)
+	if err != nil {
+		api.writeManagedError(w, managedConfigError("Failed to prepare configuration update", err), http.StatusInternalServerError)
+		return
 	}
-	simCfg.Services = simServices
 
 	updated := false
 	addedRoutes := []map[string]interface{}{}
@@ -417,7 +411,7 @@ func (api *ManagementAPI) updateService(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	serviceSummary := serviceChangeSummary(cfg, &simCfg)
+	serviceSummary := serviceChangeSummary(cfg, simCfg)
 	if dryRun {
 		msg := fmt.Sprintf("[DRY RUN] %d route(s) would be updated, %d would be added for service %q", len(updatedRoutes), len(addedRoutes), name)
 		api.writeJSON(w, map[string]interface{}{
@@ -432,7 +426,7 @@ func (api *ManagementAPI) updateService(w http.ResponseWriter, r *http.Request) 
 	}
 
 	label, note, changeRef := revisionMetadataFromRequest(r)
-	if err := api.applyManagedConfigChange(&simCfg, "service_update", label, note, changeRef, serviceSummary); err != nil {
+	if err := api.applyManagedConfigChange(simCfg, "service_update", label, note, changeRef, serviceSummary); err != nil {
 		api.writeManagedError(w, managedConfigError("Failed to update service", err), http.StatusInternalServerError)
 		return
 	}
@@ -454,11 +448,16 @@ func (api *ManagementAPI) deleteService(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	name := mux.Vars(r)["name"]
+	simCfg, err := cloneConfig(cfg)
+	if err != nil {
+		api.writeManagedError(w, managedConfigError("Failed to prepare configuration update", err), http.StatusInternalServerError)
+		return
+	}
 	deleted := false
-	for i, svcConfig := range cfg.Services {
+	for i, svcConfig := range simCfg.Services {
 		for j, svc := range svcConfig.Services {
 			if svc.Name == name {
-				cfg.Services[i].Services = append(cfg.Services[i].Services[:j], cfg.Services[i].Services[j+1:]...)
+				simCfg.Services[i].Services = append(simCfg.Services[i].Services[:j], simCfg.Services[i].Services[j+1:]...)
 				deleted = true
 				break
 			}
@@ -472,30 +471,9 @@ func (api *ManagementAPI) deleteService(w http.ResponseWriter, r *http.Request) 
 		"deleted_service": name,
 	}
 	label, note, changeRef := revisionMetadataFromRequest(r)
-	if err := api.applyManagedConfigChange(cfg, "service_delete", label, note, changeRef, deletedSummary); err != nil {
+	if err := api.applyManagedConfigChange(simCfg, "service_delete", label, note, changeRef, deletedSummary); err != nil {
 		api.writeManagedError(w, managedConfigError("Failed to delete service", err), http.StatusInternalServerError)
 		return
 	}
 	api.writeJSON(w, APIResponse{Success: true, Message: "Service deleted successfully", Data: deletedSummary})
-}
-
-func cloneServices(in []config.Service) []config.Service {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make([]config.Service, len(in))
-	for i, svc := range in {
-		out[i] = svc
-		if len(svc.Routes) > 0 {
-			out[i].Routes = make([]config.RouterConfig, len(svc.Routes))
-			copy(out[i].Routes, svc.Routes)
-		}
-		if len(svc.Tags) > 0 {
-			out[i].Tags = append([]string(nil), svc.Tags...)
-		}
-		if len(svc.Scopes) > 0 {
-			out[i].Scopes = append([]string(nil), svc.Scopes...)
-		}
-	}
-	return out
 }

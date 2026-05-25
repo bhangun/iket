@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/bhangun/iket/pkg/config"
+	"github.com/bhangun/iket/pkg/core/authcontext"
 	"github.com/bhangun/iket/pkg/logging"
 	"github.com/golang-jwt/jwt/v4"
 )
@@ -85,6 +86,7 @@ func (g *Gateway) jwtAuthMiddleware(cfg config.JWTConfig) func(http.Handler) htt
 			}
 			if claims, ok := token.Claims.(jwt.MapClaims); ok {
 				ctx := context.WithValue(r.Context(), jwtClaimsKey, claims)
+				ctx = authcontext.WithPrincipal(ctx, principalFromMapClaims(claims))
 				r = r.WithContext(ctx)
 			}
 			next.ServeHTTP(w, r)

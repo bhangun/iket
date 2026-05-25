@@ -12,9 +12,9 @@ func validateRouteQueryAndProtocolPolicy(ctx serviceValidationContext) error {
 	}
 	if strings.TrimSpace(route.Protocol) != "" {
 		switch strings.ToLower(strings.TrimSpace(route.Protocol)) {
-		case "http", "graphql", "grpc", "grpc-web", "websocket", "sse":
+		case "http", "graphql", "grpc", "grpc-web", "websocket", "sse", "bff":
 		default:
-			return validationError(ctx.routeField("protocol"), "protocol must be one of http, graphql, grpc, grpc-web, websocket, or sse")
+			return validationError(ctx.routeField("protocol"), "protocol must be one of http, graphql, grpc, grpc-web, websocket, sse, or bff")
 		}
 	}
 	if strings.EqualFold(strings.TrimSpace(route.Protocol), "sse") {

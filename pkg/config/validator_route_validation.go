@@ -21,6 +21,7 @@ var serviceRouteValidators = []routeValidator{
 	validateRouteAIRequestPolicy,
 	validateRouteTransformPolicy,
 	validateRouteResponsePolicy,
+	validateRouteBFFPolicy,
 	validateRouteBackendPolicy,
 }
 

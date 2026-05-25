@@ -30,15 +30,15 @@ services:
     networks:
       - iket-network
 
-  # Example of how to use iket-cli from another container or as a one-off
+  # Example of how to use iket from another container or as a one-off
   # docker-compose run cli gateway status
   cli:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    container_name: iket-cli
+    container_name: iket-control
     image: iket:cli
-    entrypoint: ["iket-cli"]
+    entrypoint: ["iket"]
     environment:
       - TZ=UTC
       - IKET_SERVER_URL=https://iket:8443

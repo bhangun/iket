@@ -30,6 +30,12 @@ type Gateway struct {
 	backendStateMu sync.RWMutex
 	backendState   map[string]backendRuntimeState
 
+	bffCacheMu sync.RWMutex
+	bffCache   map[string]bffCacheEntry
+
+	bffCoalesceMu sync.Mutex
+	bffCoalesce   map[string]*bffCoalescedCall
+
 	rateLimitStateMu sync.Mutex
 	rateLimitState   map[string]*routeRateLimitBucket
 
@@ -75,6 +81,8 @@ func NewGateway(deps Dependencies, version string) (*Gateway, error) {
 		logger:           deps.Logger,
 		shutdown:         make(chan struct{}),
 		backendState:     make(map[string]backendRuntimeState),
+		bffCache:         make(map[string]bffCacheEntry),
+		bffCoalesce:      make(map[string]*bffCoalescedCall),
 		rateLimitState:   make(map[string]*routeRateLimitBucket),
 		concurrencyState: make(map[string]*routeConcurrencyBucket),
 		limitHitState: routeLimitHitRuntimeState{
@@ -106,6 +114,7 @@ func (g *Gateway) Initialize() error {
 	if err := g.loadPlugins(); err != nil {
 		return errors.NewConfigError("failed to load plugins", err)
 	}
+	g.pluginRegistry.WireClientUsageObservers()
 
 	go g.activeBackendProbeLoop()
 

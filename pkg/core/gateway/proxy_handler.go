@@ -21,6 +21,16 @@ func (g *Gateway) proxyHandler(route config.RouterConfig) http.HandlerFunc {
 		if servePluginRouteIfMatched(w, r) {
 			return
 		}
+		if currentRoute, ok := g.matchRoute(r); ok {
+			route = currentRoute
+		} else {
+			g.notFoundHandler(w, r)
+			return
+		}
+		if route.BFF != nil && route.BFF.IsEnabled() {
+			g.handleBFFRoute(w, r, route)
+			return
+		}
 
 		selectedBackend, selectedDestination := g.selectRouteBackend(route, rolloutBucketKey(r))
 		if selectedDestination == "" {

@@ -211,6 +211,216 @@ func TestSecurityConfigRuleRejectsInvalidLimitClassAlertNotificationSeverity(t *
 	}
 }
 
+func TestSecurityConfigRuleRejectsInvalidLimitClassSnoozeNotificationWindow(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			MutationPolicy: MutationPolicy{
+				LimitClassSnoozeNotifications: PolicyAlertNotificationPolicy{
+					Enabled: true,
+					Window:  "banana",
+				},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "limitClassSnoozeNotifications.window") {
+		t.Fatalf("expected limit class snooze notification window validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsNegativeLimitClassSnoozeNotificationDetailedMinBucketClassPriority(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			MutationPolicy: MutationPolicy{
+				LimitClassSnoozeNotifications: PolicyAlertNotificationPolicy{
+					Enabled:                        true,
+					DetailedMinBucketClassPriority: -1,
+				},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "limitClassSnoozeNotifications.detailedMinBucketClassPriority") {
+		t.Fatalf("expected detailedMinBucketClassPriority validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsNegativeLimitClassSnoozeNotificationDetailedMaxBucketClasses(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			MutationPolicy: MutationPolicy{
+				LimitClassSnoozeNotifications: PolicyAlertNotificationPolicy{
+					Enabled:                  true,
+					DetailedMaxBucketClasses: -1,
+				},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "limitClassSnoozeNotifications.detailedMaxBucketClasses") {
+		t.Fatalf("expected detailedMaxBucketClasses validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsInvalidLimitClassSnoozeNotificationStageThresholdOrdering(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			MutationPolicy: MutationPolicy{
+				LimitClassSnoozeNotifications: PolicyAlertNotificationPolicy{
+					Enabled:              true,
+					SnoozeElevatedWithin: "5m",
+					SnoozeCriticalWithin: "10m",
+				},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "limitClassSnoozeNotifications.snoozeCriticalWithin") {
+		t.Fatalf("expected limit class snooze notification stage threshold ordering validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsInvalidLimitAlertBucketClassSnoozeThresholdOrdering(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			LimitAlertBucketClasses: map[string]LimitAlertBucketClassConfig{
+				"vip-jwt": {
+					KeyType:              "jwt_sub",
+					BucketRegex:          "^vip-",
+					SnoozeElevatedWithin: "5m",
+					SnoozeCriticalWithin: "10m",
+				},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "security.limitAlertBucketClasses.vip-jwt.snoozeCriticalWithin") {
+		t.Fatalf("expected limit alert bucket class snooze threshold ordering validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsInvalidLimitAlertBucketClassSnoozeEventType(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			LimitAlertBucketClasses: map[string]LimitAlertBucketClassConfig{
+				"vip-jwt": {
+					KeyType:          "jwt_sub",
+					BucketRegex:      "^vip-",
+					SnoozeEventTypes: []string{"digest"},
+				},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "security.limitAlertBucketClasses.vip-jwt.snoozeEventTypes") {
+		t.Fatalf("expected limit alert bucket class snooze event types validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsNegativeLimitAlertBucketClassPriority(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			LimitAlertBucketClasses: map[string]LimitAlertBucketClassConfig{
+				"vip-jwt": {
+					KeyType:     "jwt_sub",
+					BucketRegex: "^vip-",
+					Priority:    -1,
+				},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "security.limitAlertBucketClasses.vip-jwt.priority") {
+		t.Fatalf("expected limit alert bucket class priority validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsInvalidLimitClassSnoozeExpiryCooldown(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			NotificationWebhooks: []NotificationWebhook{{
+				URL:                            "https://example.com/hook",
+				Events:                         []string{"gateway.limit_class_snooze_expiring"},
+				LimitClassSnoozeExpiryCooldown: "banana",
+			}},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "limitClassSnoozeExpiryCooldown") {
+		t.Fatalf("expected limit class snooze expiry cooldown validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsInvalidLimitClassSnoozeExpiryWithin(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			NotificationWebhooks: []NotificationWebhook{{
+				URL:                          "https://example.com/hook",
+				Events:                       []string{"gateway.limit_class_snooze_expiring"},
+				LimitClassSnoozeExpiryWithin: "0m",
+			}},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "limitClassSnoozeExpiryWithin") {
+		t.Fatalf("expected limit class snooze expiry within validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsInvalidLimitClassSnoozeExpiryStage(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			NotificationWebhooks: []NotificationWebhook{{
+				URL:                          "https://example.com/hook",
+				Events:                       []string{"gateway.limit_class_snooze_expiring"},
+				LimitClassSnoozeExpiryStages: []string{"urgent"},
+			}},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "limitClassSnoozeExpiryStages") {
+		t.Fatalf("expected limit class snooze expiry stages validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsInvalidLimitClassSnoozeEventType(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			NotificationWebhooks: []NotificationWebhook{{
+				URL:                        "https://example.com/hook",
+				Events:                     []string{"gateway.limit_class_snooze_resumed"},
+				LimitClassSnoozeEventTypes: []string{"wake_up"},
+			}},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "limitClassSnoozeEventTypes") {
+		t.Fatalf("expected limit class snooze event types validation error, got %v", err)
+	}
+}
+
 func TestSecurityConfigRuleRejectsInvalidLimitAlertTypePolicyOrdering(t *testing.T) {
 	cfg := &Config{
 		Server: ServerConfig{Port: 8080},
@@ -534,6 +744,929 @@ func TestSecurityConfigRuleRejectsUnknownNotificationWebhookLimitAlertBucketClas
 	err := NewConfigValidator().Validate(cfg)
 	if err == nil || !strings.Contains(err.Error(), "notificationWebhooks[0].limitAlertBucketClasses") {
 		t.Fatalf("expected notification webhook limitAlertBucketClasses validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsNegativeNotificationWebhookLimitAlertBucketClassPriority(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			NotificationWebhooks: []NotificationWebhook{
+				{URL: "https://example.com/hook", MinLimitAlertBucketClassPriority: -1},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "notificationWebhooks[0].minLimitAlertBucketClassPriority") {
+		t.Fatalf("expected notification webhook minLimitAlertBucketClassPriority validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsNegativeNotificationWebhookLimitClassDigestMaxBucketClasses(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			NotificationWebhooks: []NotificationWebhook{
+				{URL: "https://example.com/hook", LimitClassDigestMaxBucketClasses: -1},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "notificationWebhooks[0].limitClassDigestMaxBucketClasses") {
+		t.Fatalf("expected notification webhook limitClassDigestMaxBucketClasses validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsInvalidNotificationWebhookLimitClassDigestMinSeverity(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			NotificationWebhooks: []NotificationWebhook{
+				{URL: "https://example.com/hook", LimitClassDigestMinSeverity: "urgent"},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "notificationWebhooks[0].limitClassDigestMinSeverity") {
+		t.Fatalf("expected notification webhook limitClassDigestMinSeverity validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsInvalidNotificationWebhookLimitClassDigestSeverities(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			NotificationWebhooks: []NotificationWebhook{
+				{URL: "https://example.com/hook", LimitClassDigestSeverities: []string{"critical", "urgent"}},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "notificationWebhooks[0].limitClassDigestSeverities") {
+		t.Fatalf("expected notification webhook limitClassDigestSeverities validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsInvalidNotificationWebhookLimitClassDigestTypes(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			NotificationWebhooks: []NotificationWebhook{
+				{URL: "https://example.com/hook", LimitClassDigestTypes: []string{"alert", "digest"}},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "notificationWebhooks[0].limitClassDigestTypes") {
+		t.Fatalf("expected notification webhook limitClassDigestTypes validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsInvalidNotificationWebhookLimitClassDigestSummaryOnlyTypes(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			NotificationWebhooks: []NotificationWebhook{
+				{URL: "https://example.com/hook", LimitClassDigestSummaryOnlyTypes: []string{"snooze", "digest"}},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "notificationWebhooks[0].limitClassDigestSummaryOnlyTypes") {
+		t.Fatalf("expected notification webhook limitClassDigestSummaryOnlyTypes validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsNegativeNotificationWebhookLimitClassDigestMaxSummaryBucketClasses(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			NotificationWebhooks: []NotificationWebhook{
+				{URL: "https://example.com/hook", LimitClassDigestMaxSummaryBucketClasses: -1},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "notificationWebhooks[0].limitClassDigestMaxSummaryBucketClasses") {
+		t.Fatalf("expected notification webhook limitClassDigestMaxSummaryBucketClasses validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsNegativeNotificationWebhookLimitClassDigestMinSummaryBucketClassPriority(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			NotificationWebhooks: []NotificationWebhook{
+				{URL: "https://example.com/hook", LimitClassDigestMinSummaryBucketClassPriority: -1},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "notificationWebhooks[0].limitClassDigestMinSummaryBucketClassPriority") {
+		t.Fatalf("expected notification webhook limitClassDigestMinSummaryBucketClassPriority validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsInvalidNotificationWebhookLimitClassDigestMinSummarySeverity(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			NotificationWebhooks: []NotificationWebhook{
+				{URL: "https://example.com/hook", LimitClassDigestMinSummarySeverity: "urgent"},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "notificationWebhooks[0].limitClassDigestMinSummarySeverity") {
+		t.Fatalf("expected notification webhook limitClassDigestMinSummarySeverity validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsInvalidNotificationWebhookLimitClassDigestSummarySortMode(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			NotificationWebhooks: []NotificationWebhook{
+				{URL: "https://example.com/hook", LimitClassDigestSummarySortMode: "severity_only"},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "notificationWebhooks[0].limitClassDigestSummarySortMode") {
+		t.Fatalf("expected notification webhook limitClassDigestSummarySortMode validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsNegativeNotificationWebhookLimitClassDigestMinSummaryCount(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			NotificationWebhooks: []NotificationWebhook{
+				{URL: "https://example.com/hook", LimitClassDigestMinSummaryCount: -1},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "notificationWebhooks[0].limitClassDigestMinSummaryCount") {
+		t.Fatalf("expected notification webhook limitClassDigestMinSummaryCount validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsInvalidNotificationWebhookLimitClassDigestOverflowReasons(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			NotificationWebhooks: []NotificationWebhook{
+				{URL: "https://example.com/hook", LimitClassDigestOverflowReasons: []string{"banana"}},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "notificationWebhooks[0].limitClassDigestOverflowReasons") {
+		t.Fatalf("expected notification webhook limitClassDigestOverflowReasons validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsInvalidNotificationWebhookLimitClassDigestOverflowReasonLabels(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			NotificationWebhooks: []NotificationWebhook{
+				{URL: "https://example.com/hook", LimitClassDigestOverflowReasonLabels: map[string]string{"banana": "friendly"}},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "notificationWebhooks[0].limitClassDigestOverflowReasonLabels") {
+		t.Fatalf("expected notification webhook limitClassDigestOverflowReasonLabels validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsInvalidNotificationWebhookLimitClassDigestOverflowReasonGroups(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			NotificationWebhooks: []NotificationWebhook{
+				{URL: "https://example.com/hook", LimitClassDigestOverflowReasonGroups: map[string][]string{"policy_filtered": []string{"banana"}}},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "notificationWebhooks[0].limitClassDigestOverflowReasonGroups") {
+		t.Fatalf("expected notification webhook limitClassDigestOverflowReasonGroups validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsEmptyNotificationWebhookLimitClassDigestOverflowReasonOrder(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			NotificationWebhooks: []NotificationWebhook{
+				{URL: "https://example.com/hook", LimitClassDigestOverflowReasonOrder: []string{"policy_filtered", ""}},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "notificationWebhooks[0].limitClassDigestOverflowReasonOrder") {
+		t.Fatalf("expected notification webhook limitClassDigestOverflowReasonOrder validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsNegativeNotificationWebhookLimitClassDigestMaxOverflowReasons(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			NotificationWebhooks: []NotificationWebhook{
+				{URL: "https://example.com/hook", LimitClassDigestMaxOverflowReasons: -1},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "notificationWebhooks[0].limitClassDigestMaxOverflowReasons") {
+		t.Fatalf("expected limitClassDigestMaxOverflowReasons validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsInvalidNotificationWebhookLimitClassDigestTruncatedReasonBucketMode(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			NotificationWebhooks: []NotificationWebhook{
+				{URL: "https://example.com/hook", LimitClassDigestTruncatedReasonBucketMode: "verbose"},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "notificationWebhooks[0].limitClassDigestTruncatedReasonBucketMode") {
+		t.Fatalf("expected notification webhook limitClassDigestTruncatedReasonBucketMode validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsNegativeNotificationWebhookLimitClassDigestTruncatedReasonBucketMaxReasons(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			NotificationWebhooks: []NotificationWebhook{
+				{URL: "https://example.com/hook", LimitClassDigestTruncatedReasonBucketMaxReasons: -1},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "notificationWebhooks[0].limitClassDigestTruncatedReasonBucketMaxReasons") {
+		t.Fatalf("expected notification webhook limitClassDigestTruncatedReasonBucketMaxReasons validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsEmptyNotificationWebhookLimitClassDigestTruncatedReasonBucketReasonOrderValue(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			NotificationWebhooks: []NotificationWebhook{
+				{URL: "https://example.com/hook", LimitClassDigestTruncatedReasonBucketReasonOrder: []string{"priority_floor", "  "}},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "notificationWebhooks[0].limitClassDigestTruncatedReasonBucketReasonOrder") {
+		t.Fatalf("expected notification webhook limitClassDigestTruncatedReasonBucketReasonOrder validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsInvalidNotificationWebhookLimitClassDigestTruncatedReasonBucketMinSeverity(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			NotificationWebhooks: []NotificationWebhook{
+				{URL: "https://example.com/hook", LimitClassDigestTruncatedReasonBucketMinSeverity: "urgent"},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "notificationWebhooks[0].limitClassDigestTruncatedReasonBucketMinSeverity") {
+		t.Fatalf("expected notification webhook limitClassDigestTruncatedReasonBucketMinSeverity validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsInvalidNotificationWebhookLimitClassDigestTruncatedReasonBucketSeverities(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			NotificationWebhooks: []NotificationWebhook{
+				{URL: "https://example.com/hook", LimitClassDigestTruncatedReasonBucketSeverities: []string{"critical", "urgent"}},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "notificationWebhooks[0].limitClassDigestTruncatedReasonBucketSeverities") {
+		t.Fatalf("expected notification webhook limitClassDigestTruncatedReasonBucketSeverities validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsInvalidNotificationWebhookLimitClassDigestTruncatedReasonBucketSortMode(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			NotificationWebhooks: []NotificationWebhook{
+				{URL: "https://example.com/hook", LimitClassDigestTruncatedReasonBucketSortMode: "priority_first"},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "notificationWebhooks[0].limitClassDigestTruncatedReasonBucketSortMode") {
+		t.Fatalf("expected notification webhook limitClassDigestTruncatedReasonBucketSortMode validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsInvalidNotificationWebhookLimitClassDigestTruncatedReasonBucketDominantReasonStrategy(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			NotificationWebhooks: []NotificationWebhook{
+				{URL: "https://example.com/hook", LimitClassDigestTruncatedReasonBucketDominantReasonStrategy: "raw_frequency"},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "notificationWebhooks[0].limitClassDigestTruncatedReasonBucketDominantReasonStrategy") {
+		t.Fatalf("expected notification webhook limitClassDigestTruncatedReasonBucketDominantReasonStrategy validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsInvalidNotificationWebhookLimitClassDigestTruncatedReasonBucketHiddenStrategyOrder(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			NotificationWebhooks: []NotificationWebhook{
+				{URL: "https://example.com/hook", LimitClassDigestTruncatedReasonBucketHiddenStrategyOrder: []string{"exact_severity", "raw_frequency"}},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "notificationWebhooks[0].limitClassDigestTruncatedReasonBucketHiddenStrategyOrder") {
+		t.Fatalf("expected notification webhook limitClassDigestTruncatedReasonBucketHiddenStrategyOrder validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsInvalidNotificationWebhookLimitClassDigestTruncatedReasonBucketHiddenStrategyDominantMode(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			NotificationWebhooks: []NotificationWebhook{
+				{URL: "https://example.com/hook", LimitClassDigestTruncatedReasonBucketHiddenStrategyDominantMode: "largest_hidden"},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "notificationWebhooks[0].limitClassDigestTruncatedReasonBucketHiddenStrategyDominantMode") {
+		t.Fatalf("expected notification webhook limitClassDigestTruncatedReasonBucketHiddenStrategyDominantMode validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsInvalidNotificationWebhookLimitClassDigestTruncatedReasonBucketExactSeverityDominantMode(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			NotificationWebhooks: []NotificationWebhook{
+				{URL: "https://example.com/hook", LimitClassDigestTruncatedReasonBucketExactSeverityDominantMode: "largest_hidden"},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "notificationWebhooks[0].limitClassDigestTruncatedReasonBucketExactSeverityDominantMode") {
+		t.Fatalf("expected notification webhook limitClassDigestTruncatedReasonBucketExactSeverityDominantMode validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsInvalidNotificationWebhookLimitClassDigestTruncatedReasonBucketExactSeverityPolicy(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			NotificationWebhooks: []NotificationWebhook{
+				{URL: "https://example.com/hook", LimitClassDigestTruncatedReasonBucketExactSeverityPolicy: &LimitClassDigestHiddenStrategyPolicy{DominantMode: "largest_hidden"}},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "notificationWebhooks[0].limitClassDigestTruncatedReasonBucketExactSeverityPolicy.dominantMode") {
+		t.Fatalf("expected notification webhook limitClassDigestTruncatedReasonBucketExactSeverityPolicy validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsUnknownNotificationWebhookLimitClassDigestTruncatedReasonBucketExactSeverityPolicyPreset(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			NotificationWebhooks: []NotificationWebhook{
+				{URL: "https://example.com/hook", LimitClassDigestTruncatedReasonBucketExactSeverityPolicyPreset: "shared-exact"},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "notificationWebhooks[0].limitClassDigestTruncatedReasonBucketExactSeverityPolicyPreset") {
+		t.Fatalf("expected notification webhook limitClassDigestTruncatedReasonBucketExactSeverityPolicyPreset validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsUnknownNotificationWebhookLimitClassDigestTruncatedReasonBucketExactSeverityPolicyPresetChainEntry(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			LimitClassDigestHiddenStrategyPolicyPresets: map[string]LimitClassDigestHiddenStrategyPolicy{
+				"base": {DominantMode: "weighted_score"},
+			},
+			NotificationWebhooks: []NotificationWebhook{
+				{URL: "https://example.com/hook", LimitClassDigestTruncatedReasonBucketExactSeverityPolicyPresetChain: []string{"base", "missing"}},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "notificationWebhooks[0].limitClassDigestTruncatedReasonBucketExactSeverityPolicyPresetChain") {
+		t.Fatalf("expected notification webhook limitClassDigestTruncatedReasonBucketExactSeverityPolicyPresetChain validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsUnknownNotificationWebhookLimitClassDigestProfile(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			NotificationWebhooks: []NotificationWebhook{
+				{URL: "https://example.com/hook", LimitClassDigestProfile: "shared-digest"},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "notificationWebhooks[0].limitClassDigestProfile") {
+		t.Fatalf("expected notification webhook limitClassDigestProfile validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsUnknownNotificationWebhookLimitClassDigestProfileChainEntry(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			LimitClassDigestProfiles: map[string]LimitAlertRecipientProfile{
+				"base": {LimitClassDigestMinSeverity: "warning"},
+			},
+			NotificationWebhooks: []NotificationWebhook{
+				{URL: "https://example.com/hook", LimitClassDigestProfileChain: []string{"base", "missing"}},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "notificationWebhooks[0].limitClassDigestProfileChain") {
+		t.Fatalf("expected notification webhook limitClassDigestProfileChain validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsEmptyLimitClassDigestExplainBundleFields(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			LimitClassDigestExplainBundles: map[string]LimitClassDigestExplainBundle{
+				"ops-core": {},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "security.limitClassDigestExplainBundles.ops-core.fields") {
+		t.Fatalf("expected limit class digest explain bundle fields validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsEmptyLimitClassDigestExplainBundleFieldEntry(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			LimitClassDigestExplainBundles: map[string]LimitClassDigestExplainBundle{
+				"ops-core": {Fields: []string{"limitClassDigestMinSeverity", " "}},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "security.limitClassDigestExplainBundles.ops-core.fields") {
+		t.Fatalf("expected limit class digest explain bundle empty field validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsUnknownLimitClassDigestExplainDiffProfileBundle(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			LimitClassDigestExplainDiffProfiles: map[string]LimitClassDigestExplainDiffProfile{
+				"pager-audit": {Bundles: []string{"missing"}},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "security.limitClassDigestExplainDiffProfiles.pager-audit.bundles") {
+		t.Fatalf("expected limit class digest explain diff profile bundle validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsEmptyLimitClassDigestAssertionExplainBundleKinds(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			LimitClassDigestAssertionExplainBundles: map[string]LimitClassDigestAssertionExplainBundle{
+				"core": {},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "security.limitClassDigestAssertionExplainBundles.core.kinds") {
+		t.Fatalf("expected limit class digest assertion explain bundle kinds validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsInvalidLimitClassDigestAssertionExplainBundleKind(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			LimitClassDigestAssertionExplainBundles: map[string]LimitClassDigestAssertionExplainBundle{
+				"core": {Kinds: []string{"rules", "fields"}},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "security.limitClassDigestAssertionExplainBundles.core.kinds") {
+		t.Fatalf("expected limit class digest assertion explain bundle kind validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsUnknownLimitClassDigestAssertionExplainDiffProfileBundle(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			LimitClassDigestAssertionExplainDiffProfiles: map[string]LimitClassDigestAssertionExplainDiffProfile{
+				"preset-audit": {Bundles: []string{"missing"}},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "security.limitClassDigestAssertionExplainDiffProfiles.preset-audit.bundles") {
+		t.Fatalf("expected limit class digest assertion explain diff profile bundle validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsInvalidLimitClassDigestAssertionExplainDiffProfileExpectedValueKey(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			LimitClassDigestAssertionExplainDiffProfiles: map[string]LimitClassDigestAssertionExplainDiffProfile{
+				"preset-audit": {ExpectedFromValues: map[string]string{"fields": "[]"}},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "security.limitClassDigestAssertionExplainDiffProfiles.preset-audit.expectedFromValues") {
+		t.Fatalf("expected limit class digest assertion explain diff profile expectedFromValues validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsInvalidLimitClassDigestAssertionExplainDiffProfileRuleKey(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			LimitClassDigestAssertionExplainDiffProfiles: map[string]LimitClassDigestAssertionExplainDiffProfile{
+				"preset-audit": {AssertFromRules: map[string][]string{"fields": {"exists"}}},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "security.limitClassDigestAssertionExplainDiffProfiles.preset-audit.assertFromRules") {
+		t.Fatalf("expected limit class digest assertion explain diff profile assertFromRules validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsInvalidLimitClassDigestAssertionExplainDiffProfileGroupKey(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			LimitClassDigestAssertionExplainDiffProfiles: map[string]LimitClassDigestAssertionExplainDiffProfile{
+				"preset-audit": {AssertFromGroups: map[string][]LimitClassDigestAssertionGroup{"fields": {{Operator: "allOf", Rules: []string{"exists"}}}}},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "security.limitClassDigestAssertionExplainDiffProfiles.preset-audit.assertFromGroups") {
+		t.Fatalf("expected limit class digest assertion explain diff profile assertFromGroups validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsUnknownLimitClassDigestAssertionExplainDiffProfileGroupPreset(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			LimitClassDigestAssertionExplainDiffProfiles: map[string]LimitClassDigestAssertionExplainDiffProfile{
+				"preset-audit": {AssertFromGroupPresets: map[string][]string{"rules": {"missing"}}},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "security.limitClassDigestAssertionExplainDiffProfiles.preset-audit.assertFromGroupPresets.rules") {
+		t.Fatalf("expected limit class digest assertion explain diff profile assertFromGroupPresets validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsUnknownLimitClassDigestAssertionGroupPresetExplainBundlePreset(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			LimitClassDigestAssertionGroupPresetExplainBundles: map[string]LimitClassDigestAssertionGroupPresetExplainBundle{
+				"core": {Presets: []string{"missing"}},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "security.limitClassDigestAssertionGroupPresetExplainBundles.core.presets") {
+		t.Fatalf("expected limit class digest assertion group preset explain bundle validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsHalfDefinedLimitClassDigestExplainDiffProfileRoles(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			LimitClassDigestExplainDiffProfiles: map[string]LimitClassDigestExplainDiffProfile{
+				"pager-audit": {FromRole: "baseline"},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "security.limitClassDigestExplainDiffProfiles.pager-audit") {
+		t.Fatalf("expected limit class digest explain diff profile role validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsEmptyLimitClassDigestExplainDiffProfileExpectedFromField(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			LimitClassDigestExplainDiffProfiles: map[string]LimitClassDigestExplainDiffProfile{
+				"pager-audit": {ExpectedFromValues: map[string]string{" ": "critical"}},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "security.limitClassDigestExplainDiffProfiles.pager-audit.expectedFromValues") {
+		t.Fatalf("expected limit class digest explain diff profile expectedFromValues validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsInvalidLimitClassDigestExplainDiffProfileAssertionRule(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			LimitClassDigestExplainDiffProfiles: map[string]LimitClassDigestExplainDiffProfile{
+				"pager-audit": {AssertFromRules: map[string][]string{"limitClassDigestTypes": {"invalid:rule"}}},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "security.limitClassDigestExplainDiffProfiles.pager-audit.assertFromRules.limitClassDigestTypes") {
+		t.Fatalf("expected limit class digest explain diff profile assertFromRules validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsInvalidLimitClassDigestExplainDiffProfileAssertionRegex(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			LimitClassDigestExplainDiffProfiles: map[string]LimitClassDigestExplainDiffProfile{
+				"pager-audit": {AssertToRules: map[string][]string{"limitClassDigestMinSeverity": {"regex:["}}},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "security.limitClassDigestExplainDiffProfiles.pager-audit.assertToRules.limitClassDigestMinSeverity") {
+		t.Fatalf("expected limit class digest explain diff profile assertToRules regex validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleAllowsLimitClassDigestExplainDiffProfileNoneOfAssertionGroup(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			LimitClassDigestExplainDiffProfiles: map[string]LimitClassDigestExplainDiffProfile{
+				"pager-audit": {
+					AssertFromGroups: map[string][]LimitClassDigestAssertionGroup{
+						"limitClassDigestTypes": {{
+							Operator: "noneOf",
+							Rules:    []string{"exists"},
+						}},
+					},
+				},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err != nil {
+		t.Fatalf("expected noneOf assertion group to validate, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsEmptyNestedLimitClassDigestExplainAssertionGroup(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			LimitClassDigestExplainDiffProfiles: map[string]LimitClassDigestExplainDiffProfile{
+				"pager-audit": {
+					AssertToGroups: map[string][]LimitClassDigestAssertionGroup{
+						"limitClassDigestTypes": {{
+							Operator: "allOf",
+							Groups: []LimitClassDigestAssertionGroup{{
+								Operator: "anyOf",
+							}},
+						}},
+					},
+				},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "security.limitClassDigestExplainDiffProfiles.pager-audit.assertToGroups.limitClassDigestTypes[0].groups[0]") {
+		t.Fatalf("expected nested limit class digest explain assertion group validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsUnknownLimitClassDigestAssertionPresetRef(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			LimitClassDigestExplainDiffProfiles: map[string]LimitClassDigestExplainDiffProfile{
+				"pager-audit": {
+					AssertFromPresets: map[string][]string{
+						"limitClassDigestTypes": {"missing"},
+					},
+				},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "security.limitClassDigestExplainDiffProfiles.pager-audit.assertFromPresets.limitClassDigestTypes") {
+		t.Fatalf("expected limit class digest assertion preset ref validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsLimitClassDigestAssertionPresetCycle(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			LimitClassDigestAssertionPresets: map[string]LimitClassDigestAssertionPreset{
+				"base":  {PresetChain: []string{"child"}},
+				"child": {PresetChain: []string{"base"}},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || (!strings.Contains(err.Error(), "security.limitClassDigestAssertionPresets.child.presetChain") && !strings.Contains(err.Error(), "security.limitClassDigestAssertionPresets.base.presetChain")) {
+		t.Fatalf("expected limit class digest assertion preset cycle validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsNegativeNotificationWebhookLimitClassDigestTruncatedReasonBucketHiddenStrategyWeight(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			NotificationWebhooks: []NotificationWebhook{
+				{URL: "https://example.com/hook", LimitClassDigestTruncatedReasonBucketHiddenStrategyReasonWeight: -1},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "notificationWebhooks[0].limitClassDigestTruncatedReasonBucketHiddenStrategyReasonWeight") {
+		t.Fatalf("expected notification webhook limitClassDigestTruncatedReasonBucketHiddenStrategyReasonWeight validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsNegativeNotificationWebhookLimitClassDigestTruncatedReasonBucketExactSeverityWeight(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			NotificationWebhooks: []NotificationWebhook{
+				{URL: "https://example.com/hook", LimitClassDigestTruncatedReasonBucketExactSeverityReasonWeight: -1},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "notificationWebhooks[0].limitClassDigestTruncatedReasonBucketExactSeverityReasonWeight") {
+		t.Fatalf("expected notification webhook limitClassDigestTruncatedReasonBucketExactSeverityReasonWeight validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsNegativeNotificationWebhookLimitClassDigestTruncatedReasonBucketHiddenStrategyCap(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			NotificationWebhooks: []NotificationWebhook{
+				{URL: "https://example.com/hook", LimitClassDigestTruncatedReasonBucketHiddenStrategyItemCap: -1},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "notificationWebhooks[0].limitClassDigestTruncatedReasonBucketHiddenStrategyItemCap") {
+		t.Fatalf("expected notification webhook limitClassDigestTruncatedReasonBucketHiddenStrategyItemCap validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsNegativeNotificationWebhookLimitClassDigestTruncatedReasonBucketExactSeverityCap(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			NotificationWebhooks: []NotificationWebhook{
+				{URL: "https://example.com/hook", LimitClassDigestTruncatedReasonBucketExactSeverityItemCap: -1},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "notificationWebhooks[0].limitClassDigestTruncatedReasonBucketExactSeverityItemCap") {
+		t.Fatalf("expected notification webhook limitClassDigestTruncatedReasonBucketExactSeverityItemCap validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsNegativeNotificationWebhookLimitClassDigestTruncatedReasonBucketHiddenStrategyMinimum(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			NotificationWebhooks: []NotificationWebhook{
+				{URL: "https://example.com/hook", LimitClassDigestTruncatedReasonBucketHiddenStrategyMinItems: -1},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "notificationWebhooks[0].limitClassDigestTruncatedReasonBucketHiddenStrategyMinItems") {
+		t.Fatalf("expected notification webhook limitClassDigestTruncatedReasonBucketHiddenStrategyMinItems validation error, got %v", err)
+	}
+}
+
+func TestSecurityConfigRuleRejectsNegativeNotificationWebhookLimitClassDigestTruncatedReasonBucketPerStrategyMinimum(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080},
+		Security: SecurityConfig{
+			NotificationWebhooks: []NotificationWebhook{
+				{URL: "https://example.com/hook", LimitClassDigestTruncatedReasonBucketExactSeverityMinReasons: -1},
+			},
+		},
+	}
+
+	err := NewConfigValidator().Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "notificationWebhooks[0].limitClassDigestTruncatedReasonBucketExactSeverityMinReasons") {
+		t.Fatalf("expected notification webhook limitClassDigestTruncatedReasonBucketExactSeverityMinReasons validation error, got %v", err)
 	}
 }
 

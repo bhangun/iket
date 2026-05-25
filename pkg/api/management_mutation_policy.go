@@ -156,8 +156,12 @@ func isHighImpactMutationAction(action string) bool {
 		"service_delete":         true,
 		"route_delete":           true,
 		"route_set_enabled":      true,
+		"client_disable":         true,
+		"client_enable":          true,
+		"client_update":          true,
 		"plugin_set_enabled":     true,
 		"client_remove":          true,
+		"client_rotate":          true,
 		"restore_revision":       true,
 	}
 	return highImpact[action]
@@ -332,6 +336,10 @@ func (api *ManagementAPI) applyManagedConfigChange(cfg *config.Config, action, l
 	if err := api.enforceMutationPolicy(action, label, note, changeRef); err != nil {
 		return err
 	}
+	return api.applyManagedConfigChangeAfterPolicy(cfg, action, label, note, changeRef, summary)
+}
+
+func (api *ManagementAPI) applyManagedConfigChangeAfterPolicy(cfg *config.Config, action, label, note, changeRef string, summary map[string]interface{}) error {
 	if err := api.gateway.UpdateConfig(cfg); err != nil {
 		return err
 	}

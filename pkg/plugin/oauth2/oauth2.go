@@ -2,6 +2,7 @@ package oauth2
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bhangun/iket/pkg/core/authcontext"
 	coreerrors "github.com/bhangun/iket/pkg/core/errors"
 	"github.com/bhangun/iket/pkg/plugin"
 )
@@ -45,6 +47,10 @@ type Claims struct {
 	Roles    []string          `json:"roles"`
 	Scope    string            `json:"scope"`
 	ClientID string            `json:"client_id"`
+	Issuer   string            `json:"iss,omitempty"`
+	Audience []string          `json:"aud,omitempty"`
+	Expires  int64             `json:"exp,omitempty"`
+	IssuedAt int64             `json:"iat,omitempty"`
 	Custom   map[string]string `json:"custom,omitempty"`
 }
 
@@ -132,8 +138,8 @@ func (o *OAuth2Plugin) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Add claims to request context
 		ctx := context.WithValue(r.Context(), o.claimsContext, claims)
+		ctx = authcontext.WithPrincipal(ctx, principalFromClaims(claims))
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -176,12 +182,14 @@ func (o *OAuth2Plugin) validateToken(r *http.Request) (*Claims, error) {
 		Username: introspection.Username,
 		Scope:    introspection.Scope,
 		ClientID: introspection.ClientID,
+		Issuer:   introspection.Iss,
+		Audience: append([]string(nil), introspection.Aud...),
+		Expires:  introspection.Exp,
+		IssuedAt: introspection.Iat,
 	}
 
-	// Parse scope into roles
-	if introspection.Scope != "" {
-		claims.Roles = strings.Split(introspection.Scope, " ")
-	}
+	// Existing role policies treat OAuth2 scopes as role names.
+	claims.Roles = strings.Fields(introspection.Scope)
 
 	return claims, nil
 }
@@ -223,9 +231,7 @@ func (o *OAuth2Plugin) introspectToken(token string) (*IntrospectionResponse, er
 }
 
 func (o *OAuth2Plugin) getBasicAuth() string {
-	// This should be base64 encoded, but for simplicity we'll use the raw values
-	// In production, you should properly encode the credentials
-	return fmt.Sprintf("%s:%s", o.clientID, o.clientSecret)
+	return base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", o.clientID, o.clientSecret)))
 }
 
 func (o *OAuth2Plugin) writeError(w http.ResponseWriter, message string, statusCode int) {

@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/bhangun/iket/pkg/config"
-	"github.com/golang-jwt/jwt/v4"
 	"golang.org/x/time/rate"
 )
 
@@ -79,42 +78,6 @@ func isRateLimitExemptMethod(policy *config.RateLimitPolicyConfig, method string
 		}
 	}
 	return false
-}
-
-func resolveRouteRateLimitKey(r *http.Request, policy *config.RateLimitPolicyConfig) (string, string) {
-	if policy == nil {
-		return "global", "global"
-	}
-	switch strings.ToLower(strings.TrimSpace(policy.KeyBy)) {
-	case "", "global":
-		return "global", "global"
-	case "ip":
-		return "ip", GetClientIP(r)
-	case "header":
-		headerName := strings.TrimSpace(policy.KeyHeader)
-		headerValue := strings.TrimSpace(r.Header.Get(headerName))
-		if headerValue == "" {
-			headerValue = "__missing__"
-		}
-		return "header", strings.ToLower(headerName) + ":" + headerValue
-	case "api_key":
-		if user, _, ok := r.BasicAuth(); ok && strings.TrimSpace(user) != "" {
-			return "api_key", "basic:" + strings.TrimSpace(user)
-		}
-		if headerValue := strings.TrimSpace(r.Header.Get("X-API-Key")); headerValue != "" {
-			return "api_key", "header:" + headerValue
-		}
-		return "api_key", "__missing__"
-	case "jwt_sub":
-		if claims, ok := r.Context().Value(jwtClaimsKey).(jwt.MapClaims); ok {
-			if sub := strings.TrimSpace(fmt.Sprintf("%v", claims["sub"])); sub != "" && sub != "<nil>" {
-				return "jwt_sub", sub
-			}
-		}
-		return "jwt_sub", "__missing__"
-	default:
-		return "global", "global"
-	}
 }
 
 func (g *Gateway) routeRateLimitBucket(route config.RouterConfig, policy *config.RateLimitPolicyConfig, bucketKey string) *routeRateLimitBucket {

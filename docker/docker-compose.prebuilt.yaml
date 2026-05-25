@@ -28,8 +28,8 @@ services:
 
   cli:
     image: bhangun/iket:latest
-    container_name: iket-cli
-    entrypoint: ["iket-cli"]
+    container_name: iket-control
+    entrypoint: ["iket"]
     environment:
       - TZ=UTC
       - IKET_SERVER_URL=https://iket:8443
